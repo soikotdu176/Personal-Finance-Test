@@ -466,8 +466,9 @@ dialog.modal[open]::backdrop { opacity: 1; }
 
 @media (max-width: 768px) {
   :root { --bottom-h: 64px; }
-  .sidebar { transform: translateX(-102%); box-shadow: var(--shadow-lg); }
+  .sidebar { z-index: 60; transform: translateX(-102%); box-shadow: var(--shadow-lg); }
   .sidebar.open { transform: none; }
+  .scrim { z-index: 55; }
   .main { margin-left: 0; }
   .icon-btn.menu-toggle { display: grid; margin-left: -8px; }
   .topbar { padding: 0 14px; padding-top: env(safe-area-inset-top, 0px); gap: 8px; min-height: calc(64px + env(safe-area-inset-top, 0px)); }
@@ -579,7 +580,6 @@ dialog.modal[open]::backdrop { opacity: 1; }
   .mobile-period-picker { position: relative; min-width: 0; }
   .mobile-period-picker::after { content: "▾"; position: absolute; top: 50%; right: 12px; transform: translateY(-52%); pointer-events: none; font-size: 12px; color: #555879; }
   .mobile-period-picker select { appearance: none; width: 100%; min-width: 0; min-height: 36px; padding: 0 28px 0 10px; border: 0; border-radius: 20px; color: #343653; background: rgba(255,255,255,.58); font-size: 11px; font-weight: 800; text-align: center; }
-  .mobile-overflow-action { font-size: 23px; line-height: 1; }
   .mobile-balance { display: grid; justify-items: center; padding: 14px 0 10px; }
   .mobile-balance span { color: #626583; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
   .mobile-balance strong { margin-top: 1px; color: #292b4a; font-size: clamp(29px, 8vw, 39px); font-weight: 800; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
@@ -671,7 +671,7 @@ dialog.modal[open]::backdrop { opacity: 1; }
   .mobile-calendar-transactions { display: grid; gap: 7px; }
   .mobile-calendar-transactions .mobile-transaction-card { margin-bottom: 0; }
   .mobile-calendar-empty { padding: 21px 12px; border: 1px dashed var(--line-strong); border-radius: 16px; color: var(--muted); text-align: center; font-size: 11px; }
-  .mobile-speed-dial:not(.hidden) { position: fixed; inset: 0; z-index: 90; pointer-events: none; }
+  .mobile-speed-dial:not(.hidden) { position: fixed; inset: 0; z-index: 48; pointer-events: none; }
   .mobile-speed-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; opacity: 0; background: rgba(17, 24, 45, .35); backdrop-filter: blur(0); -webkit-backdrop-filter: blur(0); pointer-events: none; transition: opacity .32s ease, backdrop-filter .32s ease; }
   .mobile-speed-dial.open .mobile-speed-backdrop { opacity: 1; backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); pointer-events: auto; }
   .mobile-speed-toggle { position: absolute; right: 20px; bottom: calc(var(--bottom-h) + 27px + env(safe-area-inset-bottom, 0px)); z-index: 2; width: 58px; height: 58px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; color: #fff; background: linear-gradient(145deg, #5474f3, #3f56d9); box-shadow: 0 10px 25px rgba(62, 86, 211, .4); pointer-events: auto; transition: transform .42s var(--spring), background .25s ease, box-shadow .25s ease; }

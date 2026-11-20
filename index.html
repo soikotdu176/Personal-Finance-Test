@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=7">
+  <link rel="stylesheet" href="styles.css?v=8">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -49,6 +49,7 @@
     <defs>
       <symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></symbol>
       <symbol id="i-calendar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
       <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
       <symbol id="i-scale" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M6 21h12M5 7h14M5 7l-3 7a3.2 3.2 0 0 0 6 0zM19 7l-3 7a3.2 3.2 0 0 0 6 0z"/></symbol>
       <symbol id="i-backup" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
@@ -91,7 +92,7 @@
 
   <main class="main">
     <header class="topbar">
-      <button class="icon-btn menu-toggle" id="menuToggle" aria-label="Toggle menu"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg></button>
+      <button class="icon-btn menu-toggle" id="menuToggle" aria-label="Toggle menu" aria-controls="sidebar" aria-expanded="false"><svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg></button>
       <div class="title-block">
         <h1 id="pageTitle">Dashboard</h1>
         <p id="pageSubtitle">Financial overview</p>
@@ -111,7 +112,7 @@
             <button type="button" class="mobile-header-action" id="mobileQuickAction" aria-label="Open quick actions"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button>
             <label class="mobile-period-picker"><span class="sr-only">Balance period</span><select id="mobilePeriodSelect" aria-label="Balance period"></select></label>
             <button type="button" class="mobile-header-action" id="mobileChartsAction" aria-label="View analytics"><svg class="ic" aria-hidden="true"><use href="#i-up"/></svg></button>
-            <button type="button" class="mobile-header-action mobile-overflow-action" id="mobileMoreAction" aria-label="More actions">⋮</button>
+            <button type="button" class="mobile-header-action" id="mobileMoreAction" aria-label="Open navigation menu" aria-controls="sidebar" aria-expanded="false"><svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg></button>
           </div>
           <div class="mobile-balance"><span>Net Balance</span><strong id="mobileNetBalance">৳0.00</strong></div>
           <div class="mobile-period-strip" id="mobilePeriodStrip" aria-label="Choose a balance period"></div>
@@ -129,7 +130,7 @@
         <header class="mobile-calendar-header">
           <div class="mobile-calendar-title-row">
             <div><span class="mobile-calendar-eyebrow">Calendar</span><h2>Financial calendar</h2></div>
-            <button type="button" class="mobile-header-action" id="mobileCalendarMore" aria-label="Open navigation menu">⋮</button>
+            <button type="button" class="mobile-header-action" id="mobileCalendarMore" aria-label="Open navigation menu" aria-controls="sidebar" aria-expanded="false"><svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg></button>
           </div>
           <label class="mobile-calendar-year-field">Financial Year
             <select id="mobileCalendarYear" aria-label="Financial Year"></select>
@@ -427,6 +428,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=7"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>

@@ -604,6 +604,28 @@ function placePills(instant=false){
 function closeDrawer(){
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('scrim').classList.remove('show');
+  ['menuToggle','mobileMoreAction','mobileCalendarMore'].forEach(id=>{
+    const button=document.getElementById(id);
+    if(button){
+      button.setAttribute('aria-expanded','false');
+      if(id!=='menuToggle')button.setAttribute('aria-label','Open navigation menu');
+    }
+  });
+}
+function setDrawerOpen(open){
+  if(open)closeMobileSpeedDial();
+  document.getElementById('sidebar').classList.toggle('open',open);
+  document.getElementById('scrim').classList.toggle('show',open);
+  ['menuToggle','mobileMoreAction','mobileCalendarMore'].forEach(id=>{
+    const button=document.getElementById(id);
+    if(button){
+      button.setAttribute('aria-expanded',String(open));
+      if(id!=='menuToggle')button.setAttribute('aria-label',open?'Close navigation menu':'Open navigation menu');
+    }
+  });
+}
+function toggleDrawer(){
+  setDrawerOpen(!document.getElementById('sidebar').classList.contains('open'));
 }
 function showPage(page){
   if(!PAGE_TITLES[page])return;
@@ -642,13 +664,9 @@ function bindNavigation(){
   document.querySelectorAll('[data-page]').forEach(button=>{
     button.onclick=()=>showPage(button.dataset.page);
   });
-  const toggle=()=>{
-    const sidebar=$el('sidebar');
-    const open=!sidebar.classList.contains('open');
-    sidebar.classList.toggle('open',open);
-    $el('scrim').classList.toggle('show',open);
-  };
-  $el('menuToggle').onclick=toggle;
+  $el('menuToggle').onclick=toggleDrawer;
+  $el('mobileMoreAction').onclick=toggleDrawer;
+  $el('mobileCalendarMore').onclick=toggleDrawer;
   $el('scrim').onclick=closeDrawer;
   window.addEventListener('resize',()=>{
     updateMobileMode();
@@ -690,8 +708,6 @@ function bindGlobalActions(){
   $el('incomeForm').onsubmit=saveIncomeRecord;
   $el('addIncomeBtn').onclick=()=>openIncomeModal();
   $el('mobileQuickAction').onclick=openMobileSpeedDial;
-  $el('mobileMoreAction').onclick=()=>{$el('menuToggle').click()};
-  $el('mobileCalendarMore').onclick=()=>{$el('menuToggle').click()};
   $el('mobileSpeedToggle').onclick=toggleMobileSpeedDial;
   $el('mobileSpeedBackdrop').onclick=closeMobileSpeedDial;
   $el('mobilePeriodSelect').onchange=e=>{mobilePeriodKey=e.target.value;renderMobileDashboard(mobileNetBalance)};
@@ -1055,6 +1071,7 @@ const isMobileViewport=()=>window.matchMedia('(max-width: 768px)').matches;
 
 function updateMobileMode(){
   const mobile=isMobileViewport();
+  if(!mobile)closeDrawer();
   if(!mobile&&mobileCalendarOpen){
     mobileCalendarOpen=false;
     document.getElementById('mobileCalendarPage').classList.add('hidden');
