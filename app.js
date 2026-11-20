@@ -851,6 +851,7 @@ function bindGlobalActions(){
   const wipe=$el('deleteAllData');
   if(wipe)wipe.onclick=deleteAllLocalData;
   bindPdfViewer();
+  bindCalculator();
 }
 
 /**
@@ -1749,6 +1750,316 @@ async function replaceDocumentFile(event){
 }
 
 /* ==========================================================================
+   Amount calculator - explicit tokenizer + recursive-descent parser.
+   Every amount keystroke is parsed here; eval() is never used, so a bad
+   expression can only produce an inline error message, never run code.
+   ========================================================================== */
+class CalcError extends Error {}
+
+/* ---------- Safe arithmetic core (pure functions, DOM-free) ---------- */
+/** Evaluates +,-,*,/ with normal precedence. Incomplete input ("12+") previews as 12. */
+function calcEvaluate(expression){
+  const source=String(expression??'').replace(/\s+/g,'');
+  if(!source)return {ok:true,value:0};
+  const tokens=[];
+  for(let index=0;index<source.length;){
+    const char=source[index];
+    if((char>='0'&&char<='9')||char==='.'){
+      let literal='';
+      while(index<source.length&&((source[index]>='0'&&source[index]<='9')||source[index]==='.'))literal+=source[index++];
+      if((literal.match(/\./g)||[]).length>1)return {ok:false,error:'Invalid number'};
+      const value=Number(literal);
+      if(!Number.isFinite(value))return {ok:false,error:'Invalid number'};
+      tokens.push({type:'number',value});
+      continue;
+    }
+    if(char==='+'||char==='-'||char==='*'||char==='/'||char==='×'||char==='÷'){
+      tokens.push({type:'operator',value:char==='×'?'*':char==='÷'?'/':char});
+      index++;
+      continue;
+    }
+    return {ok:false,error:'Unsupported character'};
+  }
+  if(!tokens.length)return {ok:true,value:0};
+  let position=0;
+  const peek=()=>tokens[position];
+  const parseFactor=()=>{
+    const token=tokens[position];
+    if(!token)throw new CalcError('Incomplete expression');
+    if(token.type==='operator'&&(token.value==='-'||token.value==='+')){
+      position++;
+      const value=parseFactor();
+      return token.value==='-'?-value:value;
+    }
+    if(token.type!=='number')throw new CalcError('Incomplete expression');
+    position++;
+    return token.value;
+  };
+  const parseTerm=()=>{
+    let value=parseFactor();
+    while(peek()&&peek().type==='operator'&&(peek().value==='*'||peek().value==='/')){
+      const operator=tokens[position++].value;
+      if(!peek())return value;
+      const operand=parseFactor();
+      if(operator==='/'){if(operand===0)throw new CalcError('Cannot divide by zero');value/=operand}
+      else value*=operand;
+    }
+    return value;
+  };
+  const parseExpression=()=>{
+    let value=parseTerm();
+    while(peek()&&peek().type==='operator'&&(peek().value==='+'||peek().value==='-')){
+      const operator=tokens[position++].value;
+      if(!peek())return value;
+      const operand=parseTerm();
+      value=operator==='+'?value+operand:value-operand;
+    }
+    return value;
+  };
+  try{
+    const value=parseExpression();
+    if(peek())return {ok:false,error:'Incomplete expression'};
+    if(!Number.isFinite(value))return {ok:false,error:'Result is too large'};
+    return {ok:true,value};
+  }catch(error){
+    return {ok:false,error:error instanceof CalcError?error.message:'Invalid expression'};
+  }
+}
+/** Rounds to 2 decimals (both amount inputs use step="0.01") and drops trailing zeros. */
+function calcFormat(value){
+  if(!Number.isFinite(value))return '0';
+  const rounded=Math.round((value+Number.EPSILON)*100)/100;
+  if(rounded===0)return '0';
+  return rounded.toFixed(2).replace(/\.00$/,'').replace(/(\.\d)0$/,'$1');
+}
+
+/* ---------- Calculator popover (UI) ---------- */
+const calcState={target:'',expression:'',result:0,evaluated:false,equalsShown:false};
+
+function calcTargetInput(){
+  return calcState.target?document.getElementById(calcState.target):null;
+}
+/** Grouped number for the display only - the field always receives a plain numeric string. */
+function calcDisplay(value){
+  const plain=calcFormat(value);
+  const number=Number(plain);
+  if(!Number.isFinite(number))return '0';
+  try{return number.toLocaleString(state.settings.locale||'en-BD',{maximumFractionDigits:2})}
+  catch(error){return plain}
+}
+function calcPrettyExpression(expression){
+  return String(expression).replace(/\//g,' ÷ ').replace(/\*/g,' × ').replace(/\+/g,' + ').replace(/-/g,' − ').replace(/\s+/g,' ').trim();
+}
+function updateCalcDisplay(){
+  const pop=document.getElementById('calcPopover');
+  const expressionEl=document.getElementById('calcExpression');
+  const valueEl=document.getElementById('calcValue');
+  if(!pop||!expressionEl||!valueEl)return;
+  let expressionText='';
+  let valueText='0';
+  let error='';
+  if(calcState.evaluated){
+    expressionText=calcState.expression?`${calcPrettyExpression(calcState.expression)}${calcState.equalsShown?' =':''}`:'';
+    valueText=calcDisplay(calcState.result);
+  }else if(calcState.expression){
+    const outcome=calcEvaluate(calcState.expression);
+    expressionText=calcPrettyExpression(calcState.expression);
+    if(outcome.ok)valueText=calcDisplay(outcome.value);
+    else if(outcome.error==='Incomplete expression')valueText='0';   // "12+" previews as 12
+    else{valueText=outcome.error;error=outcome.error}
+  }
+  expressionEl.textContent=expressionText;
+  valueEl.textContent=valueText;
+  valueEl.classList.toggle('error',!!error);
+  const apply=document.getElementById('calcApply');
+  if(apply)apply.disabled=!!error;
+}
+/** Keeps the pad attached to its field and inside the visible viewport (mobile included). */
+function positionCalcPopover(){
+  const pop=document.getElementById('calcPopover');
+  const input=calcTargetInput();
+  if(!pop||!pop.open||!input)return;
+  const viewport=window.visualViewport;
+  const viewWidth=viewport?viewport.width:window.innerWidth;
+  const viewHeight=viewport?viewport.height:window.innerHeight;
+  const viewLeft=viewport?viewport.offsetLeft:0;
+  const viewTop=viewport?viewport.offsetTop:0;
+  const margin=8;
+  const width=pop.offsetWidth||268;
+  const height=pop.offsetHeight||340;
+  const rect=input.getBoundingClientRect();
+  const left=Math.min(Math.max(rect.right-width,viewLeft+margin),viewLeft+viewWidth-width-margin);
+  let top=rect.bottom+margin;
+  if(top+height>viewTop+viewHeight-margin){
+    const above=rect.top-height-margin;
+    top=above>=viewTop+margin?above:viewTop+margin;
+  }
+  // Final clamp: a field near the bottom can otherwise leave the pad half off-screen.
+  const maxTop=viewTop+viewHeight-height-margin;
+  top=maxTop>=viewTop+margin?Math.min(top,maxTop):viewTop+margin;
+  pop.style.left=`${Math.round(left)}px`;
+  pop.style.top=`${Math.round(top)}px`;
+}
+function openCalculator(targetId,trigger){
+  const pop=document.getElementById('calcPopover');
+  const input=document.getElementById(targetId);
+  if(!pop||!input)return;
+  if(pop.open&&calcState.target===targetId){closeCalculator();return}
+  if(pop.open)pop.close();
+  const button=trigger||document.querySelector(`[data-calc-target="${targetId}"]`);
+  const current=input.value.trim();
+  const numeric=Number(current);
+  const hasValue=current!==''&&Number.isFinite(numeric);
+  calcState.target=targetId;
+  calcState.expression=hasValue?calcFormat(numeric):'';
+  calcState.result=hasValue?Number(calcFormat(numeric)):0;
+  calcState.evaluated=hasValue;              // a first digit replaces the stored amount
+  calcState.equalsShown=false;
+  document.querySelectorAll('.calc-trigger[aria-expanded="true"]').forEach(item=>item.setAttribute('aria-expanded','false'));
+  if(button)button.setAttribute('aria-expanded','true');
+  updateCalcDisplay();
+  // A field near the bottom of a scrolling modal must be visible before the pad is anchored.
+  try{input.scrollIntoView({block:'nearest',inline:'nearest'})}catch(error){}
+  pop.showModal();
+  positionCalcPopover();
+  pop.focus({preventScroll:true});
+}
+function closeCalculator(){
+  const pop=document.getElementById('calcPopover');
+  if(pop&&pop.open)pop.close();
+}
+
+/* ---------- Calculator input handling ---------- */
+function applyCalcValue(){
+  const input=calcTargetInput();
+  if(!input)return;
+  let value;
+  if(calcState.evaluated)value=calcState.result;
+  else{
+    const outcome=calcEvaluate(calcState.expression);
+    if(!outcome.ok)return;                   // divide-by-zero stays visible, nothing is written
+    value=outcome.value;
+  }
+  if(!Number.isFinite(value))return;
+  const text=calcFormat(value);
+  closeCalculator();
+  input.value=text;
+  // Dependent form logic listens for these: amountTouched, validation, summaries...
+  input.dispatchEvent(new Event('input',{bubbles:true}));
+  input.dispatchEvent(new Event('change',{bubbles:true}));
+  window.setTimeout(()=>{try{input.focus({preventScroll:true})}catch(error){input.focus()}},0);
+}
+function calcPress(key){
+  if(key==='clear'){
+    Object.assign(calcState,{expression:'',result:0,evaluated:false,equalsShown:false});
+    updateCalcDisplay();
+    return;
+  }
+  if(key==='back'){
+    if(calcState.evaluated){calcState.expression=calcFormat(calcState.result);calcState.evaluated=false}
+    calcState.expression=calcState.expression.slice(0,-1);
+    calcState.equalsShown=false;
+    updateCalcDisplay();
+    return;
+  }
+  if(key==='equals'){
+    const outcome=calcEvaluate(calcState.expression);
+    if(!outcome.ok){calcState.evaluated=false;calcState.equalsShown=false;updateCalcDisplay();return}
+    calcState.result=outcome.value;
+    calcState.evaluated=true;
+    calcState.equalsShown=!!calcState.expression;
+    updateCalcDisplay();
+    return;
+  }
+  if(key==='.'){
+    if(calcState.evaluated){calcState.expression='0.';calcState.evaluated=false}
+    else{
+      const segment=(calcState.expression.match(/(?:^|[+\-*/])(\d*\.?\d*)$/)||[])[1]||'';
+      if(segment.includes('.'))return;
+      calcState.expression+=segment===''?'0.':'.';
+    }
+    calcState.equalsShown=false;
+    updateCalcDisplay();
+    return;
+  }
+  if(/^[0-9]$/.test(key)){
+    if(calcState.evaluated){calcState.expression='';calcState.evaluated=false}
+    if(calcState.expression.length>=32)return;
+    if(calcState.expression==='0')calcState.expression='';
+    calcState.expression+=key;
+    calcState.equalsShown=false;
+    updateCalcDisplay();
+    return;
+  }
+  if(key==='+'||key==='-'||key==='*'||key==='/'){
+    if(calcState.evaluated){calcState.expression=calcFormat(calcState.result);calcState.evaluated=false}
+    if(!calcState.expression){if(key==='-'){calcState.expression='-';calcState.equalsShown=false;updateCalcDisplay()}return}
+    if(calcState.expression==='-'&&key!=='-')return;
+    const last=calcState.expression.slice(-1);
+    if(last==='+'||last==='-'||last==='*'||last==='/'){
+      if(key==='-'&&(last==='*'||last==='/'))calcState.expression+='-';
+      else calcState.expression=calcState.expression.slice(0,-1)+key;
+    }else{
+      calcState.expression+=key;
+    }
+    calcState.equalsShown=false;
+    updateCalcDisplay();
+  }
+}
+function handleCalcKeydown(event){
+  if(event.key==='Enter'){
+    if(event.target.closest&&event.target.closest('button'))return;   // the focused button applies itself
+    event.preventDefault();
+    applyCalcValue();
+    return;
+  }
+  if(event.key==='Backspace'){event.preventDefault();calcPress('back');return}
+  if(event.key==='Delete'){event.preventDefault();calcPress('clear');return}
+  if(event.key==='Escape')return;                                    // the dialog closes itself
+  if(/^[0-9]$/.test(event.key)){event.preventDefault();calcPress(event.key);return}
+  if(event.key==='.'||event.key===','){event.preventDefault();calcPress('.');return}
+  if(event.key==='='){event.preventDefault();calcPress('equals');return}
+  if(event.key==='+'||event.key==='-'||event.key==='*'||event.key==='/'||event.key==='x'||event.key==='X'){
+    event.preventDefault();
+    calcPress(event.key==='x'||event.key==='X'?'*':event.key);
+  }
+}
+function bindCalculator(){
+  const pop=document.getElementById('calcPopover');
+  if(!pop)return;
+  // Delegated so the trigger works on every generated form.
+  document.addEventListener('click',event=>{
+    const trigger=event.target.closest('[data-calc-target]');
+    if(!trigger)return;
+    event.preventDefault();
+    openCalculator(trigger.dataset.calcTarget,trigger);
+  });
+  pop.addEventListener('click',event=>{
+    if(event.target.closest('[data-calc-close]')){closeCalculator();return}
+    if(event.target===pop){closeCalculator();return}                 // backdrop click
+    if(event.target.closest('#calcApply')){applyCalcValue();return}
+    const key=event.target.closest('[data-calc-key]');
+    if(key)calcPress(key.dataset.calcKey);
+  });
+  pop.addEventListener('keydown',handleCalcKeydown);
+  pop.addEventListener('close',()=>{
+    if(pop.open)return;                       // a close() used for re-targeting must not clear the new state
+    document.querySelectorAll('.calc-trigger[aria-expanded="true"]').forEach(item=>item.setAttribute('aria-expanded','false'));
+  });
+  const reposition=()=>{if(pop.open)positionCalcPopover()};
+  window.addEventListener('resize',reposition);
+  window.addEventListener('scroll',reposition,true);                 // capture: the modal body scrolls
+  if(window.visualViewport){
+    window.visualViewport.addEventListener('resize',reposition);
+    window.visualViewport.addEventListener('scroll',reposition);
+  }
+  ['recordModal','incomeModal'].forEach(id=>{
+    const modal=document.getElementById(id);
+    if(modal)modal.addEventListener('close',()=>closeCalculator());
+  });
+}
+
+/* ==========================================================================
    Add / Edit record modal - fields adapt to Type > Category > Subcategory
    ========================================================================== */
 let formState={draft:{},schema:GENERIC_SCHEMA,amountTouched:false,yearTouched:false};
@@ -1833,7 +2144,7 @@ function openRecordModal(id=null){
     <div class="form-section" id="subSectionTitle">Details</div>
     <div class="sub-fields" id="subFields"></div>
     <label class="full"><span id="detailsLabelText">Details / Description</span><textarea id="recordDetails" rows="3">${esc(record?.details||record?.description||'')}</textarea><span class="hint" id="detailsHint"></span></label>
-    <label>Amount / Balance *<input id="recordAmount" type="number" step="0.01" inputmode="decimal" required value="${esc(amountValue===0?'0':amountValue)}" placeholder="0.00"><span class="hint" id="amountHint"></span></label>
+    <label>Amount / Balance *<span class="calc-field"><input id="recordAmount" type="number" step="0.01" inputmode="decimal" required value="${esc(amountValue===0?'0':amountValue)}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="recordAmount" aria-label="Open calculator for Amount / Balance" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button></span><span class="hint" id="amountHint"></span></label>
     <label>Document (PDF)<input id="recordDocument" type="file" accept=".pdf,application/pdf" multiple><span class="hint">You can attach more than one PDF.</span></label>
     <div class="doc-manager" id="docManager"><h4>Attached documents</h4><div class="doc-list" id="docManagerList"></div></div>
   </div>`;
@@ -3532,7 +3843,7 @@ function openIncomeModal(id=null,defaults={}){
     <label>Category *<select id="incomeCategorySelect" required></select></label>
     <label>Subcategory *<select id="incomeSubcategorySelect" required></select></label>
     <label>Account / Payment Method<select id="incomeAccount">${ACCOUNTS.map(a=>`<option value="${esc(a)}" ${a===(record?.account||'Cash in Hand')?'selected':''}>${esc(a)}</option>`).join('')}</select></label>
-    <label>Amount (BDT) *<input id="incomeAmount" type="number" step="0.01" min="0" inputmode="decimal" required value="${esc(record?record.amount:'')}" placeholder="0.00"></label>
+    <label>Amount (BDT) *<span class="calc-field"><input id="incomeAmount" type="number" step="0.01" min="0" inputmode="decimal" required value="${esc(record?record.amount:'')}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="incomeAmount" aria-label="Open calculator for Amount (BDT)" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button></span></label>
     <label class="full">Description / Notes<textarea id="incomeDescription" rows="2">${esc(record?.description||'')}</textarea></label>
     <label class="full">Receipt / Voucher (PDF)<input id="incomeDocument" type="file" accept=".pdf,application/pdf"><span class="hint">Optional receipt or voucher PDF.</span></label>
     <div class="doc-manager full" id="incomeDocManager"><h4>Attached receipt</h4><div class="doc-list" id="incomeDocManagerList"></div></div>

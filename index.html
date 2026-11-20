@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=12">
+  <link rel="stylesheet" href="styles.css?v=13">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -66,6 +66,7 @@
       <symbol id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8M15 7h6v6"/></symbol>
       <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l6 6 4-4 8 8M15 17h6v-6"/></symbol>
       <symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></symbol>
+      <symbol id="i-calc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2.5" width="16" height="19" rx="2.5"/><path d="M8 6.5h8M8 11h.01M12 11h.01M16 11h.01M8 14.5h.01M12 14.5h.01M16 14.5h.01M8 18h.01M12 18h.01M16 18h.01"/></symbol>
     </defs>
   </svg>
 
@@ -434,8 +435,41 @@
     <div class="modal-foot"><button class="btn" data-close-modal>Cancel</button><button class="btn btn-primary" id="confirmRestore">Restore</button></div>
   </dialog>
 
+  <!-- Amount calculator: a top-layer dialog so it is never clipped by a modal's scroll body. -->
+  <dialog id="calcPopover" class="calc-popover" aria-labelledby="calcTitle" tabindex="-1">
+    <div class="calc-head">
+      <strong id="calcTitle">Calculator</strong>
+      <button type="button" class="calc-close" data-calc-close aria-label="Close calculator">×</button>
+    </div>
+    <div class="calc-display">
+      <div class="calc-expression" id="calcExpression"></div>
+      <div class="calc-value" id="calcValue" aria-live="polite">0</div>
+    </div>
+    <div class="calc-pad">
+      <button type="button" class="calc-key clear" data-calc-key="clear" aria-label="Clear all">C</button>
+      <button type="button" class="calc-key" data-calc-key="back" aria-label="Backspace">⌫</button>
+      <button type="button" class="calc-key operator" data-calc-key="/" aria-label="Divide">÷</button>
+      <button type="button" class="calc-key operator" data-calc-key="*" aria-label="Multiply">×</button>
+      <button type="button" class="calc-key" data-calc-key="7">7</button>
+      <button type="button" class="calc-key" data-calc-key="8">8</button>
+      <button type="button" class="calc-key" data-calc-key="9">9</button>
+      <button type="button" class="calc-key operator" data-calc-key="-" aria-label="Minus">−</button>
+      <button type="button" class="calc-key" data-calc-key="4">4</button>
+      <button type="button" class="calc-key" data-calc-key="5">5</button>
+      <button type="button" class="calc-key" data-calc-key="6">6</button>
+      <button type="button" class="calc-key operator" data-calc-key="+" aria-label="Plus">+</button>
+      <button type="button" class="calc-key" data-calc-key="1">1</button>
+      <button type="button" class="calc-key" data-calc-key="2">2</button>
+      <button type="button" class="calc-key" data-calc-key="3">3</button>
+      <button type="button" class="calc-key equals" data-calc-key="equals" aria-label="Equals">=</button>
+      <button type="button" class="calc-key zero" data-calc-key="0">0</button>
+      <button type="button" class="calc-key" data-calc-key="." aria-label="Decimal point">.</button>
+    </div>
+    <div class="calc-foot"><button type="button" class="btn btn-primary calc-apply" id="calcApply">Use Amount</button></div>
+  </dialog>
+
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>
