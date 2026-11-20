@@ -22,6 +22,8 @@ committed or deployed.
 ## Highlights
 - New "Income & Expenses" page: fiscal-year (Jul–Jun) + month filters, cascading Major Head → Category → Subcategory, Excel-style category summary, Excel/PDF exports, and a receipt-PDF attachment per transaction.
 - The Dashboard keeps every website section (filters, nine KPI cards, all six charts, the recent income/expense widget and the records table) on desktop and mobile. On small screens the mobile overview is an extra summary above that content, never a replacement for it.
+- Mobile overview starts with a **Financial Year** pill: choosing a year (July–June) rebuilds the month strip (`JUL 26` … `JUN 27`), the period picker and NET BALANCE (assets − liabilities as of that year) and jumps to the latest month that has activity.
+- Mobile dashboard filters are a compact two-column card with ellipsised labels, slimmer date fields side by side and a subtle "Clear Filters" pill; the desktop filter row is unchanged.
 - First launch convenience: if the database is empty and a `Project/` folder with the source workbooks is next to `index.html`, the app imports it once through the normal migration pipeline. Existing data is never replaced, and deployments without `Project/` simply skip this step.
 - Dashboard now shows Total Income, Total Expenses and Net Cash Flow KPIs, "Income vs Expenses" and "Expenses by Major Head" charts, plus a "Recent Income & Expenses" widget.
 - Add/Edit transaction modal with cascading classification dropdowns derived from the master Income/Expense tree (editable in Settings → Categories & Subcategories).
@@ -78,4 +80,4 @@ git push --force origin main
   `git for-each-ref --format="%(refname)" refs/original | xargs -n1 git update-ref -d` then `git gc --prune=now`.
 
 ## Version
-App `2026-11-20-v6` · database schema `v4` · service worker `v9.0.0`.
+App `2026-11-20-v7` · database schema `v4` · service worker `v10.0.0`.

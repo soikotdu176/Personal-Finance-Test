@@ -8,7 +8,7 @@
 
 const DB_NAME = 'AssetBookDB';
 const DB_VERSION = 4;                       // v4: migration history batches (migrationId on imported rows)
-const APP_VERSION = '2026-11-20-v6';
+const APP_VERSION = '2026-11-20-v7';
 const DATA_VERSION_KEY = 'assetbook-data-version';
 let db;
 let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [] };
@@ -696,7 +696,7 @@ function showPage(page){
   if(page==='balance')renderBalance();
   if(page==='backup')renderBackupHistory();
   if(page==='settings')renderSettings();
-  if(page==='dashboard'&&isMobileViewport())renderMobileDashboard(mobileNetBalance);
+  if(page==='dashboard'&&isMobileViewport())renderMobileDashboard();
   playEnter(panel);
   placePills();
   window.scrollTo({top:0,behavior:reducedMotion()?'auto':'smooth'});
@@ -751,13 +751,19 @@ function bindGlobalActions(){
   $el('mobileQuickAction').onclick=openMobileSpeedDial;
   $el('mobileSpeedToggle').onclick=toggleMobileSpeedDial;
   $el('mobileSpeedBackdrop').onclick=closeMobileSpeedDial;
-  $el('mobilePeriodSelect').onchange=e=>{mobilePeriodKey=e.target.value;mobilePeriodChosen=true;renderMobileDashboard(mobileNetBalance)};
+  $el('mobilePeriodSelect').onchange=e=>{mobilePeriodKey=e.target.value;mobilePeriodChosen=true;renderMobileDashboard()};
   $el('mobilePeriodStrip').onclick=e=>{
     const period=e.target.closest('[data-mobile-period]');
     if(!period)return;
     mobilePeriodKey=period.dataset.mobilePeriod;
     mobilePeriodChosen=true;
-    renderMobileDashboard(mobileNetBalance);
+    renderMobileDashboard();
+  };
+  $el('mobileDashboardYear').onchange=e=>{
+    mobileDashboardYear=normIncomeYear(e.target.value);
+    mobilePeriodKey='';
+    mobilePeriodChosen=false;
+    renderMobileDashboard();
   };
   $el('mobileChartsAction').onclick=()=>{
     const grid=document.querySelector('#dashboardPage > .charts-grid');
@@ -1103,7 +1109,7 @@ function dashboardBalanceRecords(){
 const kpiPrev=[];
 let mobilePeriodKey='';
 let mobilePeriodChosen=false;
-let mobileNetBalance=0;
+let mobileDashboardYear='';
 let mobileQuickShortcuts=[];
 let mobileCalendarOpen=false;
 let mobileCalendarYear='';
@@ -1136,7 +1142,7 @@ function updateMobileMode(){
   const speedDial=document.getElementById('mobileSpeedDial');
   if(mobile)speedDial.classList.remove('hidden');
   else{closeMobileSpeedDial();speedDial.classList.add('hidden')}
-  if(dashboardVisible)renderMobileDashboard(mobileNetBalance);
+  if(dashboardVisible)renderMobileDashboard();
   if(calendarVisible)renderMobileCalendar();
 }
 function openMobileCalendar(){
@@ -1292,48 +1298,51 @@ function renderMobileCalendar(){
   const activeMonth=document.querySelector(`#mobileCalendarMonths [data-calendar-month="${selected.key}"]`);
   if(activeMonth)requestAnimationFrame(()=>activeMonth.scrollIntoView({block:'nearest',inline:'center',behavior:reducedMotion()?'auto':'smooth'}));
 }
-function mobilePeriods(){
-  const now=new Date();
-  const periods=new Map();
-  const push=(year,month)=>{
-    const key=`${year}-${String(month+1).padStart(2,'0')}`;
-    if(periods.has(key))return;
-    const end=new Date(year,month+1,0);
-    const isoEnd=`${key}-${String(end.getDate()).padStart(2,'0')}`;
-    const date=new Date(year,month,1);
-    periods.set(key,{key,from:`${key}-01`,to:isoEnd,date,label:date.toLocaleDateString(undefined,{month:'short',year:'2-digit'}).toUpperCase(),name:date.toLocaleDateString(undefined,{month:'long'}),title:date.toLocaleDateString(undefined,{month:'long',year:'numeric'})});
-  };
-  // Rolling window around today ...
-  for(let i=0;i<5;i++)push(now.getFullYear(),now.getMonth()+i-2);
-  // ... plus every month that actually holds transactions, so a period with data is
-  // never missing from the summary and the first view is not left showing zeroes.
-  state.incomeExpenses.forEach(record=>{
-    const match=/^(\d{4})-(\d{2})/.exec(String(record.date||''));
-    if(match)push(Number(match[1]),Number(match[2])-1);
-  });
-  return [...periods.values()].sort((a,b)=>a.key.localeCompare(b.key));
+/** Net worth (assets - liabilities) as of the end of `year`, honouring the dashboard filters. */
+function mobileYearBalance(year){
+  const records=effectiveRecordsForBalance(dashboardBaseRecords(),year);
+  return sumAmount(records.filter(record=>record.type==='Asset'))-sumAmount(records.filter(record=>record.type==='Liability'));
 }
-/** Latest month that has transactions, else the current month, else the newest period. */
-function mobileDefaultPeriod(periods){
-  const active=[...periods].reverse().find(period=>state.incomeExpenses.some(record=>record.date&&record.date>=period.from&&record.date<=period.to));
-  if(active)return active;
-  const now=new Date(),currentKey=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
-  return periods.find(period=>period.key===currentKey)||periods[periods.length-1];
+/** Months of the selected Financial Year (July -> June) with a 2-digit year label (JUL 26 ... JUN 27). */
+function mobileYearMonths(year){
+  return mobileCalendarMonths(year).map(month=>({...month,label:String(month.label||'').toUpperCase()}));
 }
-function renderMobileDashboard(netBalance=mobileNetBalance){
+/** Default month inside a Financial Year: latest with activity, else the current month, else July. */
+function mobileDefaultMonthKey(months){
+  const current=todayISO().slice(0,7);
+  const active=[...months].reverse().find(month=>state.incomeExpenses.some(record=>record.date&&record.date>=month.from&&record.date<=month.to));
+  if(active)return active.key;
+  return months.find(month=>month.key===current)?.key||months[0].key;
+}
+function renderMobileDashboard(){
   if(!isMobileViewport())return;
-  mobileNetBalance=netBalance;
-  const periods=mobilePeriods();
-  if(!periods.length)return;
-  // Until the user picks a period, follow the latest month that actually has activity so the
-  // summary is not left on an empty current month while transactions exist elsewhere.
-  if(!mobilePeriodChosen||!periods.some(p=>p.key===mobilePeriodKey))mobilePeriodKey=mobileDefaultPeriod(periods).key;
-  const selected=periods.find(p=>p.key===mobilePeriodKey)||mobileDefaultPeriod(periods);
+  const available=mobileCalendarAvailableYears();
+  if(!available.years.includes(mobileDashboardYear))mobileDashboardYear=available.defaultYear;
+  const months=mobileYearMonths(mobileDashboardYear);
+  if(!months.length)return;
+  const yearSelect=document.getElementById('mobileDashboardYear');
+  yearSelect.innerHTML=available.years.map(year=>`<option value="${esc(year)}">${esc(year)}</option>`).join('');
+  yearSelect.value=mobileDashboardYear;
+  document.getElementById('mobileDashboardYearRange').textContent=`${months[0].label} – ${months[months.length-1].label}`;
+  // Until the user picks a month, follow the latest month with activity so the summary is not
+  // left on an empty month while transactions exist elsewhere in the Financial Year.
+  if(!mobilePeriodChosen||!months.some(month=>month.key===mobilePeriodKey))mobilePeriodKey=mobileDefaultMonthKey(months);
+  const selected=months.find(month=>month.key===mobilePeriodKey)||months[0];
+  mobilePeriodKey=selected.key;
   const periodSelect=document.getElementById('mobilePeriodSelect');
-  periodSelect.innerHTML=periods.map(p=>`<option value="${p.key}">${esc(p.title)} Balance</option>`).join('');
+  periodSelect.innerHTML=months.map(month=>`<option value="${month.key}">${esc(month.title)} Balance</option>`).join('');
   periodSelect.value=selected.key;
-  document.getElementById('mobileNetBalance').textContent=formatMoney(netBalance);
-  document.getElementById('mobilePeriodStrip').innerHTML=periods.map(p=>`<button type="button" class="mobile-period-item ${p.key===selected.key?'active':''}" data-mobile-period="${p.key}" aria-pressed="${p.key===selected.key}">${esc(p.label)}</button>`).join('');
+  document.getElementById('mobileNetBalance').textContent=formatMoney(mobileYearBalance(mobileDashboardYear));
+  const strip=document.getElementById('mobilePeriodStrip');
+  strip.innerHTML=months.map(month=>`<button type="button" class="mobile-period-item ${month.key===selected.key?'active':''}" data-mobile-period="${month.key}" aria-pressed="${month.key===selected.key}">${esc(month.label)}</button>`).join('');
+  const activeItem=strip.querySelector('.mobile-period-item.active');
+  if(activeItem)requestAnimationFrame(()=>{
+    // Keep the selected month centred without scrolling the page itself (offsetLeft can be
+    // relative to a positioned ancestor, so measure both boxes).
+    const offset=activeItem.getBoundingClientRect().left-strip.getBoundingClientRect().left;
+    const target=strip.scrollLeft+offset-(strip.clientWidth-activeItem.offsetWidth)/2;
+    strip.scrollTo({left:Math.max(0,target),behavior:reducedMotion()?'auto':'smooth'});
+  });
   const transactions=state.incomeExpenses.filter(r=>r.date&&r.date>=selected.from&&r.date<=selected.to);
   const income=transactions.filter(r=>r.type==='Income').reduce((sum,r)=>sum+(Number(r.amount)||0),0);
   const expenses=transactions.filter(r=>r.type==='Expense').reduce((sum,r)=>sum+(Number(r.amount)||0),0);
@@ -1426,7 +1435,6 @@ function renderDashboard(){
   const totalIncome=incomeRecords.filter(r=>r.type==='Income').reduce((s,r)=>s+(Number(r.amount)||0),0);
   const totalExpenses=incomeRecords.filter(r=>r.type==='Expense').reduce((s,r)=>s+(Number(r.amount)||0),0);
   const netCash=totalIncome-totalExpenses;
-  mobileNetBalance=assets-liabilities;
   const cards=[
     ['up','Total Assets',assets,'money'],['down','Total Liabilities',liabilities,'money'],['scale','Net Worth',assets-liabilities,'money'],
     ['layers','Asset Categories',assetCategories,'int'],['layers','Liability Categories',liabilityCategories,'int'],['file','PDF Documents',documentCount,'int'],
@@ -1440,7 +1448,7 @@ function renderDashboard(){
   markEmptyCharts();
   renderRecentIncome(incomeRecords);
   renderDashboardTable();
-  renderMobileDashboard(mobileNetBalance);
+  renderMobileDashboard();
 }
 
 function animateKpis(){

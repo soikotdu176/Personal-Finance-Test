@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=9">
+  <link rel="stylesheet" href="styles.css?v=10">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -113,6 +113,13 @@
             <label class="mobile-period-picker"><span class="sr-only">Balance period</span><select id="mobilePeriodSelect" aria-label="Balance period"></select></label>
             <button type="button" class="mobile-header-action" id="mobileChartsAction" aria-label="View analytics"><svg class="ic" aria-hidden="true"><use href="#i-up"/></svg></button>
             <button type="button" class="mobile-header-action" id="mobileMoreAction" aria-label="Open navigation menu" aria-controls="sidebar" aria-expanded="false"><svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg></button>
+          </div>
+          <div class="mobile-year-bar">
+            <label class="mobile-year-picker">
+              <span class="mobile-year-caption">Financial Year</span>
+              <select id="mobileDashboardYear" aria-label="Financial Year"></select>
+            </label>
+            <span class="mobile-year-range" id="mobileDashboardYearRange"></span>
           </div>
           <div class="mobile-balance"><span>Net Balance</span><strong id="mobileNetBalance">৳0.00</strong></div>
           <div class="mobile-period-strip" id="mobilePeriodStrip" aria-label="Choose a balance period"></div>
@@ -428,6 +435,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=9"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>
