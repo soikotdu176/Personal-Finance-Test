@@ -321,6 +321,9 @@ html[data-theme="dark"] .doc-chip { color: #fb7185; }
 .doc-chip:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(244, 63, 94, .25); }
 .doc-chip:active { transform: scale(.93); }
 .doc-chip.more { background: var(--primary-soft); color: var(--primary-2); }
+.doc-chip .pdf-chip-tag { flex: none; padding: 1px 5px; border-radius: 5px; background: var(--surface-solid); font-size: 9px; font-weight: 800; letter-spacing: .04em; overflow: visible; }
+html[data-theme="dark"] .doc-chip .pdf-chip-tag { color: #fb7185; }
+.doc-chip.transfer-pdf-chip { max-width: 190px; }
 .doc-none { color: var(--muted); }
 
 /* ---------- Records page ---------- */
@@ -1102,4 +1105,122 @@ dialog.calc-popover:focus, dialog.calc-popover:focus-visible { outline: none; }
   .calc-trigger { width: 34px; height: 34px; }
   .calc-close { width: 30px; height: 30px; }
   .calc-apply { min-height: 40px; }
+}
+
+/* ---------- Transfers between accounts ---------- */
+.badge.transfer { background: var(--primary-soft); color: var(--primary-2); }
+.record-item.transfer-record { border-color: var(--line-strong); border-left: 3px solid var(--primary-2); padding-left: 12px; }
+.record-item.transfer-record .record-amount strong { color: var(--primary-2); }
+
+/* Paid / Pending switch inside the transfer sheet */
+.transfer-status .status-toggle { display: flex; align-items: center; gap: 9px; margin-top: 8px; }
+.modal label.transfer-status input[type="checkbox"] { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.status-toggle-track { position: relative; flex: none; width: 42px; height: 24px; border-radius: 999px; background: var(--line-strong); transition: background .22s ease; }
+.status-toggle-track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(15, 23, 42, .35); transition: transform .3s var(--spring); }
+.status-toggle input:checked + .status-toggle-track { background: var(--emerald); }
+.status-toggle input:checked + .status-toggle-track::after { transform: translateX(18px); }
+.status-toggle input:focus-visible + .status-toggle-track { box-shadow: 0 0 0 4px var(--primary-soft); }
+.status-toggle-text { font-size: 12px; font-weight: 700; color: var(--text-2); }
+
+/* "Same amount on both sides" checkbox row */
+.modal label.transfer-sync { margin-bottom: 6px; }
+.transfer-sync-row { display: flex; align-items: center; gap: 9px; font-size: 12px; font-weight: 700; color: var(--text-2); }
+.modal label.transfer-sync-row input[type="checkbox"],
+.modal label .transfer-sync-row input[type="checkbox"] { display: inline-block; width: 16px; height: 16px; min-height: 0; margin: 0; flex: none; accent-color: var(--primary); }
+
+/* Live preview of both balances after the transfer */
+.transfer-preview { border: 1px dashed var(--line-strong); border-radius: 14px; background: var(--surface-2); padding: 11px 13px; margin-bottom: 4px; font-size: 12px; font-weight: 500; }
+.transfer-preview:empty { display: none; }
+.transfer-preview-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 3px 0; color: var(--text-2); }
+.transfer-preview-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transfer-preview-row strong { font-variant-numeric: tabular-nums; font-weight: 700; }
+.transfer-preview-row strong.up { color: #059669; }
+.transfer-preview-row strong.down { color: var(--rose); }
+.transfer-preview-note { padding: 3px 0 0; color: var(--muted); font-size: 11px; }
+.transfer-preview-note.warn { color: var(--rose); }
+
+/* Optional PDF attachment inside the transfer sheet (compact chip, saves with the transfer) */
+.transfer-doc-manager { min-width: 0; margin: 2px 0 6px; }
+.transfer-doc-list { display: grid; gap: 6px; min-width: 0; }
+.transfer-doc-list .doc-empty { padding: 2px 0; font-size: 11.5px; }
+.transfer-doc-chip {
+  display: flex; align-items: center; gap: 8px; min-width: 0; padding: 7px 9px;
+  border: 1px solid var(--line); border-radius: 11px; background: var(--surface-2);
+  font-size: 11.5px;
+}
+.transfer-doc-chip > .ic { flex: none; width: 16px; height: 16px; color: var(--rose); }
+.transfer-doc-meta { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.transfer-doc-meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 700; }
+.transfer-doc-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10.5px; font-weight: 600; }
+.transfer-doc-chip.removed { border-style: dashed; opacity: .62; }
+.transfer-doc-chip.removed .transfer-doc-meta strong { text-decoration: line-through; }
+.transfer-doc-actions { flex: none; display: flex; align-items: center; gap: 2px; flex-wrap: wrap; justify-content: flex-end; }
+.transfer-doc-actions .action-link { min-height: 28px; padding: 4px 6px; font-size: 11px; white-space: nowrap; }
+.transfer-doc-actions .transfer-doc-remove { width: 26px; min-height: 28px; padding: 0; font-size: 16px; line-height: 1; }
+.transfer-pdf-field { min-width: 0; }
+.transfer-pdf-field input[type="file"] { max-width: 100%; min-width: 0; padding: 7px 10px; min-height: 38px; font-size: 11.5px; }
+.transfer-pdf-field input[type="file"]::file-selector-button {
+  margin-right: 8px; padding: 4px 9px; border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface-2); color: var(--text-2); font: inherit; font-weight: 700; cursor: pointer;
+}
+
+/* Mobile: compact sheet so both accounts and the preview fit above the keyboard */
+@media (max-width: 768px) {
+  dialog.transfer-modal .modal-head { min-height: 56px; padding: 10px 14px; }
+  dialog.transfer-modal .modal-head h2 { font-size: 16px; }
+  dialog.transfer-modal .modal-head p { display: none; }
+  dialog.transfer-modal .modal-body { padding: 12px 14px; }
+  dialog.transfer-modal .modal-foot { padding: 9px 14px; padding-bottom: calc(9px + env(safe-area-inset-bottom, 0px)); }
+  dialog.transfer-modal .modal-foot .btn { flex: 1; }
+  .transfer-form { gap: 2px 10px; }
+  .transfer-form label { margin-bottom: 8px; font-size: 11px; }
+  .transfer-form .form-section { margin: 5px 0 6px; font-size: 10px; }
+  .transfer-form input, .transfer-form select, .transfer-form textarea { min-height: 42px; padding: 8px 10px; }
+  .transfer-form .calc-field > input { padding-right: 40px; }
+  .transfer-form .calc-trigger { width: 30px; height: 30px; }
+  .transfer-form .hint { margin-top: 4px; font-size: 10.5px; }
+  .transfer-form textarea { min-height: 52px; }
+  .transfer-form .transfer-sync-row { font-size: 11px; }
+  .transfer-modal .status-toggle-track { width: 38px; height: 22px; }
+  .transfer-modal .status-toggle-track::after { width: 16px; height: 16px; }
+  .transfer-modal .status-toggle input:checked + .status-toggle-track::after { transform: translateX(16px); }
+  .transfer-preview { padding: 9px 11px; font-size: 11px; border-radius: 12px; }
+  .transfer-preview-row { padding: 2px 0; }
+  .transfer-doc-chip { padding: 6px 8px; gap: 6px; border-radius: 10px; }
+  .transfer-doc-meta strong { font-size: 11.5px; }
+  .transfer-doc-meta span { font-size: 10px; }
+  .transfer-doc-actions .action-link { padding: 4px 5px; font-size: 10.5px; }
+  .transfer-pdf-field input[type="file"] { min-height: 36px; padding: 5px 8px; font-size: 11px; }
+  .transfer-pdf-field input[type="file"]::file-selector-button { padding: 3px 8px; }
+}
+
+/* Very narrow phones (320px-430px): the filename ellipsises and the chip actions wrap
+   onto their own row, so the transfer sheet never scrolls sideways. */
+@media (max-width: 430px) {
+  .transfer-doc-chip { flex-wrap: wrap; row-gap: 5px; }
+  .transfer-doc-meta { flex: 1 1 calc(100% - 26px); max-width: calc(100% - 26px); }
+  .transfer-doc-actions { flex: 1 1 100%; justify-content: flex-end; }
+  .transfer-doc-chip > .ic { align-self: flex-start; margin-top: 2px; }
+  .doc-cell { max-width: 100%; }
+  .doc-chip.transfer-pdf-chip { max-width: 100%; }
+}
+
+/* ---------- "Funded from" picker (Add / Edit record, non Cash & Bank) ----------
+   The label is a normal grid row on every screen; only the mobile sizing is compacted so the
+   sheet keeps fitting above the keyboard. Long subcategory names ellipsise instead of pushing
+   the modal sideways. */
+.record-funding-field { min-width: 0; }
+.record-funding-field select { width: 100%; max-width: 100%; min-width: 0; text-overflow: ellipsis; }
+.record-funding-field .hint { margin-top: 4px; }
+
+@media (max-width: 768px) {
+  .record-funding-field { margin-bottom: 6px; }
+  .record-funding-field select { min-height: 42px; padding: 8px 10px; font-size: 12.5px; }
+  .record-funding-field .hint { margin-top: 3px; font-size: 10.5px; line-height: 1.35; }
+  dialog.transfer-modal #transferSourceAccount,
+  dialog.transfer-modal #transferDestinationAccount { width: 100%; max-width: 100%; min-width: 0; text-overflow: ellipsis; }
+}
+
+@media (max-width: 430px) {
+  .record-funding-field select { font-size: 12px; }
 }

@@ -8,7 +8,7 @@
 
 const DB_NAME = 'AssetBookDB';
 const DB_VERSION = 4;                       // v4: migration history batches (migrationId on imported rows)
-const APP_VERSION = '2026-11-20-v8';
+const APP_VERSION = '2026-11-20-v9';
 const DATA_VERSION_KEY = 'assetbook-data-version';
 let db;
 let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [] };
@@ -719,6 +719,7 @@ function bindGlobalActions(){
   const debounce=(fn,wait=180)=>{let timer=null;return (...args)=>{clearTimeout(timer);timer=setTimeout(()=>fn(...args),wait)}};
   $el('quickAdd').onclick=()=>openRecordModal();
   $el('addRecordBtn').onclick=()=>openRecordModal();
+  $el('transferBtn').onclick=()=>openTransferModal();
   $el('recordSearch').oninput=debounce(renderRecordSections);
   $el('recordTypeFilter').onchange=renderRecordSections;
   $el('recordCategoryFilter').onchange=renderRecordSections;
@@ -748,6 +749,7 @@ function bindGlobalActions(){
   $el('confirmOk').onclick=()=>{$el('confirmModal').close();if(confirmAction){const resolve=confirmAction;confirmAction=null;resolve(true)}};
   $el('confirmModal').addEventListener('cancel',()=>{if(confirmAction){const resolve=confirmAction;confirmAction=null;resolve(false)}});
   $el('recordForm').onsubmit=saveRecord;
+  bindTransferForm();
   $el('incomeForm').onsubmit=saveIncomeRecord;
   $el('addIncomeBtn').onclick=()=>openIncomeModal();
   $el('mobileQuickAction').onclick=openMobileSpeedDial;
@@ -813,7 +815,7 @@ function bindGlobalActions(){
     closeMobileSpeedDial();
     if(action==='settings'){showPage('settings');return}
     if(action==='Income'||action==='Expense'){openIncomeModal(null,{type:action});return}
-    if(action==='transfer'){showPage('records');openRecordModal()}
+    if(action==='transfer'){openTransferModal();return}
   };
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMobileSpeedDial()});
   $el('exportIncomeExcel').onclick=e=>runWithLoading(e.currentTarget,exportIncomeExcel);
@@ -954,7 +956,14 @@ function recordAmount(record){
    ========================================================================== */
 /** Cash & Bank = an Asset whose category is "Cash" (Savings Accounts / Cash in Hand). The label is
  *  also recognised as "Cash & Bank" / "Cash and Bank" so a renamed category keeps snapshot semantics. */
-const isCashRecord=r=>!!r&&r.type==='Asset'&&/^(cash|cash\s*&\s*bank|cash\s+and\s+bank)$/i.test(String(r.category||'').trim());
+const isCashCategoryName=name=>/^(cash|cash\s*&\s*bank|cash\s+and\s+bank)$/i.test(String(name||'').trim());
+const isCashRecord=r=>!!r&&r.type==='Asset'&&isCashCategoryName(r.category);
+/** Identity of a Cash & Bank subcategory (bKash, Cash in Hand, Basic Bank Limited, ...). Cash is a
+ *  snapshot per item and the item name lives on the subcategory, so transfers and record funding
+ *  work on the subcategory as a whole and every snapshot that belongs to it is aggregated. */
+const cashSubcategoryKey=subcategory=>String(subcategory||'').trim().toLowerCase();
+/** Identity of any Asset subcategory for the "Funded from" picker (category + subcategory). */
+const assetFundingKey=(category,subcategory)=>`${String(category||'').trim()}::${String(subcategory||'').trim()}`;
 /** Start year of a fiscal label so '2024-25' < '2025-26' orders correctly. */
 function fiscalStartOf(year){
   const p=parseIncomeYear(year);
@@ -999,13 +1008,241 @@ function latestCashRecords(records, year){
   }
   return [...latest.values()];
 }
-/** Reduce a record set to its effective balance records for `year`. */
-function effectiveRecordsForBalance(records,year){
-  const cash=latestCashRecords(records.filter(isCashRecord), year);
-  const carried=records.filter(r=>!isCashRecord(r)&&carriesIntoYear(r,year));
-  return [...carried,...cash];
+/* ---------- Transfers between two accounts ---------------------------------
+   A transfer is stored as ONE record that carries both sides. It never lives in the income /
+   expense world and it is never counted as a ledger row of its own: the balance of each side is
+   rebuilt at read time (see applyTransferLegs), so editing or deleting a transfer instantly
+   restores both accounts without rewriting any other record.
+   -------------------------------------------------------------------------- */
+const TRANSFER_KIND='transfer';
+/** Transfers are recognised by kind, with a structural fallback for imported / older data. */
+const isTransferRecord=r=>!!r&&(r.kind===TRANSFER_KIND||!!(r.transfer&&r.transfer.source&&r.transfer.destination));
+/** Identity of a balance account. Cash snapshots group on these three fields, so transfers use the
+ *  exact same key and always land on the account the user picked. */
+const transferAccountKey=account=>account?[account.subcategory,account.particulars,account.accountDetail].map(v=>String(v??'').trim()).join('::'):'';
+/** Compact, self-contained copy of an account stored on both sides of the transfer. */
+function transferAccountSnapshot(account){
+  return {
+    key:transferAccountKey(account),
+    type:account.type||'',category:account.category||'',subcategory:account.subcategory||'',
+    particulars:account.particulars||'',accountDetail:account.accountDetail||''
+  };
 }
+/** Display name of a stored account snapshot ("bKash · 01712345678"). */
+function transferAccountName(account){
+  if(!account)return '';
+  const primary=String(account.particulars||'').trim();
+  const detail=String(account.accountDetail||'').trim();
+  if(primary&&detail&&!primary.includes(detail))return `${primary} · ${detail}`;
+  return primary||detail||String(account.subcategory||'').trim();
+}
+/** "Cash / bKash → Cash / Cash in Hand · 14:30 · Fee / difference ৳15.00" for cards and table rows. */
+function transferMetaLabel(record){
+  const t=record&&record.transfer;
+  if(!t)return '';
+  const side=account=>`${(account&&account.category)||''} / ${(account&&account.subcategory)||''}`;
+  const parts=[`${side(t.source)} → ${side(t.destination)}`];
+  if(t.time)parts.push(t.time);
+  const fee=Number(t.fee)||0;
+  if(fee>0)parts.push(`Fee / difference ${formatMoney(fee)}`);
+  if(t.source&&t.source.status&&t.source.status!=='Paid')parts.push(String(t.source.status));
+  return parts.join(' · ');
+}
+/** Money leaving the source and money arriving at the destination (they differ when a fee applies). */
+function transferAmounts(transfer){
+  const t=transfer||{};
+  return {out:Math.abs(Number(t.source&&t.source.amount)||0),incoming:Math.abs(Number(t.destination&&t.destination.amount)||0)};
+}
+/**
+ * Movement of one side, in the sign convention of the account's stored amount.
+ * A transfer moves value FROM the source TO the destination, so the destination's value grows and
+ * the source's shrinks. Account amounts are Asset = +value, Liability = -value, which is why a
+ * Liability source (new loan money) grows and a Liability destination (a repayment) shrinks - and
+ * why a transfer leaves Net Worth unchanged.
+ */
+function transferLegDelta(account,amount,isSource){
+  const value=Math.abs(Number(amount)||0);
+  const sign=account&&account.type==='Liability'?-1:1;
+  return (isSource?-1:1)*value*sign;
+}
+/** Both sides of a transfer as {direction,account,amount,delta}. */
+function transferBalanceLegs(transfer){
+  const t=transfer&&transfer.transfer;
+  if(!t||!t.source||!t.destination)return [];
+  const {out,incoming}=transferAmounts(t);
+  return [
+    {direction:'source',account:t.source,amount:out,delta:transferLegDelta(t.source,out,true)},
+    {direction:'destination',account:t.destination,amount:incoming,delta:transferLegDelta(t.destination,incoming,false)}
+  ];
+}
+/**
+ * Balance key used while applying transfer / funding movements. Cash legs are anchored on the
+ * subcategory (the account name the user picks) so every snapshot of that account is moved;
+ * legacy non-cash legs keep the exact account identity so old data still resolves.
+ */
+function transferAnchorKey(account){
+  return isCashRecord(account)?`cash:${cashSubcategoryKey(account.subcategory)}`:`acct:${transferAccountKey(account)}`;
+}
+/**
+ * Applies every transfer to the accounts it touches and returns balance rows for them.
+ * The rows are flagged `syntheticTransferLeg` so record lists, reports and the paginated table can
+ * skip them while every balance computation (KPIs, charts, balance sheet, mobile summary) keeps
+ * counting them.
+ * Cash is a snapshot: a side only counts while it is newer than the account's own snapshot,
+ * otherwise the entered balance already reflects the movement.
+ */
+function applyTransferLegs(balanceRecords,transfers,year){
+  if(!transfers||!transfers.length)return balanceRecords;
+  const range=year?fiscalRange(year):null;
+  const cutoff=range?range.to:'';
+  const anchors=new Map();
+  balanceRecords.forEach(record=>{
+    const key=transferAnchorKey(record);
+    let anchor=anchors.get(key);
+    if(!anchor){anchor={snapshot:'',savedAt:''};anchors.set(key,anchor)}
+    if(!isCashRecord(record))return;
+    const effective=cashEffectiveDate(record);
+    if(!anchor.snapshot||effective>anchor.snapshot){
+      anchor.snapshot=effective;
+      anchor.savedAt=String(record.updatedAt||record.createdAt||'');
+    }
+  });
+  const legs=[];
+  for(const transfer of transfers){
+    const date=normalizeExcelDate(transfer.date)||String(transfer.date||'').slice(0,10);
+    if(cutoff&&date&&date>cutoff)continue;                    // belongs to a later Income Year
+    const incomeYear=transfer.incomeYear||fiscalYearFromDate(date)||'';
+    for(const leg of transferBalanceLegs(transfer)){
+      const key=transferAnchorKey(leg.account);
+      let anchor=anchors.get(key);
+      // A Cash & Bank subcategory without any snapshot can still receive a transfer: the movement
+      // itself becomes the shown balance instead of silently disappearing.
+      if(!anchor&&isCashRecord(leg.account)){anchor={snapshot:'',savedAt:''};anchors.set(key,anchor)}
+      if(!anchor||!leg.delta)continue;                        // account not in this scope
+      if(anchor.snapshot&&date){
+        if(date<anchor.snapshot)continue;                                                     // snapshot is newer
+        if(date===anchor.snapshot&&anchor.savedAt&&anchor.savedAt>=String(transfer.updatedAt||transfer.createdAt||''))continue;
+      }
+      legs.push({
+        id:`${transfer.id}::${leg.direction}`,
+        syntheticTransferLeg:true,transferId:transfer.id,transferDirection:leg.direction,
+        type:leg.account.type,category:leg.account.category,subcategory:leg.account.subcategory,
+        particulars:leg.account.particulars||'',accountDetail:leg.account.accountDetail||'',
+        date,incomeYear,amount:leg.delta,balance:leg.delta,details:'',documentIds:[]
+      });
+    }
+  }
+  return legs.length?[...balanceRecords,...legs]:balanceRecords;
+}
+/**
+ * "Funded from" movements of ordinary records (see the Add / Edit record sheet).
+ * A non-cash record may say which Asset subcategory paid for it. Instead of writing a second hidden
+ * record, the movement is derived from the stored record here - exactly like a transfer leg - so
+ * editing the amount, changing the funding account or deleting the record can never double-deduct:
+ * the record itself is the single source of truth.
+ * The same snapshot rule as transfers applies: a funding row only counts while it is newer than the
+ * funding account's own snapshot, otherwise that snapshot already reflects the spending.
+ */
+function applyFundingLegs(balanceRecords,records,year){
+  const fundingRecords=(records||[]).filter(record=>!isTransferRecord(record)&&record.funding&&record.funding.subcategory);
+  if(!fundingRecords.length)return balanceRecords;
+  const range=year?fiscalRange(year):null;
+  const cutoff=range?range.to:'';
+  const snapshots=new Map();
+  balanceRecords.forEach(record=>{
+    // Only user-entered snapshots gate a funding movement - transfer / funding legs must not.
+    if(!isCashRecord(record)||record.syntheticTransferLeg)return;
+    const key=cashSubcategoryKey(record.subcategory);
+    const effective=cashEffectiveDate(record);
+    const snapshot=snapshots.get(key);
+    if(!snapshot||effective>snapshot.date)snapshots.set(key,{date:effective,savedAt:String(record.updatedAt||record.createdAt||'')});
+  });
+  const legs=[];
+  for(const record of fundingRecords){
+    const date=normalizeExcelDate(record.date)||String(record.date||'').slice(0,10);
+    if(cutoff&&date&&date>cutoff)continue;                    // funded in a later Income Year
+    const amount=Math.abs(recordAmount(record));
+    if(!amount)continue;
+    const category=String(record.funding.category||'').trim();
+    const subcategory=String(record.funding.subcategory||'').trim();
+    const snapshot=snapshots.get(cashSubcategoryKey(subcategory));
+    if(snapshot&&snapshot.date&&date){
+      if(date<snapshot.date)continue;                                              // snapshot is newer
+      if(date===snapshot.date&&snapshot.savedAt>=String(record.updatedAt||record.createdAt||''))continue;
+    }
+    legs.push({
+      id:`${record.id}::funding`,syntheticTransferLeg:true,fundingRecordId:record.id,
+      type:'Asset',category,subcategory,particulars:'',accountDetail:'',
+      date,incomeYear:record.incomeYear||fiscalYearFromDate(date)||'',
+      amount:-amount,balance:-amount,details:'',documentIds:[]
+    });
+  }
+  return legs.length?[...balanceRecords,...legs]:balanceRecords;
+}
+/** Reduce a record set to its effective balance records for `year`. Transfers never appear as
+ *  records here - only as signed movements on the accounts they belong to. */
+function effectiveRecordsForBalance(records,year){
+  const base=records.filter(r=>!isTransferRecord(r));
+  const cash=latestCashRecords(base.filter(isCashRecord), year);
+  const carried=base.filter(r=>!isCashRecord(r)&&carriesIntoYear(r,year));
+  const withTransfers=applyTransferLegs([...carried,...cash],(state.records||[]).filter(isTransferRecord),year);
+  return applyFundingLegs(withTransfers,carried,year);
+}
+
 const sumAmount=records=>records.reduce((s,r)=>s+recordAmount(r),0);
+
+/* ---------- "Funded from" picker (Add / Edit record) ------------------------
+   Every Asset subcategory can pay for a record. Cash & Bank entries are the usual source, but the
+   list also offers the other Asset subcategories (a vehicle bought by selling land, for example).
+   -------------------------------------------------------------------------- */
+function assetFundingGroups(){
+  const groups=new Map();
+  const add=(category,subcategory)=>{
+    const cat=String(category||'').trim(),sub=String(subcategory||'').trim();
+    if(!cat||!sub)return;
+    if(!groups.has(cat))groups.set(cat,[]);
+    const list=groups.get(cat);
+    if(!list.some(name=>name.toLowerCase()===sub.toLowerCase()))list.push(sub);
+  };
+  orderedCategories('Asset').forEach(category=>(category.subcategories||[]).forEach(subcategory=>add(category.name,subcategory)));
+  state.records.forEach(record=>{
+    if(record.type==='Asset')add(record.category,record.subcategory);
+    if(record.funding)add(record.funding.category,record.funding.subcategory);
+  });
+  return [...groups.entries()].map(([category,subcategories])=>({category,subcategories}));
+}
+/** Live balance of every Asset subcategory after transfers and funding (shown next to the option). */
+function assetSubcategoryBalances(){
+  const balances=new Map();
+  effectiveRecordsForBalance(state.records,'').forEach(record=>{
+    if(record.type!=='Asset'||!record.subcategory)return;
+    const key=assetFundingKey(record.category,record.subcategory);
+    balances.set(key,(balances.get(key)||0)+recordAmount(record));
+  });
+  return balances;
+}
+/** The selectable funding accounts, keyed by category + subcategory, with their live balance. */
+function assetFundingAccounts(){
+  const balances=assetSubcategoryBalances(),accounts=new Map();
+  assetFundingGroups().forEach(group=>group.subcategories.forEach(subcategory=>{
+    const key=assetFundingKey(group.category,subcategory);
+    accounts.set(key,{key,category:group.category,subcategory,balance:balances.get(key)||0});
+  }));
+  return accounts;
+}
+/** <option> list: None + every Asset subcategory, grouped by category and showing its balance. */
+function assetFundingOptionsHtml(accounts){
+  const groups=new Map();
+  (accounts||new Map()).forEach(account=>{
+    if(!groups.has(account.category))groups.set(account.category,[]);
+    groups.get(account.category).push(account);
+  });
+  return `<option value="">None</option>`+[...groups.entries()].map(([category,list])=>
+    `<optgroup label="${esc(category)}">${list.map(account=>
+      `<option value="${esc(account.key)}">${esc(account.subcategory)} · ${esc(formatMoney(account.balance))}</option>`
+    ).join('')}</optgroup>`
+  ).join('');
+}
 
 /* ==========================================================================
    Dashboard filters (with automatic Bangladesh fiscal-year dates)
@@ -1088,11 +1325,29 @@ const inRange=(date,from,to)=>(!from||date>=from)&&(!to||date<=to);
  */
 function getFilteredRecords(){
   const {year,from,to,datesAuto}=dashFilters;
-  let records=effectiveRecordsForBalance(dashboardBaseRecords(),year);
+  // Transfer movements are balance adjustments, not ledger rows: reports and the record count must
+  // only ever see real records, otherwise totals would be counted twice.
+  let records=effectiveRecordsForBalance(dashboardBaseRecords(),year).filter(r=>!r.syntheticTransferLeg);
   if(!datesAuto&&(from||to)){
     records=records.filter(r=>r.date&&inRange(r.date,from,to));
   }
   return records;
+}
+
+/** Transfers shown in the Financial Records table. They are deliberately excluded from
+ *  getFilteredRecords() (see the balance-neutral note there), so the table merges them back in
+ *  themselves - a transfer matches when either side matches the active filters. */
+function transferRecordsForDisplay(){
+  const {type,category,subcategory,year,from,to,datesAuto}=dashFilters;
+  return state.records.filter(isTransferRecord).filter(record=>{
+    const sides=[record.transfer&&record.transfer.source,record.transfer&&record.transfer.destination].filter(Boolean);
+    if(type&&!sides.some(side=>side.type===type))return false;
+    if(category&&!sides.some(side=>side.category===category))return false;
+    if(subcategory&&!sides.some(side=>side.subcategory===subcategory))return false;
+    if(year&&!recordMatchesYear(record,year))return false;
+    if(!datesAuto&&(from||to))return !!(record.date&&inRange(record.date,from,to));
+    return true;
+  });
 }
 
 /** Records after the type / category / subcategory filters (no year or date handling). */
@@ -1529,21 +1784,47 @@ function renderCharts(records){
 function docsOf(record){
   return (record.documentIds||[]).map(id=>state.documents.find(d=>d.id===id)).filter(Boolean);
 }
+/** PDFs for any record; a transfer also honours the legacy recordId link. */
+function docsFor(record){
+  return isTransferRecord(record)?transferDocsOf(record):docsOf(record);
+}
 function shortName(name,max=16){
   const base=String(name||'document.pdf');
   return base.length>max?base.slice(0,max-4)+'…pdf':base;
 }
-/** Clickable PDF badges shown on table rows / record cards. */
+/** Clickable PDF badges shown on table rows / record cards. Transfers carry an explicit PDF tag. */
 function docChips(record,max=2){
-  const docs=docsOf(record);
+  const docs=docsFor(record);
   if(!docs.length)return '';
-  const shown=docs.slice(0,max).map(d=>`<button type="button" class="doc-chip" data-cmd="open-pdf" data-id="${esc(d.id)}" title="View ${esc(d.name||d.title||'PDF')}">${icon('file')}<span>${esc(shortName(d.name||d.title))}</span></button>`).join('');
+  const transfer=isTransferRecord(record);
+  const shown=docs.slice(0,max).map(d=>`<button type="button" class="doc-chip${transfer?' transfer-pdf-chip':''}" data-cmd="open-pdf" data-id="${esc(d.id)}" title="View ${esc(d.name||d.title||'PDF')}">${icon('file')}${transfer?'<span class="pdf-chip-tag">PDF</span>':''}<span>${esc(shortName(d.name||d.title))}</span></button>`).join('');
   const more=docs.length>max?`<button type="button" class="doc-chip more" data-cmd="view-record" data-id="${esc(record.id)}" title="Show all documents">+${docs.length-max} more</button>`:'';
   return shown+more;
+}
+/** Attached-PDF block shared by the record and transfer detail views. */
+function documentViewSection(record){
+  const documents=docsFor(record);
+  if(!documents.length)return '';
+  return `<label class="full document-view-section">Attached PDF Documents
+      <div class="document-view-list">${documents.map(doc=>`
+        <div class="document-view-item">
+          <div class="document-info">
+            <strong>${esc(doc.name||doc.title||'document.pdf')}</strong>
+            <span>${formatFileSize(doc.size)}</span>
+          </div>
+          <div class="document-actions">
+            <button type="button" class="btn" data-cmd="open-pdf" data-id="${esc(doc.id)}">View PDF</button>
+            <button type="button" class="btn btn-primary" data-cmd="download-pdf" data-id="${esc(doc.id)}">Download PDF</button>
+          </div>
+        </div>`).join('')}
+      </div>
+    </label>`;
 }
 
 function renderDashboardTable(){
   let records=getFilteredRecords();
+  const transfers=transferRecordsForDisplay();
+  if(transfers.length)records=[...records,...transfers];
   const search=document.getElementById('dashboardSearch').value.toLowerCase();
   if(search) records=records.filter(r=>Object.values(r).some(v=>String(v).toLowerCase().includes(search)));
   records.sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))||recordTitle(a).localeCompare(recordTitle(b)));
@@ -1552,9 +1833,9 @@ function renderDashboardTable(){
   const pageRecords=records.slice((dashboardPage-1)*pageSize,dashboardPage*pageSize);
   document.getElementById('recordCount').textContent=`${records.length} record${records.length===1?'':'s'} found`;
   document.getElementById('dashboardTable').innerHTML=`<thead><tr><th scope="col">Type</th><th scope="col">Date</th><th scope="col">Category</th><th scope="col">Subcategory</th><th scope="col">Particulars</th><th scope="col">Details</th><th scope="col">Income Year</th><th scope="col" class="num">Balance / Amount</th><th scope="col">Documents</th><th scope="col">Action</th></tr></thead><tbody>${pageRecords.map((r,i)=>{
-    const meta=recordMeta(r);
+    const meta=isTransferRecord(r)?transferMetaLabel(r):recordMeta(r);
     const id=esc(r.id);
-    return `<tr style="--i:${i}"><td><span class="badge ${r.type.toLowerCase()}">${esc(r.type)}</span></td><td>${esc(fmtDate(r.date)||'—')}</td><td>${esc(r.category)}</td><td>${esc(r.subcategory)}</td><td><strong>${esc(recordTitle(r))}</strong>${meta?`<span class="muted-sub">${esc(meta)}</span>`:''}</td><td>${esc(r.details||'—')}</td><td>${esc(r.incomeYear||'—')}</td><td class="num"><strong>${formatMoney(recordAmount(r))}</strong></td><td><div class="doc-cell">${docChips(r)||'<span class="doc-none">—</span>'}</div></td><td class="actions-cell"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></td></tr>`;
+    return `<tr style="--i:${i}"><td><span class="badge ${r.type.toLowerCase()}">${esc(r.type)}</span>${isTransferRecord(r)?' <span class="badge transfer">Transfer</span>':''}</td><td>${esc(fmtDate(r.date)||'—')}</td><td>${esc(r.category)}</td><td>${esc(r.subcategory)}</td><td><strong>${esc(recordTitle(r))}</strong>${meta?`<span class="muted-sub">${esc(meta)}</span>`:''}</td><td>${esc(r.details||'—')}</td><td>${esc(r.incomeYear||'—')}</td><td class="num"><strong>${formatMoney(recordAmount(r))}</strong></td><td><div class="doc-cell">${docChips(r)||'<span class="doc-none">—</span>'}</div></td><td class="actions-cell"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></td></tr>`;
   }).join('')||'<tr><td colspan="10"><div class="empty-state">No financial records match these filters.</div></td></tr>'}</tbody>`;
   document.getElementById('dashboardPagination').innerHTML=pages>1?Array.from({length:pages},(_,i)=>`<button type="button" class="${i+1===dashboardPage?'active':''}" data-cmd="page" data-id="${i+1}" aria-label="Page ${i+1}">${i+1}</button>`).join(''):'';
 }
@@ -2125,10 +2406,12 @@ function syncAmountFromValues(){
 }
 
 function openRecordModal(id=null){
+  const existing=id?state.records.find(r=>r.id===id):null;
+  if(existing&&isTransferRecord(existing)){openTransferModal(existing.id);return}   // transfers have their own sheet
   editingRecordId=id;
-  const record=id?state.records.find(r=>r.id===id):null;
+  const record=existing;
   resetDocDraft(record);
-  formState={draft:{},schema:GENERIC_SCHEMA,amountTouched:false,yearTouched:!!record?.incomeYear};
+  formState={draft:{},schema:GENERIC_SCHEMA,amountTouched:false,yearTouched:!!record?.incomeYear,fundingAccounts:assetFundingAccounts()};
   if(record)MANAGED_KEYS.forEach(k=>{if(record[k]!==undefined)formState.draft[k]=record[k]});
   document.querySelector('#recordForm .modal-foot').innerHTML='<button type="button" class="btn" data-close-modal>Cancel</button><button type="submit" class="btn btn-primary">Save Record</button>';
   document.querySelectorAll('#recordForm [data-close-modal]').forEach(button=>button.onclick=()=>document.getElementById('recordModal').close());
@@ -2145,12 +2428,34 @@ function openRecordModal(id=null){
     <div class="sub-fields" id="subFields"></div>
     <label class="full"><span id="detailsLabelText">Details / Description</span><textarea id="recordDetails" rows="3">${esc(record?.details||record?.description||'')}</textarea><span class="hint" id="detailsHint"></span></label>
     <label>Amount / Balance *<span class="calc-field"><input id="recordAmount" type="number" step="0.01" inputmode="decimal" required value="${esc(amountValue===0?'0':amountValue)}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="recordAmount" aria-label="Open calculator for Amount / Balance" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button></span><span class="hint" id="amountHint"></span></label>
+    <label class="full record-funding-field" id="recordFundingField">Funded from Asset Subcategory
+      <select id="recordFunding">${assetFundingOptionsHtml(formState.fundingAccounts)}</select>
+      <span class="hint" id="recordFundingHint"></span>
+    </label>
     <label>Document (PDF)<input id="recordDocument" type="file" accept=".pdf,application/pdf" multiple><span class="hint">You can attach more than one PDF.</span></label>
     <div class="doc-manager" id="docManager"><h4>Attached documents</h4><div class="doc-list" id="docManagerList"></div></div>
   </div>`;
 
   const typeSelect=document.getElementById('recordType'),categorySelect=document.getElementById('recordCategory'),subSelect=document.getElementById('recordSubcategory');
   const dateInput=document.getElementById('recordDate'),amountInput=document.getElementById('recordAmount');
+  const fundingField=document.getElementById('recordFundingField'),fundingSelect=document.getElementById('recordFunding'),fundingHint=document.getElementById('recordFundingHint');
+  const fundingDefaultHint='Optional — the amount is deducted from this Asset subcategory. Leave None for no change.';
+  const describeFunding=()=>{
+    const account=fundingSelect.value?formState.fundingAccounts.get(fundingSelect.value):null;
+    fundingHint.textContent=account
+      ?`${account.category} / ${account.subcategory} · Balance ${formatMoney(account.balance)} — the record amount is deducted here.`
+      :fundingDefaultHint;
+  };
+  const syncFunding=()=>{
+    // Cash & Bank records are already the money itself, so they never get a funding source.
+    const cash=typeSelect.value==='Asset'&&isCashCategoryName(categorySelect.value);
+    fundingField.classList.toggle('hidden',cash);
+    fundingSelect.disabled=cash;
+    if(cash)fundingSelect.value='';
+    describeFunding();
+  };
+  if(record?.funding?.subcategory)fundingSelect.value=assetFundingKey(record.funding.category,record.funding.subcategory);
+  fundingSelect.onchange=describeFunding;
 
   const updateCategories=(keepCategory)=>{
     const filtered=state.categories.filter(c=>c.type===typeSelect.value);
@@ -2167,6 +2472,7 @@ function openRecordModal(id=null){
     subSelect.innerHTML=subs.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
     if(keepSub&&subs.includes(keepSub))subSelect.value=keepSub;
     renderSubFields();
+    syncFunding();
   };
   typeSelect.onchange=()=>updateCategories();
   categorySelect.onchange=()=>updateSubcategories();
@@ -2221,6 +2527,15 @@ async function saveRecord(event){
   if(schema.amountSync==='purchase')record.purchaseValue=amount;      // Jewelry / Other Property: Amount = Purchase Value
   if(schema.amountSync==='market'&&!record.currentMarketValue&&!record.purchaseValue){record.currentMarketValue=amount}
   if(!record.incomeYear){const derived=fiscalYearFromDate(record.date);if(derived)record.incomeYear=derived}
+  // "Funded from" only applies to records whose category is not Cash & Bank: a Cash & Bank
+  // snapshot already *is* the money, so it must never deduct itself.
+  const fundingEl=document.getElementById('recordFunding');
+  const fundingAccount=fundingEl&&!fundingEl.disabled&&fundingEl.value?formState.fundingAccounts?.get(fundingEl.value):null;
+  if(fundingAccount&&!(type==='Asset'&&isCashCategoryName(category))){
+    record.funding={category:fundingAccount.category,subcategory:fundingAccount.subcategory};
+  }else{
+    delete record.funding;
+  }
   record.updatedAt=new Date().toISOString();
 
   // Commit staged document operations
@@ -2266,46 +2581,37 @@ async function saveRecord(event){
 }
 
 async function deleteRecord(id){
-  if(await confirm('Delete this financial record? Any linked document relationships will also be removed.','Delete Record')){
-    const record=state.records.find(r=>r.id===id);
+  const record=state.records.find(r=>r.id===id);
+  const transfer=isTransferRecord(record);
+  const question=transfer
+    ?'Delete this transfer? Both account balances go back to what they were before the transfer.'
+    :'Delete this financial record? Any linked document relationships will also be removed.';
+  if(await confirm(question,transfer?'Delete Transfer':'Delete Record')){
     const linked=new Set([...(record?.documentIds||[]),...state.documents.filter(d=>d.recordId===id).map(d=>d.id)]);
     for(const documentId of linked){
       await remove('documents',documentId);
       await remove('documentBlobs',documentId);
     }
     await remove('records',id);
-    await loadState();renderAll();toast('Record deleted');
+    await loadState();renderAll();toast(transfer?'Transfer deleted':'Record deleted');
   }
 }
 
 function viewRecord(id){
   const r=state.records.find(x=>x.id===id);if(!r)return;
+  if(isTransferRecord(r)){viewTransferRecord(r);return}
   editingRecordId=null;
   const schema=schemaForRecord(r);
   document.getElementById('recordModalTitle').textContent=recordTitle(r);
   document.getElementById('recordModalSubtitle').textContent=`${r.category} / ${r.subcategory}`;
-  const documents=docsOf(r);
-  const documentSection=documents.length?`
-    <label class="full document-view-section">Attached PDF Documents
-      <div class="document-view-list">${documents.map(doc=>`
-        <div class="document-view-item">
-          <div class="document-info">
-            <strong>${esc(doc.name||doc.title||'document.pdf')}</strong>
-            <span>${formatFileSize(doc.size)}</span>
-          </div>
-          <div class="document-actions">
-            <button type="button" class="btn" data-cmd="open-pdf" data-id="${esc(doc.id)}">View PDF</button>
-            <button type="button" class="btn btn-primary" data-cmd="download-pdf" data-id="${esc(doc.id)}">Download PDF</button>
-          </div>
-        </div>`).join('')}
-      </div>
-    </label>`:'';
+  const documentSection=documentViewSection(r);
   const show=(label,value,full=false)=>`<label${full?' class="full"':''}><span class="k">${esc(label)}</span><strong class="view-field">${value===''||value===undefined||value===null?'—':esc(value)}</strong></label>`;
   const rows=[show('Type',r.type),show('Category',r.category),show('Subcategory',r.subcategory),show('Date',fmtDate(r.date))];
   schema.fields.forEach(f=>rows.push(show(f.label,f.type==='money'?(r[f.key]?formatMoney(r[f.key]):''):r[f.key])));
   const shown=new Set(schema.fields.map(f=>f.key));
   ['purchaseValue','currentMarketValue'].forEach(k=>{if(!shown.has(k)&&r[k])rows.push(show(k==='purchaseValue'?'Purchase Value':'Current Market Value',formatMoney(r[k])))});
   rows.push(show('Amount / Balance',formatMoney(recordAmount(r))));
+  if(r.funding&&r.funding.subcategory)rows.push(show('Funded From',`${r.funding.category||'Asset'} / ${r.funding.subcategory}`),show('Funding Impact',`${formatMoney(Math.abs(recordAmount(r)))} deducted from that subcategory`));
   rows.push(show('Details / Description',r.details||r.description||'',true));
   if(r.remarks)rows.push(show('Remarks',r.remarks,true));
   document.getElementById('recordFormFields').innerHTML=`<div class="form-grid">${rows.join('')}${documentSection}</div>`;
@@ -2315,8 +2621,464 @@ function viewRecord(id){
 }
 
 /* ==========================================================================
+   Transfer sheet (Assets & Liabilities -> Transfer)
+   ========================================================================== */
+let editingTransferId=null;
+let savingTransfer=false;
+
+/** Every Cash & Bank subcategory with the balance it currently shows. Cash resolves to its latest
+ *  snapshot per item, so each row matches the Balance Sheet exactly; transfers and "Funded from"
+ *  movements already applied are included. The Transfer sheet only ever offers these subcategories.
+ *  `ignoreTransferId` leaves out the legs of the transfer being edited, so the sheet starts from
+ *  the balances the accounts had before that transfer. */
+function transferAccounts(ignoreTransferId=''){
+  const accounts=new Map();
+  const accountFor=(category,subcategory)=>{
+    const key=cashSubcategoryKey(subcategory);
+    if(!key)return null;
+    let account=accounts.get(key);
+    if(!account){
+      account={key,type:'Asset',category:String(category||'').trim(),subcategory:String(subcategory||'').trim(),particulars:'',accountDetail:'',balance:0};
+      accounts.set(key,account);
+    }else if(!account.category&&category)account.category=String(category).trim();
+    return account;
+  };
+  // Subcategories declared under Cash & Bank are offered even before they hold a balance.
+  state.categories.filter(category=>category.type==='Asset'&&isCashCategoryName(category.name))
+    .forEach(category=>(category.subcategories||[]).forEach(subcategory=>accountFor(category.name,subcategory)));
+  effectiveRecordsForBalance(state.records,'').forEach(record=>{
+    if(!isCashRecord(record))return;
+    if(ignoreTransferId&&record.syntheticTransferLeg&&record.transferId===ignoreTransferId)return;
+    const account=accountFor(record.category,record.subcategory);
+    if(account)account.balance+=recordAmount(record);
+  });
+  return [...accounts.values()].sort((a,b)=>a.subcategory.localeCompare(b.subcategory)||a.category.localeCompare(b.category));
+}
+/**
+ * Older transfers could start or end on a non-cash account (a loan that paid money into the bank,
+ * for example). The Transfer sheet only offers Cash & Bank subcategories now, so those stored sides
+ * are added back to the list - for that one sheet only - instead of being silently replaced by a
+ * Cash & Bank account when the transfer is saved again.
+ */
+function legacyTransferSides(accounts,transfer,ignoreTransferId=''){
+  const rows=[...(accounts||[])];
+  // Nothing to add for the usual Cash & Bank -> Cash & Bank transfer.
+  const sides=[transfer&&transfer.source,transfer&&transfer.destination].filter(side=>side&&!isCashRecord(side));
+  if(!sides.length)return rows;
+  const balances=new Map();
+  effectiveRecordsForBalance(state.records,'').forEach(record=>{
+    if(isCashRecord(record))return;
+    if(ignoreTransferId&&record.syntheticTransferLeg&&record.transferId===ignoreTransferId)return;
+    const key=transferAccountKey(record);
+    balances.set(key,(balances.get(key)||0)+recordAmount(record));
+  });
+  sides.forEach(side=>{
+    if(!side||isCashRecord(side))return;
+    const key=transferAccountKey(side);
+    if(!key||rows.some(row=>row.key===key))return;
+    rows.push({
+      key,legacy:true,type:side.type||'',category:side.category||'',subcategory:side.subcategory||'',
+      particulars:side.particulars||'',accountDetail:side.accountDetail||'',balance:balances.get(key)||0
+    });
+  });
+  return rows;
+}
+/** The account rows of the transfer sheet currently open (see legacyTransferSides). */
+function transferSheetAccounts(){
+  const record=editingTransferId?state.records.find(r=>r.id===editingTransferId):null;
+  return legacyTransferSides(transferAccounts(editingTransferId||''),record&&record.transfer,editingTransferId||'');
+}
+/** Flat <option> list of Cash & Bank subcategories (one row per account, with its live balance). */
+function transferAccountOptions(accounts,selectedKey,excludeKey=''){
+  const label=account=>isCashCategoryName(account.category)
+    ?account.subcategory
+    :`${account.category} / ${transferAccountName(account)||account.subcategory}`;
+  const options=accounts.filter(account=>account.key!==excludeKey).map(account=>
+    `<option value="${esc(account.key)}" ${account.key===selectedKey?'selected':''}>${esc(label(account))} · ${esc(formatMoney(account.balance))}</option>`
+  ).join('');
+  return `<option value="">Select a Cash &amp; Bank subcategory</option>${options}`;
+}
+function currentTimeValue(){
+  const now=new Date();
+  return `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+}
+function syncTransferStatusLabels(){
+  const source=$el('transferSourceStatus'),destination=$el('transferDestinationStatus');
+  if(source)$el('transferSourceStatusText').textContent=source.checked?'Paid':'Pending';
+  if(destination)$el('transferDestinationStatusText').textContent=destination.checked?'Paid':'Pending';
+}
+function updateTransferHints(){
+  const accounts=transferSheetAccounts();
+  const hint=key=>{
+    const account=accounts.find(item=>item.key===key);
+    return account?`${account.category} / ${account.subcategory} · Balance ${formatMoney(account.balance)}`:'';
+  };
+  $el('transferSourceHint').textContent=hint($el('transferSourceAccount').value);
+  $el('transferDestinationHint').textContent=hint($el('transferDestinationAccount').value);
+}
+/** Live "before -> after" preview of both accounts, plus fee / negative-balance warnings. */
+function updateTransferPreview(){
+  const accounts=transferSheetAccounts();
+  const source=accounts.find(account=>account.key===$el('transferSourceAccount').value);
+  const destination=accounts.find(account=>account.key===$el('transferDestinationAccount').value);
+  const synced=$el('transferSyncAmount').checked;
+  const sourceAmount=Math.abs(Number($el('transferSourceAmount').value)||0);
+  const destinationInput=$el('transferDestinationAmount');
+  if(synced){
+    const mirrored=sourceAmount?String(sourceAmount):'';
+    if(destinationInput.value!==mirrored)destinationInput.value=mirrored;
+  }
+  destinationInput.disabled=synced;
+  const destinationAmount=synced?sourceAmount:Math.abs(Number(destinationInput.value)||0);
+  const row=(account,amount,isSource)=>{
+    if(!account)return '';
+    const before=account.balance;
+    const after=before+transferLegDelta(account,amount,isSource);
+    return `<div class="transfer-preview-row"><span>${esc(transferAccountName(account)||account.subcategory)}</span><strong class="${after<before?'down':after>before?'up':''}">${esc(formatMoney(before))} → ${esc(formatMoney(after))}</strong></div>`;
+  };
+  const rows=[];
+  if(source&&sourceAmount)rows.push(row(source,sourceAmount,true));
+  if(destination&&destinationAmount)rows.push(row(destination,destinationAmount,false));
+  const difference=sourceAmount-destinationAmount;
+  if(sourceAmount&&destinationAmount&&difference>0){
+    rows.push(`<div class="transfer-preview-note">Difference ${esc(formatMoney(difference))} stays behind as a cash-out charge.</div>`);
+  }
+  if(source&&sourceAmount>0&&source.type==='Asset'&&source.balance<sourceAmount){
+    rows.push(`<div class="transfer-preview-note warn">This is more than the source balance (${esc(formatMoney(source.balance))}).</div>`);
+  }
+  if(!rows.length)rows.push('<div class="transfer-preview-note">Choose both accounts and enter an amount to preview the new balances.</div>');
+  $el('transferPreview').innerHTML=rows.join('');
+}
+
+/* ---------- Optional PDF attachment for a transfer -------------------------
+   A transfer carries at most one supporting PDF. The file lives in the existing
+   "documentBlobs" store and its small metadata record in "documents", both linked to the
+   transfer through documentIds / recordId. Changes are staged until the transfer is saved,
+   so Cancel never touches the stored PDF.
+   -------------------------------------------------------------------------- */
+let transferDocDraft={existing:null,removed:false,replacement:null,added:null};
+
+/** PDFs linked to a transfer: documentIds first, then the recordId fallback for older data. */
+function transferDocsOf(record){
+  if(!record)return [];
+  const linked=(record.documentIds||[]).map(id=>state.documents.find(d=>d.id===id)).filter(Boolean);
+  return linked.length?linked:state.documents.filter(d=>d.recordId===record.id);
+}
+function resetTransferDocDraft(record){
+  transferDocDraft={existing:transferDocsOf(record)[0]||null,removed:false,replacement:null,added:null};
+}
+/** Small metadata record for the "documents" store (the bytes stay in "documentBlobs"). */
+function transferDocumentRecord({id,recordId,file,existing,category,subcategory,financialType,incomeYear}){
+  const now=new Date().toISOString();
+  const base=existing?Object.assign({},existing):{createdAt:now};
+  return Object.assign(base,{
+    id,recordId,
+    name:file.name,title:file.name,
+    type:'application/pdf',mimeType:'application/pdf',
+    size:Number(file.size)||0,
+    category:category||'',subcategory:subcategory||'',
+    financialType:financialType||'',incomeYear:incomeYear||'',
+    uploadedAt:now,updatedAt:now
+  });
+}
+function stagedTransferDoc(){
+  return transferDocDraft.added||transferDocDraft.replacement||null;
+}
+/** Compact preview chip shown inside the sheet before saving. */
+function renderTransferDocManager(){
+  const host=$el('transferDocManagerList');
+  if(!host)return;
+  const chip=(name,size,note,actions,extra='')=>`<div class="transfer-doc-chip ${extra}">
+      ${icon('file')}
+      <div class="transfer-doc-meta"><strong title="${esc(name)}">${esc(name)}</strong><span>${esc(formatFileSize(size))}${note?` · ${esc(note)}`:''}</span></div>
+      <div class="transfer-doc-actions">${actions}</div>
+    </div>`;
+  const draft=transferDocDraft,rows=[];
+  if(draft.existing){
+    const savedName=draft.existing.name||draft.existing.title||'document.pdf';
+    const staged=stagedTransferDoc();
+    if(draft.removed){
+      rows.push(chip(savedName,draft.existing.size,'will be removed on save',
+        '<button type="button" class="action-link" data-tact="undo-existing">Undo</button>','removed'));
+    }else if(staged){
+      rows.push(chip(staged.name,staged.size,draft.replacement?'replaces the saved PDF':'new attachment',
+        '<button type="button" class="action-link" data-tact="view-new">Preview</button><button type="button" class="action-link danger transfer-doc-remove" data-tact="remove-new" title="Remove PDF" aria-label="Remove selected PDF">×</button>'));
+    }else{
+      rows.push(chip(savedName,draft.existing.size,'attached',
+        '<button type="button" class="action-link" data-tact="view-existing">Preview</button><button type="button" class="action-link" data-tact="download-existing">Download</button><button type="button" class="action-link" data-tact="replace-existing">Replace</button><button type="button" class="action-link danger transfer-doc-remove" data-tact="remove-existing" title="Remove PDF" aria-label="Remove attached PDF">×</button>'));
+    }
+  }else if(draft.added){
+    rows.push(chip(draft.added.name,draft.added.size,'new · saved with this transfer',
+      '<button type="button" class="action-link" data-tact="view-new">Preview</button><button type="button" class="action-link danger transfer-doc-remove" data-tact="remove-new" title="Remove PDF" aria-label="Remove selected PDF">×</button>'));
+  }else{
+    rows.push('<div class="doc-empty">No PDF attached yet.</div>');
+  }
+  host.innerHTML=rows.join('');
+}
+
+/** Opens the transfer sheet. Without an id it starts a new transfer, with an id it edits that one. */
+function openTransferModal(id=null){
+  const record=id?state.records.find(r=>r.id===id):null;
+  if(id&&!record)return;
+  editingTransferId=record?record.id:null;
+  const transfer=record&&record.transfer?record.transfer:null;
+  const accounts=transferSheetAccounts();
+  if(accounts.length<2){
+    editingTransferId=null;
+    toast('A transfer needs two Cash & Bank subcategories. Add a second one (for example Cash in Hand and bKash) first.',true);
+    return;
+  }
+  /** A stored side keeps its exact identity, so an old transfer that used a non-cash account
+   *  (added back by legacyTransferSides) stays editable instead of being re-pointed on save. */
+  const findSide=side=>side
+    ?accounts.find(account=>account.key===cashSubcategoryKey(side.subcategory)||account.key===transferAccountKey(side))
+    :undefined;
+  const sourceAccount=findSide(transfer&&transfer.source)||accounts[0];
+  const destinationAccount=(()=>{
+    const stored=findSide(transfer&&transfer.destination);
+    if(stored&&stored.key!==sourceAccount.key)return stored;
+    return accounts.find(account=>account.key!==sourceAccount.key);
+  })();
+  $el('transferModalTitle').textContent=record?'Edit Transfer':'New Transfer';
+  $el('transferModalSubtitle').textContent=record
+    ?'Update the Cash & Bank subcategories, the amounts or the date of this transfer'
+    :'Move money between two Cash & Bank subcategories without touching income or expenses';
+  $el('transferSubmitBtn').textContent=record?'Save Transfer':'Create Transfer';
+  $el('transferSourceAccount').innerHTML=transferAccountOptions(accounts,sourceAccount.key);
+  $el('transferDestinationAccount').innerHTML=transferAccountOptions(accounts,destinationAccount?destinationAccount.key:'',sourceAccount.key);
+  const amountValue=side=>side&&Number(side.amount)?String(Number(side.amount)):'';
+  $el('transferSourceAmount').value=transfer?amountValue(transfer.source):'';
+  $el('transferDestinationAmount').value=transfer?amountValue(transfer.destination):'';
+  $el('transferSyncAmount').checked=transfer?transfer.synced!==false:true;
+  const currency=(transfer&&transfer.source&&transfer.source.currency)||state.settings.currency||'BDT';
+  $el('transferSourceCurrency').value=currency;
+  $el('transferDestinationCurrency').value=(transfer&&transfer.destination&&transfer.destination.currency)||currency;
+  $el('transferSourceStatus').checked=!transfer||!transfer.source||transfer.source.status!=='Pending';
+  $el('transferDestinationStatus').checked=!transfer||!transfer.destination||transfer.destination.status!=='Pending';
+  $el('transferDate').value=(record&&normalizeExcelDate(record.date))||todayISO();
+  $el('transferTime').value=(transfer&&transfer.time)||currentTimeValue();
+  $el('transferNotes').value=(record&&(record.details||record.description))||'';
+  syncTransferStatusLabels();
+  updateTransferHints();
+  updateTransferPreview();
+  resetTransferDocDraft(record);
+  $el('transferDocument').value='';
+  renderTransferDocManager();
+  $el('transferModal').showModal();
+  const amountField=$el('transferSourceAmount');
+  setTimeout(()=>{
+    try{amountField.focus({preventScroll:true});if(amountField.select)amountField.select()}catch(error){}
+  },80);
+}
+
+/** Creates or updates a transfer from the sheet. Both sides live on the single record. */
+async function saveTransfer(event){
+  event.preventDefault();
+  if(savingTransfer)return;
+  const accounts=transferSheetAccounts();
+  const source=accounts.find(account=>account.key===$el('transferSourceAccount').value);
+  const destination=accounts.find(account=>account.key===$el('transferDestinationAccount').value);
+  if(!source||!destination){
+    toast('Choose the Cash & Bank subcategory the money leaves and the one it arrives in.',true);
+    return;
+  }
+  if(source.key===destination.key){
+    toast('The source and the destination must be different Cash & Bank subcategories.',true);
+    return;
+  }
+  const synced=$el('transferSyncAmount').checked;
+  const sourceAmount=Math.abs(Number($el('transferSourceAmount').value)||0);
+  const destinationAmount=synced?sourceAmount:Math.abs(Number($el('transferDestinationAmount').value)||0);
+  if(!(sourceAmount>0)){
+    toast('Enter how much leaves the source account.',true);
+    $el('transferSourceAmount').focus();
+    return;
+  }
+  if(!(destinationAmount>0)){
+    toast('Enter how much arrives in the destination account.',true);
+    $el('transferDestinationAmount').focus();
+    return;
+  }
+  const date=$el('transferDate').value||todayISO();
+  const time=$el('transferTime').value||'';
+  const existing=editingTransferId?state.records.find(r=>r.id===editingTransferId):null;
+  const now=new Date().toISOString();
+  const sourceName=transferAccountName(source)||source.subcategory;
+  const destinationName=transferAccountName(destination)||destination.subcategory;
+  const record={
+    id:existing?existing.id:uid('record'),
+    kind:TRANSFER_KIND,
+    // The record keeps the source side's classification so the existing filters keep working;
+    // the destination side is matched from transfer.destination.
+    type:source.type,category:source.category,subcategory:source.subcategory,
+    particulars:`${sourceName} → ${destinationName}`,
+    accountDetail:'',
+    date,
+    incomeYear:fiscalYearFromDate(date)||(existing&&existing.incomeYear)||'',
+    details:$el('transferNotes').value.trim(),
+    amount:sourceAmount,balance:sourceAmount,
+    documentIds:existing?(existing.documentIds||[]):[],
+    transfer:{
+      version:1,
+      source:{...transferAccountSnapshot(source),amount:sourceAmount,currency:$el('transferSourceCurrency').value,status:$el('transferSourceStatus').checked?'Paid':'Pending'},
+      destination:{...transferAccountSnapshot(destination),amount:destinationAmount,currency:$el('transferDestinationCurrency').value,status:$el('transferDestinationStatus').checked?'Paid':'Pending'},
+      time,synced,fee:Math.max(0,sourceAmount-destinationAmount),
+      createdAt:(existing&&existing.transfer&&existing.transfer.createdAt)||now
+    },
+    createdAt:(existing&&existing.createdAt)||now,
+    updatedAt:now
+  };
+  savingTransfer=true;
+  try{
+    // Commit the staged PDF before the record, so a saved transfer never points at a missing file.
+    let documentIds=[...(record.documentIds||[])];
+    const draft=transferDocDraft;
+    if(draft.existing&&draft.removed&&!draft.replacement){
+      await remove('documentBlobs',draft.existing.id);
+      await remove('documents',draft.existing.id);
+      documentIds=documentIds.filter(id=>id!==draft.existing.id);
+    }
+    if(draft.existing&&draft.replacement){
+      const documentId=draft.existing.id;
+      await put('documentBlobs',{id:documentId,blob:draft.replacement});
+      await put('documents',transferDocumentRecord({id:documentId,recordId:record.id,file:draft.replacement,existing:draft.existing,category:record.category,subcategory:record.subcategory,financialType:record.type,incomeYear:record.incomeYear}));
+      if(!documentIds.includes(documentId))documentIds.push(documentId);
+    }
+    if(!draft.existing&&draft.added){
+      const documentId=draft.addedId||uid('doc');
+      draft.addedId=documentId;
+      await put('documentBlobs',{id:documentId,blob:draft.added});
+      await put('documents',transferDocumentRecord({id:documentId,recordId:record.id,file:draft.added,existing:null,category:record.category,subcategory:record.subcategory,financialType:record.type,incomeYear:record.incomeYear}));
+      if(!documentIds.includes(documentId))documentIds.push(documentId);
+    }
+    if(draft.existing&&!draft.removed&&!draft.replacement){
+      // The PDF stays as it is, but the transfer may now sit in another category / income year.
+      // Metadata follows the record so category renames and backups stay consistent.
+      const saved=draft.existing;
+      const fresh={category:record.category||'',subcategory:record.subcategory||'',financialType:record.type||'',incomeYear:record.incomeYear||''};
+      if(Object.keys(fresh).some(key=>saved[key]!==fresh[key])){
+        await put('documents',Object.assign({},saved,fresh,{updatedAt:now}));
+      }
+    }
+    record.documentIds=documentIds;
+    await put('records',record);
+    await loadState();
+    $el('transferModal').close();
+    editingTransferId=null;
+    renderAll();
+    toast(existing?'Transfer updated':'Transfer created');
+  }catch(error){
+    console.error(error);
+    const full=error&&error.name==='QuotaExceededError';
+    toast(full?'Could not save the transfer — browser storage is full.':`Could not save the transfer${error&&error.message?' — '+error.message:''}`,true);
+  }finally{
+    savingTransfer=false;
+  }
+}
+
+/** Read-only view of a transfer inside the shared record dialog, with a shortcut to edit it. */
+function viewTransferRecord(record){
+  editingRecordId=null;
+  const transfer=record.transfer||{};
+  const source=transfer.source||{},destination=transfer.destination||{};
+  const amounts=transferAmounts(transfer);
+  const show=(label,value,full=false)=>`<label${full?' class="full"':''}><span class="k">${esc(label)}</span><strong class="view-field">${value===''||value===undefined||value===null?'—':esc(value)}</strong></label>`;
+  const rows=[
+    show('Transfer',`${transferAccountName(source)||source.subcategory||''} → ${transferAccountName(destination)||destination.subcategory||''}`,true),
+    show('Date',fmtDate(record.date)),show('Time',transfer.time||''),
+    show('From Account',[source.category,source.subcategory].filter(Boolean).join(' / ')),
+    show('From Amount',amounts.out?formatMoney(amounts.out):''),
+    show('To Account',[destination.category,destination.subcategory].filter(Boolean).join(' / ')),
+    show('To Amount',amounts.incoming?formatMoney(amounts.incoming):''),
+    show('Currency',source.currency||''),
+    show('Status',`${source.status||'Paid'} → ${destination.status||'Paid'}`),
+    show('Income Year',record.incomeYear||''),
+    show('Notes',record.details||record.description||'',true)
+  ];
+  const meta=transferMetaLabel(record);
+  document.getElementById('recordModalTitle').textContent='Transfer';
+  document.getElementById('recordModalSubtitle').textContent=`${record.type||''} · not counted as income or expense`;
+  document.getElementById('recordFormFields').innerHTML=`<div class="form-grid">${rows.join('')}
+    ${documentViewSection(record)}
+    <div class="transfer-preview full"><div class="transfer-preview-note">A transfer only moves a balance between the two accounts, so Net Worth and the Income / Expense totals stay exactly the same.</div>${meta?`<div class="transfer-preview-note">${esc(meta)}</div>`:''}</div></div>`;
+  document.querySelector('#recordForm .modal-foot').innerHTML='<button type="button" class="btn" data-close-modal>Close</button><button type="button" class="btn btn-primary" id="editTransferFromView">Edit Transfer</button>';
+  document.querySelectorAll('#recordForm [data-close-modal]').forEach(button=>button.onclick=()=>document.getElementById('recordModal').close());
+  const edit=$el('editTransferFromView');
+  if(edit)edit.onclick=()=>{document.getElementById('recordModal').close();openTransferModal(record.id)};
+  document.getElementById('recordModal').showModal();
+}
+
+/** Wires the transfer sheet once; its fields are re-populated on every open. */
+function bindTransferForm(){
+  const modal=$el('transferModal');
+  if(!modal||!modal.showModal)return;
+  $el('transferForm').onsubmit=saveTransfer;
+  $el('transferSourceAccount').onchange=()=>{
+    const accounts=transferSheetAccounts();
+    const sourceKey=$el('transferSourceAccount').value;
+    const current=$el('transferDestinationAccount').value;
+    $el('transferDestinationAccount').innerHTML=transferAccountOptions(accounts,current,sourceKey);
+    if(!$el('transferDestinationAccount').value){
+      const fallback=accounts.find(account=>account.key!==sourceKey);
+      if(fallback)$el('transferDestinationAccount').value=fallback.key;
+    }
+    updateTransferHints();
+    updateTransferPreview();
+  };
+  ['transferDestinationAccount','transferSourceAmount','transferDestinationAmount','transferSyncAmount','transferDate','transferTime','transferSourceStatus','transferDestinationStatus','transferSourceCurrency','transferDestinationCurrency'].forEach(id=>{
+    const field=$el(id);
+    const handler=()=>{syncTransferStatusLabels();updateTransferHints();updateTransferPreview()};
+    field.oninput=handler;
+    field.onchange=handler;
+  });
+  // Optional PDF attachment — staged here and written by saveTransfer, so Cancel leaves the saved file untouched.
+  $el('transferDocument').onchange=event=>{
+    const input=event.target;
+    const file=input.files&&input.files[0];
+    input.value='';
+    if(!file)return;
+    if(!isPdfFile(file)){
+      toast('Only PDF files can be attached. Please choose a .pdf file.',true);
+      return;
+    }
+    if(file.size>30*1024*1024)toast('This PDF is larger than 30 MB — saving may exceed the browser storage limit.',true);
+    if(transferDocDraft.existing){
+      transferDocDraft.replacement=file;
+      transferDocDraft.added=null;
+      transferDocDraft.removed=false;
+    }else{
+      transferDocDraft.added=file;
+      transferDocDraft.replacement=null;
+    }
+    renderTransferDocManager();
+  };
+  $el('transferDocManager').onclick=async event=>{
+    const button=event.target.closest('[data-tact]');
+    if(!button)return;
+    const tact=button.dataset.tact;
+    if(tact==='view-existing'&&transferDocDraft.existing)await openPdfViewer(transferDocDraft.existing.id);
+    else if(tact==='download-existing'&&transferDocDraft.existing)await downloadDocument(transferDocDraft.existing.id);
+    else if(tact==='replace-existing')$el('transferDocument').click();
+    else if(tact==='remove-existing'){transferDocDraft.removed=true;transferDocDraft.replacement=null;renderTransferDocManager()}
+    else if(tact==='undo-existing'){transferDocDraft.removed=false;renderTransferDocManager()}
+    else if(tact==='view-new'){const file=stagedTransferDoc();if(file)await openPdfViewer({blob:file,name:file.name,size:file.size})}
+    else if(tact==='remove-new'){transferDocDraft.added=null;transferDocDraft.replacement=null;renderTransferDocManager()}
+  };
+  // The sheet always reopens from the live balances, so a stored edit id must not leak out.
+  modal.addEventListener('close',()=>{
+    editingTransferId=null;
+    transferDocDraft={existing:null,removed:false,replacement:null,added:null};
+    const input=$el('transferDocument');
+    if(input)input.value='';
+  });
+}
+
+
+/* ==========================================================================
    Records page & balance sheet
    ========================================================================== */
+
+
 function renderRecordFilters(){
   const typeSelect=document.getElementById('recordTypeFilter');
   const categorySelect=document.getElementById('recordCategoryFilter');
@@ -2376,9 +3138,10 @@ function renderRecordSections(){
   if(subcategory)records=records.filter(r=>r.subcategory===subcategory);
   records.sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
   const render=(items)=>items.map((r,i)=>{
-    const meta=recordMeta(r);
+    const transfer=isTransferRecord(r);
+    const meta=transfer?transferMetaLabel(r):recordMeta(r);
     const id=esc(r.id);
-    return `<div class="record-item" style="--i:${Math.min(i,14)}"><div><h4>${esc(recordTitle(r))}</h4><p>${esc(r.category)} · ${esc(r.subcategory)}${r.incomeYear?' · <span class="record-income-year">'+esc(r.incomeYear)+'</span>':''}</p>${meta?`<p>${esc(meta)}</p>`:''}</div><div class="record-amount"><strong>${formatMoney(recordAmount(r))}</strong><p>${esc(fmtDate(r.date))}</p></div>${docsOf(r).length?`<div class="record-docs">${docChips(r,3)}</div>`:''}<div class="record-actions"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></div></div>`;
+    return `<div class="record-item${transfer?' transfer-record':''}" style="--i:${Math.min(i,14)}"><div><h4>${esc(recordTitle(r))}</h4><p>${transfer?'<span class="badge transfer">Transfer</span> ':''}${esc(r.category)} · ${esc(r.subcategory)}${r.incomeYear?' · <span class="record-income-year">'+esc(r.incomeYear)+'</span>':''}</p>${meta?`<p>${esc(meta)}</p>`:''}</div><div class="record-amount"><strong>${formatMoney(recordAmount(r))}</strong><p>${esc(fmtDate(r.date))}</p></div>${docsFor(r).length?`<div class="record-docs">${docChips(r,3)}</div>`:''}<div class="record-actions"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></div></div>`;
   }).join('');
   const assets=records.filter(r=>r.type==='Asset'),liabilities=records.filter(r=>r.type==='Liability');
   document.getElementById('assetRecordCount').textContent=`${assets.length} records`;
@@ -2419,14 +3182,14 @@ function buildBalanceData(year){
       recs.forEach(r=>{if(!subNames.includes(r.subcategory))subNames.push(r.subcategory)});
       const subs=subNames.map(n=>{
         const list=recs.filter(r=>r.subcategory===n);
-        return {name:n,count:list.length,total:list.reduce((s,r)=>s+recordAmount(r),0)};
+        return {name:n,count:list.filter(r=>!r.syntheticTransferLeg).length,total:list.reduce((s,r)=>s+recordAmount(r),0)};
       });
-      return {name:c.name,subs,count:recs.length,total:subs.reduce((s,x)=>s+x.total,0)};
+      return {name:c.name,subs,count:recs.filter(r=>!r.syntheticTransferLeg).length,total:subs.reduce((s,x)=>s+x.total,0)};
     });
     return {cats,total:cats.reduce((s,c)=>s+c.total,0)};
   };
   const assets=section('Asset'),liabilities=section('Liability');
-  return {assets,liabilities,net:assets.total-liabilities.total,count:records.length};
+  return {assets,liabilities,net:assets.total-liabilities.total,count:records.filter(r=>!r.syntheticTransferLeg).length};
 }
 
 function renderBalance(){

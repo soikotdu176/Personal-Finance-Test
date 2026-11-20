@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=13">
+  <link rel="stylesheet" href="styles.css?v=18">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -67,6 +67,7 @@
       <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l6 6 4-4 8 8M15 17h6v-6"/></symbol>
       <symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></symbol>
       <symbol id="i-calc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2.5" width="16" height="19" rx="2.5"/><path d="M8 6.5h8M8 11h.01M12 11h.01M16 11h.01M8 14.5h.01M12 14.5h.01M16 14.5h.01M8 18h.01M12 18h.01M16 18h.01"/></symbol>
+      <symbol id="i-swap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h15m0 0-3.4-3.4M19 8l-3.4 3.4M20 16H5m0 0 3.4-3.4M5 16l3.4 3.4"/></symbol>
     </defs>
   </svg>
 
@@ -212,6 +213,7 @@
         <select id="recordSubcategoryFilter" aria-label="Filter by subcategory"></select>
         <select class="mobile-record-year-filter" id="recordYearFilter" aria-label="Filter by Financial Year"><option value="">All Financial Years</option></select>
         <button class="btn" id="recordClearFilters" disabled>Clear Filters</button>
+        <button class="btn" id="transferBtn" type="button" title="Move money between two accounts"><svg class="ic" aria-hidden="true"><use href="#i-swap"/></svg><span>Transfer</span></button>
         <button class="btn btn-primary" id="addRecordBtn"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg><span>Add Record</span></button>
       </div>
       <div class="record-columns">
@@ -352,6 +354,82 @@
     </form>
   </dialog>
 
+  <!-- Transfer: moves money between two Cash & Bank subcategories (Cash in Hand, bKash, ...).
+       Balance-neutral by design, so it never shows up in Income / Expense totals, only in the
+       balances of the two subcategories. -->
+  <dialog id="transferModal" class="modal transfer-modal" aria-labelledby="transferModalTitle">
+    <form id="transferForm" method="dialog" novalidate>
+      <div class="modal-head">
+        <div><h2 id="transferModalTitle">New Transfer</h2><p id="transferModalSubtitle">Move money between two Cash &amp; Bank subcategories without touching income or expenses</p></div>
+        <button type="button" class="close-btn" data-close-modal aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid transfer-form">
+          <div class="form-section">From</div>
+          <label class="full">From (Cash &amp; Bank subcategory) *
+            <select id="transferSourceAccount" required></select>
+            <span class="hint" id="transferSourceHint"></span>
+          </label>
+          <label>Amount *
+            <span class="calc-field">
+              <input id="transferSourceAmount" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" required>
+              <button type="button" class="calc-trigger" data-calc-target="transferSourceAmount" aria-label="Open calculator for the transfer amount" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button>
+            </span>
+          </label>
+          <label>Currency
+            <select id="transferSourceCurrency"><option value="BDT">BDT (৳)</option><option value="USD">USD ($)</option><option value="EUR">EUR (€)</option><option value="GBP">GBP (£)</option></select>
+          </label>
+          <label class="transfer-status">Status
+            <span class="status-toggle">
+              <input type="checkbox" id="transferSourceStatus" checked>
+              <span class="status-toggle-track" aria-hidden="true"></span>
+              <span class="status-toggle-text" id="transferSourceStatusText">Paid</span>
+            </span>
+          </label>
+          <label class="transfer-sync full">
+            <span class="transfer-sync-row"><input type="checkbox" id="transferSyncAmount" checked><span>Same amount on both sides</span></span>
+            <span class="hint">Untick when a cash-out or transfer fee makes the received amount smaller.</span>
+          </label>
+          <div class="form-section">Transfer to</div>
+          <label class="full">To (Cash &amp; Bank subcategory) *
+            <select id="transferDestinationAccount" required></select>
+            <span class="hint" id="transferDestinationHint"></span>
+          </label>
+          <label>Amount *
+            <span class="calc-field">
+              <input id="transferDestinationAmount" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" required>
+              <button type="button" class="calc-trigger" data-calc-target="transferDestinationAmount" aria-label="Open calculator for the received amount" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button>
+            </span>
+          </label>
+          <label>Currency
+            <select id="transferDestinationCurrency"><option value="BDT">BDT (৳)</option><option value="USD">USD ($)</option><option value="EUR">EUR (€)</option><option value="GBP">GBP (£)</option></select>
+          </label>
+          <label class="transfer-status">Status
+            <span class="status-toggle">
+              <input type="checkbox" id="transferDestinationStatus" checked>
+              <span class="status-toggle-track" aria-hidden="true"></span>
+              <span class="status-toggle-text" id="transferDestinationStatusText">Paid</span>
+            </span>
+          </label>
+          <div class="form-section">Details</div>
+          <label>Date<input id="transferDate" type="date"></label>
+          <label>Time<input id="transferTime" type="time"></label>
+          <label class="full">Notes<textarea id="transferNotes" rows="2" placeholder="e.g. Cash-out charge included"></textarea></label>
+          <div class="form-section">Attachment</div>
+          <label class="full transfer-pdf-field">Attach PDF (Optional)
+            <input id="transferDocument" type="file" accept="application/pdf,.pdf" aria-describedby="transferDocumentHint">
+            <span class="hint" id="transferDocumentHint">Supporting receipt or transfer slip — PDF files only.</span>
+          </label>
+          <div class="transfer-doc-manager full" id="transferDocManager" aria-live="polite">
+            <div class="transfer-doc-list" id="transferDocManagerList"></div>
+          </div>
+          <div class="transfer-preview full" id="transferPreview" aria-live="polite"></div>
+        </div>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="submit" class="btn btn-primary" id="transferSubmitBtn">Create Transfer</button></div>
+    </form>
+  </dialog>
+
   <dialog id="incomeModal" class="modal" aria-labelledby="incomeModalTitle">
     <form id="incomeForm" method="dialog">
       <div class="modal-head"><div><h2 id="incomeModalTitle">Add Income / Expense</h2><p id="incomeModalSubtitle"></p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
@@ -470,6 +548,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=13"></script>
+  <script src="app.js?v=18"></script>
 </body>
 </html>

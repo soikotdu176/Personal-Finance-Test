@@ -30,6 +30,9 @@ committed or deployed.
 - Add/Edit transaction modal with cascading classification dropdowns derived from the master Income/Expense tree (editable in Settings → Categories & Subcategories).
 - Excel & Budge CSV migration: imports Assets & Liabilities.xlsx, Income & Expenses.xlsx, and `budge-*.csv`/`.xlsx` with smart category normalization and duplicate detection (`Imported X transactions (Skipped Y duplicates)`).
 - PDF badges in tables/lists, embedded PDF viewer (Download / New tab), staged View/Download/Replace/Remove in the Edit modal.
+- Transfers move money between two **Cash & Bank subcategories** (Cash in Hand, bKash, a bank account, …): the sheet lists one row per subcategory with its live balance, never the same subcategory on both sides, and an optional fee/difference so the received amount can be smaller. Nothing is written to the ledger: both balances are rebuilt at read time, so editing or deleting a transfer restores them exactly.
+- A record outside Cash & Bank (a vehicle, land, an investment, …) can say which **Asset subcategory funded it**. The amount is deducted from that subcategory the same way, so choosing *None*, changing the amount or deleting the record can never double-deduct; a newer Cash & Bank snapshot always wins over an older movement.
+- Transfers can carry one supporting PDF (deposit slip, receipt): attach it in the transfer sheet, then preview, download, replace or remove it from the transfer's View dialog. The file is staged until **Save Transfer**, stored in the same offline IndexedDB stores as every other attachment and cleaned up when the transfer is deleted.
 - Add/Edit form adapts to Category + Subcategory (15 schemas mapped to `Assets & Liabilities.xlsx`).
 - Income Year filter auto-fills the Bangladesh fiscal year dates (1 Jul - 30 Jun).
 - Generate PDF Report (one category per page, auto portrait/landscape) and Excel Report (summary + per-category sheets with SUM formulas).
@@ -81,4 +84,4 @@ git push --force origin main
   `git for-each-ref --format="%(refname)" refs/original | xargs -n1 git update-ref -d` then `git gc --prune=now`.
 
 ## Version
-App `2026-11-20-v8` · database schema `v4` · service worker `v11.0.0`.
+App `2026-11-20-v8` · database schema `v4` · service worker `v16.0.0`.

@@ -10,6 +10,9 @@ Assets & Liabilities.xlsx
 _smoke.mjs
 _checks.json
 _audit.js
+_ids_check.cjs
+_transfer_check.cjs
+_transfer_tests.js
 
 # ---- OS / editor ----
 Thumbs.db
