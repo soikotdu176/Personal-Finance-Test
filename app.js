@@ -8,7 +8,7 @@
 
 const DB_NAME = 'AssetBookDB';
 const DB_VERSION = 4;                       // v4: migration history batches (migrationId on imported rows)
-const APP_VERSION = '2026-11-20-v7';
+const APP_VERSION = '2026-11-20-v8';
 const DATA_VERSION_KEY = 'assetbook-data-version';
 let db;
 let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [] };
@@ -1050,6 +1050,10 @@ function renderDashboardFilters(){
     ${hint}
   </div>`;
 
+  // Accent every control that actually narrows the results (mobile compact filter card).
+  host.querySelectorAll('select').forEach(el=>el.classList.toggle('is-active',!!el.value));
+  host.querySelectorAll('.date-field').forEach(field=>field.classList.toggle('is-active',!!field.querySelector('input')?.value));
+
   const rerender=()=>{dashboardPage=1;renderDashboardFilters();renderDashboard()};
   const bind=(id,key,followUp)=>{
     const el=document.getElementById(id);
@@ -1330,7 +1334,7 @@ function renderMobileDashboard(){
   const selected=months.find(month=>month.key===mobilePeriodKey)||months[0];
   mobilePeriodKey=selected.key;
   const periodSelect=document.getElementById('mobilePeriodSelect');
-  periodSelect.innerHTML=months.map(month=>`<option value="${month.key}">${esc(month.title)} Balance</option>`).join('');
+  periodSelect.innerHTML=months.map(month=>`<option value="${month.key}">${esc(month.title)}</option>`).join('');
   periodSelect.value=selected.key;
   document.getElementById('mobileNetBalance').textContent=formatMoney(mobileYearBalance(mobileDashboardYear));
   const strip=document.getElementById('mobilePeriodStrip');
@@ -2020,6 +2024,10 @@ function renderRecordFilters(){
     const active=!!((typeSelect?.value||'')||categorySelect.value||subcategorySelect.value||(document.getElementById('recordSearch')?.value||'').trim());
     clearBtn.disabled=!active;
   }
+  // Mobile compact filter card: tint the dropdowns that are actually applied.
+  [typeSelect,categorySelect,subcategorySelect].forEach(select=>{
+    if(select)select.classList.toggle('is-active',!!select.value);
+  });
 }
 
 function renderRecordSections(){
@@ -2096,6 +2104,7 @@ function renderBalance(){
   if(balanceYear&&!years.includes(balanceYear))balanceYear='';
   yearSelect.innerHTML=`<option value="">All Income Years</option>${years.map(y=>`<option value="${esc(y)}" ${y===balanceYear?'selected':''}>${esc(y)}</option>`).join('')}`;
   yearSelect.value=balanceYear;
+  yearSelect.classList.toggle('is-active',!!balanceYear);
   const clearBtn=document.getElementById('balanceClear');
   if(clearBtn)clearBtn.disabled=!balanceYear;
   const data=buildBalanceData(balanceYear);
@@ -3317,6 +3326,8 @@ function renderIncomeFilters(){
     <select id="incomeSubcategory" aria-label="Subcategory" ${subs.length?'':'disabled'}>${option('','All Subcategories',!incomeFilters.subcategory)}${subs.map(s=>option(s,s,incomeFilters.subcategory===s)).join('')}</select>
     <button type="button" class="btn filter-reset" id="incomeClear" ${anyFilter?'':'disabled'}>Clear Filters</button>
   </div>`;
+  // Same accent treatment as the Dashboard filter card.
+  host.querySelectorAll('select').forEach(el=>el.classList.toggle('is-active',!!el.value));
   const rerender=()=>{incomePage=1;renderIncomePage()};
   const bind=(id,key,followUp)=>{const el=document.getElementById(id);el.onchange=()=>{incomeFilters[key]=el.value;if(followUp)followUp();rerender()}};
   const searchEl=document.getElementById('incomeSearch');
