@@ -8,7 +8,7 @@
 
 const DB_NAME = 'AssetBookDB';
 const DB_VERSION = 4;                       // v4: migration history batches (migrationId on imported rows)
-const APP_VERSION = '2026-11-20-v5';
+const APP_VERSION = '2026-11-20-v6';
 const DATA_VERSION_KEY = 'assetbook-data-version';
 let db;
 let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [] };
@@ -88,6 +88,16 @@ const defaultIncomeGroups = [
 
 /* Payment methods offered by the Add / Edit form and recognised by imports. */
 const ACCOUNTS = ['Cash in Hand','bKash','Basic Bank Limited','Card','Other'];
+
+/* Workbooks kept in the local Project/ folder. They are loaded once into an empty
+   database (same pipeline as Settings -> Import) so the Dashboard shows the complete
+   finances on first launch. Existing local data is never replaced. */
+const PROJECT_DATASET = [
+  'Project/Assets & Liabilities.xlsx',
+  'Project/Income & Expenses.xlsx',
+  'Project/budge-01-07-2026-31-07-2026_1795143633525.csv'
+];
+const PROJECT_DATASET_FLAG = 'assetbook-project-dataset';
 
 /* ---------- IndexedDB helpers ---------- */
 function openDB() {
@@ -488,6 +498,35 @@ function showFatal(error){
   };
 }
 
+/**
+ * First-run convenience: an empty database is filled from the workbooks kept in Project/.
+ * The files go through the normal import pipeline, so categories, fiscal years and duplicate
+ * detection behave exactly like Settings -> Import Excel / CSV. Existing records always win,
+ * a missing Project/ folder (for example a deployment without the private workbooks) is
+ * skipped silently, and the one-time flag stops the app from re-seeding data the user deleted.
+ */
+async function loadProjectDataset(){
+  if(!window.XLSX)return 0;
+  if(state.records.length||state.incomeExpenses.length)return 0;
+  try{if(localStorage.getItem(PROJECT_DATASET_FLAG))return 0}catch(e){}
+  let imported=0;
+  for(const path of PROJECT_DATASET){
+    try{
+      const response=await fetch(encodeURI(path),{cache:'no-cache'});
+      if(!response.ok)continue;
+      const blob=await response.blob();
+      const name=decodeURIComponent(path.split('/').pop());
+      const file=new File([blob],name,{type:blob.type||(/\.csv$/i.test(name)?'text/csv':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')});
+      const before=state.records.length+state.incomeExpenses.length;
+      await runImport(file,null);
+      imported+=Math.max(0,state.records.length+state.incomeExpenses.length-before);
+    }catch(error){console.info('[dataset] skipped',path,error)}
+  }
+  try{localStorage.setItem(PROJECT_DATASET_FLAG,'1')}catch(e){}
+  if(imported)toast(`Loaded ${imported} entries from the Project folder`);
+  return imported;
+}
+
 async function init(){
   initTheme();
   // Self-heal: an old cached index.html without the new elements -> drop caches once and reload.
@@ -515,6 +554,8 @@ async function init(){
   state.settings.currency ||= 'BDT';
   state.settings.locale ||= 'en-BD';
   state.settings.incomeYears ||= ['2026-27','2025-26','2024-25','2023-24','2022-23'];
+  // Fill an empty database from Project/ before the first render so the Dashboard is complete.
+  await loadProjectDataset();
   bindNavigation();
   bindGlobalActions();
   bindDelegatedActions();
@@ -710,16 +751,17 @@ function bindGlobalActions(){
   $el('mobileQuickAction').onclick=openMobileSpeedDial;
   $el('mobileSpeedToggle').onclick=toggleMobileSpeedDial;
   $el('mobileSpeedBackdrop').onclick=closeMobileSpeedDial;
-  $el('mobilePeriodSelect').onchange=e=>{mobilePeriodKey=e.target.value;renderMobileDashboard(mobileNetBalance)};
+  $el('mobilePeriodSelect').onchange=e=>{mobilePeriodKey=e.target.value;mobilePeriodChosen=true;renderMobileDashboard(mobileNetBalance)};
   $el('mobilePeriodStrip').onclick=e=>{
     const period=e.target.closest('[data-mobile-period]');
     if(!period)return;
     mobilePeriodKey=period.dataset.mobilePeriod;
+    mobilePeriodChosen=true;
     renderMobileDashboard(mobileNetBalance);
   };
   $el('mobileChartsAction').onclick=()=>{
-    document.body.classList.add('mobile-analytics');
-    document.querySelector('#dashboardPage > .charts-grid').scrollIntoView({behavior:reducedMotion()?'auto':'smooth',block:'start'});
+    const grid=document.querySelector('#dashboardPage > .charts-grid');
+    if(grid)grid.scrollIntoView({behavior:reducedMotion()?'auto':'smooth',block:'start'});
   };
   $el('mobileAllTransactions').onclick=()=>showPage('incomeExpenses');
   $el('mobileCalendarNav').onclick=openMobileCalendar;
@@ -1060,6 +1102,7 @@ function dashboardBalanceRecords(){
    ========================================================================== */
 const kpiPrev=[];
 let mobilePeriodKey='';
+let mobilePeriodChosen=false;
 let mobileNetBalance=0;
 let mobileQuickShortcuts=[];
 let mobileCalendarOpen=false;
@@ -1251,23 +1294,43 @@ function renderMobileCalendar(){
 }
 function mobilePeriods(){
   const now=new Date();
-  return Array.from({length:5},(_,i)=>{
-    const date=new Date(now.getFullYear(),now.getMonth()+i-2,1);
-    const year=date.getFullYear(),month=date.getMonth();
+  const periods=new Map();
+  const push=(year,month)=>{
     const key=`${year}-${String(month+1).padStart(2,'0')}`;
+    if(periods.has(key))return;
     const end=new Date(year,month+1,0);
-    const isoEnd=`${year}-${String(month+1).padStart(2,'0')}-${String(end.getDate()).padStart(2,'0')}`;
-    return {key,from:`${key}-01`,to:isoEnd,date,label:date.toLocaleDateString(undefined,{month:'short',year:'2-digit'}).toUpperCase(),name:date.toLocaleDateString(undefined,{month:'long'})};
+    const isoEnd=`${key}-${String(end.getDate()).padStart(2,'0')}`;
+    const date=new Date(year,month,1);
+    periods.set(key,{key,from:`${key}-01`,to:isoEnd,date,label:date.toLocaleDateString(undefined,{month:'short',year:'2-digit'}).toUpperCase(),name:date.toLocaleDateString(undefined,{month:'long'}),title:date.toLocaleDateString(undefined,{month:'long',year:'numeric'})});
+  };
+  // Rolling window around today ...
+  for(let i=0;i<5;i++)push(now.getFullYear(),now.getMonth()+i-2);
+  // ... plus every month that actually holds transactions, so a period with data is
+  // never missing from the summary and the first view is not left showing zeroes.
+  state.incomeExpenses.forEach(record=>{
+    const match=/^(\d{4})-(\d{2})/.exec(String(record.date||''));
+    if(match)push(Number(match[1]),Number(match[2])-1);
   });
+  return [...periods.values()].sort((a,b)=>a.key.localeCompare(b.key));
+}
+/** Latest month that has transactions, else the current month, else the newest period. */
+function mobileDefaultPeriod(periods){
+  const active=[...periods].reverse().find(period=>state.incomeExpenses.some(record=>record.date&&record.date>=period.from&&record.date<=period.to));
+  if(active)return active;
+  const now=new Date(),currentKey=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  return periods.find(period=>period.key===currentKey)||periods[periods.length-1];
 }
 function renderMobileDashboard(netBalance=mobileNetBalance){
   if(!isMobileViewport())return;
   mobileNetBalance=netBalance;
   const periods=mobilePeriods();
-  if(!periods.some(p=>p.key===mobilePeriodKey))mobilePeriodKey=periods[2].key;
-  const selected=periods.find(p=>p.key===mobilePeriodKey)||periods[2];
+  if(!periods.length)return;
+  // Until the user picks a period, follow the latest month that actually has activity so the
+  // summary is not left on an empty current month while transactions exist elsewhere.
+  if(!mobilePeriodChosen||!periods.some(p=>p.key===mobilePeriodKey))mobilePeriodKey=mobileDefaultPeriod(periods).key;
+  const selected=periods.find(p=>p.key===mobilePeriodKey)||mobileDefaultPeriod(periods);
   const periodSelect=document.getElementById('mobilePeriodSelect');
-  periodSelect.innerHTML=periods.map(p=>`<option value="${p.key}">${esc(p.name)} Balance</option>`).join('');
+  periodSelect.innerHTML=periods.map(p=>`<option value="${p.key}">${esc(p.title)} Balance</option>`).join('');
   periodSelect.value=selected.key;
   document.getElementById('mobileNetBalance').textContent=formatMoney(netBalance);
   document.getElementById('mobilePeriodStrip').innerHTML=periods.map(p=>`<button type="button" class="mobile-period-item ${p.key===selected.key?'active':''}" data-mobile-period="${p.key}" aria-pressed="${p.key===selected.key}">${esc(p.label)}</button>`).join('');
@@ -1281,7 +1344,9 @@ function renderMobileDashboard(netBalance=mobileNetBalance){
     if(!grouped.has(r.date))grouped.set(r.date,[]);
     grouped.get(r.date).push(r);
   });
-  const groups=[...grouped.entries()].sort((a,b)=>b[0].localeCompare(a[0]));
+  // "Recent activity" is a preview of the latest day only: the complete dashboard below must
+  // never be pushed off the screen by a long period. "View all" opens Income & Expenses.
+  const groups=[...grouped.entries()].sort((a,b)=>b[0].localeCompare(a[0])).slice(0,1);
   const rows=groups.map(([date,records])=>{
     const dailyNet=records.reduce((sum,r)=>sum+(r.type==='Income'?1:-1)*Math.abs(Number(r.amount)||0),0);
     const dateValue=new Date(`${date}T12:00:00`);
@@ -1372,6 +1437,7 @@ function renderDashboard(){
   document.querySelectorAll('.chart-card').forEach((el,i)=>{el.style.setProperty('--i',i);restartAnimation(el)});
   renderCharts(balance);
   renderIncomeCharts(incomeRecords);
+  markEmptyCharts();
   renderRecentIncome(incomeRecords);
   renderDashboardTable();
   renderMobileDashboard(mobileNetBalance);
@@ -1397,11 +1463,21 @@ function animateKpis(){
 }
 
 function renderTableSkeleton(){
-  const rows=Array.from({length:5},()=>`<tr class="sk-row"><td colspan="9"><div class="sk"></div></td></tr>`).join('');
+  const rows=Array.from({length:5},()=>`<tr class="sk-row"><td colspan="10"><div class="sk"></div></td></tr>`).join('');
   document.getElementById('dashboardTable').innerHTML=`<tbody>${rows}</tbody>`;
 }
 
 function destroyChart(id){if(charts[id]){charts[id].destroy();delete charts[id]}}
+/** Marks chart cards whose series are all zero, so an empty chart explains itself. */
+function markEmptyCharts(){
+  ['comparisonChart','assetsChart','liabilitiesChart','netWorthChart','incomeTrendChart','expenseCategoryChart'].forEach(id=>{
+    const canvas=document.getElementById(id),card=canvas&&canvas.closest('.chart-card');
+    if(!card)return;
+    const chart=charts[id];
+    const hasValues=!!chart&&!!chart.data&&(chart.data.datasets||[]).some(dataset=>(dataset.data||[]).some(value=>Number(value)>0));
+    if(hasValues)card.removeAttribute('data-empty');else card.setAttribute('data-empty','');
+  });
+}
 function chartTheme(){
   const dark=document.documentElement.getAttribute('data-theme')==='dark';
   return {text:dark?'#a8b3d1':'#64748b',grid:dark?'rgba(148,163,184,.14)':'rgba(15,23,42,.07)'};

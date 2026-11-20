@@ -267,7 +267,8 @@ input[type="radio"], input[type="checkbox"] { min-height: 0; accent-color: var(-
 
 /* ---------- Charts ---------- */
 .charts-grid { display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px; }
-.chart-card { height: 310px; padding: 16px 18px; animation: fadeSlideUp .6s var(--ease) both; animation-delay: calc(var(--i, 0) * 90ms + 240ms); }
+.chart-card { position: relative; height: 310px; min-width: 0; padding: 16px 18px; animation: fadeSlideUp .6s var(--ease) both; animation-delay: calc(var(--i, 0) * 90ms + 240ms); }
+.chart-card[data-empty]::after { content: "No data for this range"; position: absolute; inset: 48px 18px 18px; display: grid; place-items: center; color: var(--muted); font-size: 12px; font-weight: 600; text-align: center; pointer-events: none; }
 .chart-card h3, .table-card h3 { font-size: 14px; font-weight: 700; margin: 0 0 12px; }
 .chart-box { position: relative; height: calc(100% - 30px); }
 .chart-box canvas { max-width: 100%; }
@@ -459,8 +460,8 @@ dialog.modal[open]::backdrop { opacity: 1; }
    Responsive
    ========================================================================== */
 @media (max-width: 1100px) {
-  .cards-grid { grid-template-columns: repeat(2, 1fr); }
-  .charts-grid { grid-template-columns: 1fr; }
+  .cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .charts-grid { grid-template-columns: minmax(0, 1fr); }
   .record-columns { grid-template-columns: 1fr; }
 }
 
@@ -478,7 +479,7 @@ dialog.modal[open]::backdrop { opacity: 1; }
   #quickAdd, #installBtn { width: 44px; padding: 0; border-radius: 14px; }
   .content { padding: 14px 14px calc(var(--bottom-h) + 30px + env(safe-area-inset-bottom, 0px)); }
   .cards-grid, .backup-grid, .settings-grid { grid-template-columns: 1fr; }
-  .cards-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .summary-card { padding: 14px; flex-direction: column; align-items: flex-start; gap: 10px; }
   .summary-card strong { font-size: 17px; }
   .summary-icon { width: 40px; height: 40px; border-radius: 12px; }
@@ -529,7 +530,7 @@ dialog.modal[open]::backdrop { opacity: 1; }
 }
 
 @media (max-width: 420px) {
-  .cards-grid { grid-template-columns: 1fr 1fr; }
+  .cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .summary-card p { font-size: 11px; }
 }
 
@@ -560,13 +561,15 @@ dialog.modal[open]::backdrop { opacity: 1; }
   #bottomNav { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   body.mobile-dashboard .topbar, body.mobile-calendar-view .topbar { display: none; }
   body.mobile-dashboard #dashboardPage { padding: 0 14px calc(var(--bottom-h) + 32px + env(safe-area-inset-bottom, 0px)); }
-  body.mobile-dashboard #dashboardFilters,
-  body.mobile-dashboard #summaryCards,
-  body.mobile-dashboard #dashboardPage > .charts-grid,
+  /* The complete website Dashboard (filters, KPI cards, charts, recent widget and the
+     records table) stays visible on every screen size. The mobile overview is an extra
+     summary above it - never a replacement that hides the underlying data. */
+  body.mobile-dashboard #dashboardFilters { display: block; }
+  body.mobile-dashboard #summaryCards { display: grid; }
+  body.mobile-dashboard #dashboardPage > .charts-grid { display: grid; }
   body.mobile-dashboard #dashboardPage > #recentIncomeCard,
-  body.mobile-dashboard #dashboardPage > .table-card { display: none; }
-  body.mobile-dashboard.mobile-analytics #dashboardPage > .charts-grid { display: grid; padding: 8px 0; }
-  .mobile-overview:not(.hidden) { display: block; }
+  body.mobile-dashboard #dashboardPage > .table-card { display: block; }
+  .mobile-overview:not(.hidden) { display: block; margin-bottom: 16px; }
   .mobile-finance-header {
     width: calc(100% + 28px); margin: 0 -14px 14px; padding: calc(12px + env(safe-area-inset-top, 0px)) 18px 19px;
     color: #252849; background: linear-gradient(132deg, #dce5ff 0%, #efe1ff 49%, #ffe1d8 100%);
