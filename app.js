@@ -608,8 +608,14 @@ function closeDrawer(){
 function showPage(page){
   if(!PAGE_TITLES[page])return;
   currentPage=page;
+  mobileCalendarOpen=false;
+  document.getElementById('mobileCalendarPage').classList.add('hidden');
+  document.getElementById('mobileCalendarNav').classList.remove('active');
+  document.getElementById('mobileCalendarNav').removeAttribute('aria-current');
   document.body.classList.toggle('mobile-dashboard',isMobileViewport()&&page==='dashboard');
+  document.body.classList.remove('mobile-calendar-view');
   document.body.classList.remove('mobile-analytics');
+  document.getElementById('mobileOverview').classList.toggle('hidden',!isMobileViewport()||page!=='dashboard');
   document.querySelectorAll('[data-page]').forEach(b=>{
     const active=b.dataset.page===page;
     b.classList.toggle('active',active);
@@ -645,8 +651,8 @@ function bindNavigation(){
   $el('menuToggle').onclick=toggle;
   $el('scrim').onclick=closeDrawer;
   window.addEventListener('resize',()=>{
-    placePills(true);
     updateMobileMode();
+    placePills(true);
   });
 }
 
@@ -684,7 +690,8 @@ function bindGlobalActions(){
   $el('incomeForm').onsubmit=saveIncomeRecord;
   $el('addIncomeBtn').onclick=()=>openIncomeModal();
   $el('mobileQuickAction').onclick=openMobileSpeedDial;
-  $el('mobileMoreAction').onclick=openMobileSpeedDial;
+  $el('mobileMoreAction').onclick=()=>{$el('menuToggle').click()};
+  $el('mobileCalendarMore').onclick=()=>{$el('menuToggle').click()};
   $el('mobileSpeedToggle').onclick=toggleMobileSpeedDial;
   $el('mobileSpeedBackdrop').onclick=closeMobileSpeedDial;
   $el('mobilePeriodSelect').onchange=e=>{mobilePeriodKey=e.target.value;renderMobileDashboard(mobileNetBalance)};
@@ -699,10 +706,27 @@ function bindGlobalActions(){
     document.querySelector('#dashboardPage > .charts-grid').scrollIntoView({behavior:reducedMotion()?'auto':'smooth',block:'start'});
   };
   $el('mobileAllTransactions').onclick=()=>showPage('incomeExpenses');
-  $el('mobileCalendarNav').onclick=()=>{
-    showPage('dashboard');
-    document.getElementById('mobilePeriodStrip').scrollIntoView({behavior:reducedMotion()?'auto':'smooth',block:'center'});
+  $el('mobileCalendarNav').onclick=openMobileCalendar;
+  $el('mobileCalendarYear').onchange=e=>{
+    mobileCalendarYear=normIncomeYear(e.target.value);
+    mobileCalendarMonth=initialMobileCalendarMonth(mobileCalendarYear);
+    mobileCalendarDay='';
+    renderMobileCalendar();
   };
+  $el('mobileCalendarMonths').onclick=e=>{
+    const month=e.target.closest('[data-calendar-month]');
+    if(!month)return;
+    setMobileCalendarMonth(month.dataset.calendarMonth);
+  };
+  $el('mobileCalendarPrev').onclick=()=>navigateMobileCalendarMonth(-1);
+  $el('mobileCalendarNext').onclick=()=>navigateMobileCalendarMonth(1);
+  $el('mobileCalendarGrid').onclick=e=>{
+    const day=e.target.closest('[data-calendar-date]');
+    if(!day)return;
+    mobileCalendarDay=mobileCalendarDay===day.dataset.calendarDate?'':day.dataset.calendarDate;
+    renderMobileCalendar();
+  };
+  $el('mobileCalendarAllDays').onclick=()=>{mobileCalendarDay='';renderMobileCalendar()};
   $el('mobileShortcuts').onclick=e=>{
     const dismiss=e.target.closest('[data-dismiss-shortcut]');
     if(dismiss){
@@ -1022,17 +1046,191 @@ const kpiPrev=[];
 let mobilePeriodKey='';
 let mobileNetBalance=0;
 let mobileQuickShortcuts=[];
+let mobileCalendarOpen=false;
+let mobileCalendarYear='';
+let mobileCalendarMonth='';
+let mobileCalendarDay='';
 const dismissedMobileShortcuts=new Set();
 const isMobileViewport=()=>window.matchMedia('(max-width: 768px)').matches;
 
 function updateMobileMode(){
   const mobile=isMobileViewport();
-  document.body.classList.toggle('mobile-dashboard',mobile&&currentPage==='dashboard');
-  document.getElementById('mobileOverview').classList.toggle('hidden',!mobile||currentPage!=='dashboard');
+  if(!mobile&&mobileCalendarOpen){
+    mobileCalendarOpen=false;
+    document.getElementById('mobileCalendarPage').classList.add('hidden');
+  }
+  const dashboardVisible=mobile&&currentPage==='dashboard'&&!mobileCalendarOpen;
+  const calendarVisible=mobile&&currentPage==='dashboard'&&mobileCalendarOpen;
+  document.body.classList.toggle('mobile-dashboard',dashboardVisible);
+  document.body.classList.toggle('mobile-calendar-view',calendarVisible);
+  document.getElementById('mobileOverview').classList.toggle('hidden',!dashboardVisible);
+  document.getElementById('mobileCalendarPage').classList.toggle('hidden',!calendarVisible);
+  document.querySelectorAll('#bottomNav .bn-item[data-page]').forEach(button=>{
+    const active=mobile&&currentPage===button.dataset.page&&!mobileCalendarOpen;
+    button.classList.toggle('active',active);
+    if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');
+  });
+  const calendarNav=document.getElementById('mobileCalendarNav');
+  calendarNav.classList.toggle('active',calendarVisible);
+  if(calendarVisible)calendarNav.setAttribute('aria-current','page');else calendarNav.removeAttribute('aria-current');
   const speedDial=document.getElementById('mobileSpeedDial');
   if(mobile)speedDial.classList.remove('hidden');
   else{closeMobileSpeedDial();speedDial.classList.add('hidden')}
-  if(mobile&&currentPage==='dashboard')renderMobileDashboard(mobileNetBalance);
+  if(dashboardVisible)renderMobileDashboard(mobileNetBalance);
+  if(calendarVisible)renderMobileCalendar();
+}
+function openMobileCalendar(){
+  if(!isMobileViewport())return;
+  if(currentPage!=='dashboard')showPage('dashboard');
+  mobileCalendarOpen=true;
+  closeMobileSpeedDial();
+  document.body.classList.remove('mobile-dashboard');
+  document.body.classList.add('mobile-calendar-view');
+  document.getElementById('mobileOverview').classList.add('hidden');
+  document.getElementById('mobileCalendarPage').classList.remove('hidden');
+  document.querySelectorAll('#bottomNav .bn-item').forEach(button=>{
+    button.classList.remove('active');
+    button.removeAttribute('aria-current');
+  });
+  const calendarNav=document.getElementById('mobileCalendarNav');
+  calendarNav.classList.add('active');
+  calendarNav.setAttribute('aria-current','page');
+  renderMobileCalendar();
+  window.scrollTo({top:0,behavior:reducedMotion()?'auto':'smooth'});
+}
+function mobileCalendarEntryYear(record){
+  const dateYear=fiscalYearFromDate(record.date);
+  if(dateYear)return dateYear;
+  const year=parseIncomeYear(record.incomeYear);
+  return year&&!year.plain?normIncomeYear(record.incomeYear):'';
+}
+function mobileCalendarAvailableYears(){
+  const current=fiscalYearFromDate(todayISO());
+  const years=new Set();
+  const entryYears=new Set();
+  const add=(value,isEntry=false)=>{
+    const parsed=parseIncomeYear(value);
+    if(!parsed||parsed.plain)return;
+    const year=normIncomeYear(value);
+    years.add(year);
+    if(isEntry)entryYears.add(year);
+  };
+  (state.settings.incomeYears||[]).forEach(year=>add(year));
+  [...state.records,...state.incomeExpenses].forEach(record=>add(mobileCalendarEntryYear(record),true));
+  add(current);
+  const currentStart=parseIncomeYear(current)?.start||new Date().getFullYear();
+  for(let offset=1;offset<=4;offset++)add(`${currentStart-offset}-${pad2((currentStart-offset+1)%100)}`);
+  const sorted=[...years].sort((a,b)=>(parseIncomeYear(b)?.start||0)-(parseIncomeYear(a)?.start||0));
+  const defaultYear=entryYears.has(current)?current:([...entryYears].sort((a,b)=>(parseIncomeYear(b)?.start||0)-(parseIncomeYear(a)?.start||0))[0]||current);
+  return {years:sorted,defaultYear,entryYears};
+}
+function mobileCalendarMonths(year){
+  const start=parseIncomeYear(year)?.start;
+  if(!start)return [];
+  return Array.from({length:12},(_,i)=>{
+    const date=new Date(start,6+i,1);
+    const y=date.getFullYear(),m=date.getMonth()+1;
+    const key=`${y}-${String(m).padStart(2,'0')}`;
+    const lastDay=new Date(y,m,0).getDate();
+    return {
+      key,from:`${key}-01`,to:`${key}-${String(lastDay).padStart(2,'0')}`,
+      label:date.toLocaleDateString('en',{month:'short',year:'2-digit'}),
+      title:date.toLocaleDateString(undefined,{month:'long',year:'numeric'})
+    };
+  });
+}
+function initialMobileCalendarMonth(year){
+  const months=mobileCalendarMonths(year);
+  if(!months.length)return '';
+  const current=fiscalYearFromDate(todayISO());
+  if(year===current)return months.find(month=>month.key===todayISO().slice(0,7))?.key||months[0].key;
+  const {from,to}=fiscalRange(year)||{};
+  const dates=[...state.incomeExpenses,...state.records]
+    .map(record=>String(record.date||'').slice(0,10))
+    .filter(date=>date>=from&&date<=to)
+    .sort();
+  return dates.length?dates[dates.length-1].slice(0,7):months[0].key;
+}
+function setMobileCalendarMonth(key){
+  const month=mobileCalendarMonths(mobileCalendarYear).find(item=>item.key===key);
+  if(!month)return;
+  mobileCalendarMonth=key;
+  mobileCalendarDay='';
+  renderMobileCalendar();
+}
+function navigateMobileCalendarMonth(offset){
+  const months=mobileCalendarMonths(mobileCalendarYear);
+  const index=months.findIndex(month=>month.key===mobileCalendarMonth);
+  const next=months[index+offset];
+  if(next)setMobileCalendarMonth(next.key);
+}
+function renderMobileCalendar(){
+  if(!isMobileViewport()||!mobileCalendarOpen)return;
+  const available=mobileCalendarAvailableYears();
+  if(!available.years.includes(mobileCalendarYear))mobileCalendarYear=available.defaultYear;
+  const months=mobileCalendarMonths(mobileCalendarYear);
+  if(!months.length)return;
+  if(!months.some(month=>month.key===mobileCalendarMonth))mobileCalendarMonth=initialMobileCalendarMonth(mobileCalendarYear);
+  const selected=months.find(month=>month.key===mobileCalendarMonth)||months[0];
+  const fySelect=document.getElementById('mobileCalendarYear');
+  fySelect.innerHTML=available.years.map(year=>`<option value="${esc(year)}">${esc(year)}</option>`).join('');
+  fySelect.value=mobileCalendarYear;
+  const fyStart=parseIncomeYear(mobileCalendarYear)?.start||new Date().getFullYear();
+  const fyLabel=`${fyStart}-${pad2((fyStart+1)%100)}`;
+  document.getElementById('mobileCalendarMonthTitle').textContent=selected.title;
+  document.getElementById('mobileCalendarMonths').innerHTML=months.map(month=>`<button type="button" class="mobile-calendar-month ${month.key===selected.key?'active':''}" data-calendar-month="${month.key}" aria-pressed="${month.key===selected.key}">${esc(month.label)}</button>`).join('');
+  const prevIndex=months.findIndex(month=>month.key===selected.key);
+  document.getElementById('mobileCalendarPrev').disabled=prevIndex===0;
+  document.getElementById('mobileCalendarNext').disabled=prevIndex===months.length-1;
+  const monthRecords=state.incomeExpenses.filter(record=>{
+    const date=String(record.date||'').slice(0,10);
+    return date>=selected.from&&date<=selected.to&&mobileCalendarEntryYear(record)===mobileCalendarYear;
+  });
+  const income=monthRecords.filter(record=>record.type==='Income').reduce((sum,record)=>sum+(Number(record.amount)||0),0);
+  const expenses=monthRecords.filter(record=>record.type==='Expense').reduce((sum,record)=>sum+(Number(record.amount)||0),0);
+  document.getElementById('mobileCalendarIncome').textContent=formatMoney(income);
+  document.getElementById('mobileCalendarExpenses').textContent=formatMoney(expenses);
+  document.getElementById('mobileCalendarNet').textContent=formatMoney(income-expenses);
+  const totalsByDay=new Map();
+  monthRecords.forEach(record=>{
+    const date=String(record.date||'').slice(0,10);
+    if(!totalsByDay.has(date))totalsByDay.set(date,[]);
+    totalsByDay.get(date).push(record);
+  });
+  const [yearText,monthText]=selected.key.split('-');
+  const year=Number(yearText),month=Number(monthText);
+  const firstDay=new Date(year,month-1,1).getDay();
+  const daysInMonth=new Date(year,month,0).getDate();
+  const cellCount=Math.ceil((firstDay+daysInMonth)/7)*7;
+  const today=todayISO();
+  const days=Array.from({length:cellCount},(_,i)=>{
+    const day=i-firstDay+1;
+    if(day<1||day>daysInMonth)return '<span class="calendar-day empty" aria-hidden="true"></span>';
+    const date=`${selected.key}-${String(day).padStart(2,'0')}`;
+    const hasTransactions=totalsByDay.has(date);
+    const classes=['calendar-day',date===today?'today':'',date===mobileCalendarDay?'selected':'',hasTransactions?'has-transactions':''].filter(Boolean).join(' ');
+    return `<button type="button" class="${classes}" data-calendar-date="${date}" aria-label="${esc(new Date(year,month-1,day).toLocaleDateString(undefined,{month:'long',day:'numeric',year:'numeric'}))}${hasTransactions?', has transactions':''}" aria-pressed="${date===mobileCalendarDay}">${day}</button>`;
+  }).join('');
+  document.getElementById('mobileCalendarGrid').innerHTML=days;
+  const selectedDay=mobileCalendarDay&&mobileCalendarDay.slice(0,7)===selected.key?mobileCalendarDay:'';
+  if(mobileCalendarDay&&!selectedDay)mobileCalendarDay='';
+  const visibleRecords=selectedDay?monthRecords.filter(record=>String(record.date||'').slice(0,10)===selectedDay):monthRecords;
+  const selectedDateLabel=selectedDay?new Date(`${selectedDay}T12:00:00`).toLocaleDateString(undefined,{month:'short',day:'numeric'}):`${selected.title} · FY ${fyLabel}`;
+  document.getElementById('mobileCalendarTransactionTitle').textContent=selectedDay?`Transactions · ${selectedDateLabel}`:`Transactions · ${selectedDateLabel}`;
+  document.getElementById('mobileCalendarAllDays').disabled=!selectedDay;
+  document.getElementById('mobileCalendarTransactions').innerHTML=visibleRecords
+    .sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))||String(b.createdAt||'').localeCompare(String(a.createdAt||'')))
+    .map(record=>{
+      const type=record.type==='Income'?'income':'expense';
+      const category=String(record.category||'Other');
+      const date=String(record.date||'').slice(0,10);
+      const dayLabel=new Date(`${date}T12:00:00`).toLocaleDateString(undefined,{month:'short',day:'numeric'});
+      const note=[record.account,record.description].filter(Boolean).join(' · ')||record.majorHead||'';
+      const amount=(type==='income'?'+':'−')+formatMoney(Math.abs(Number(record.amount)||0));
+      return `<article class="mobile-transaction-card ${type}"><span class="mobile-transaction-icon" aria-hidden="true">${esc([...category][0]||'•')}</span><span class="mobile-transaction-copy"><strong>${esc(category)} &gt; ${esc(record.subcategory||'Other')}</strong><span>${esc(dayLabel)}${note?' · '+esc(note):''}</span></span><strong class="mobile-transaction-amount">${esc(amount)}</strong><span class="mobile-transaction-status" aria-label="Completed">✓</span></article>`;
+    }).join('')||'<div class="mobile-calendar-empty">No transactions for this selection.</div>';
+  const activeMonth=document.querySelector(`#mobileCalendarMonths [data-calendar-month="${selected.key}"]`);
+  if(activeMonth)requestAnimationFrame(()=>activeMonth.scrollIntoView({block:'nearest',inline:'center',behavior:reducedMotion()?'auto':'smooth'}));
 }
 function mobilePeriods(){
   const now=new Date();

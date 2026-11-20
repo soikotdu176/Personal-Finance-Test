@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=6">
+  <link rel="stylesheet" href="styles.css?v=7">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -123,6 +123,36 @@
         <section class="mobile-transaction-section" aria-label="Daily transactions">
           <div class="mobile-transaction-heading"><span>Recent activity</span><button type="button" id="mobileAllTransactions">View all</button></div>
           <div id="mobileDailyTransactions"></div>
+        </section>
+      </section>
+      <section class="mobile-calendar-page hidden" id="mobileCalendarPage" aria-label="Financial year calendar">
+        <header class="mobile-calendar-header">
+          <div class="mobile-calendar-title-row">
+            <div><span class="mobile-calendar-eyebrow">Calendar</span><h2>Financial calendar</h2></div>
+            <button type="button" class="mobile-header-action" id="mobileCalendarMore" aria-label="Open navigation menu">⋮</button>
+          </div>
+          <label class="mobile-calendar-year-field">Financial Year
+            <select id="mobileCalendarYear" aria-label="Financial Year"></select>
+          </label>
+        </header>
+        <div class="mobile-calendar-month-nav">
+          <button type="button" id="mobileCalendarPrev" aria-label="Previous month">‹</button>
+          <h3 id="mobileCalendarMonthTitle"></h3>
+          <button type="button" id="mobileCalendarNext" aria-label="Next month">›</button>
+        </div>
+        <div class="mobile-calendar-month-strip" id="mobileCalendarMonths" aria-label="Months in selected Financial Year"></div>
+        <div class="mobile-calendar-summary">
+          <article class="calendar-income"><span>Income</span><strong id="mobileCalendarIncome">৳0.00</strong></article>
+          <article class="calendar-expense"><span>Expenses</span><strong id="mobileCalendarExpenses">৳0.00</strong></article>
+          <article class="calendar-net"><span>Net Balance</span><strong id="mobileCalendarNet">৳0.00</strong></article>
+        </div>
+        <section class="mobile-calendar-grid-card" aria-label="Calendar days">
+          <div class="mobile-calendar-weekdays" aria-hidden="true"><span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span></div>
+          <div class="mobile-calendar-grid" id="mobileCalendarGrid"></div>
+        </section>
+        <section class="mobile-calendar-transaction-section" aria-label="Transactions for selected month">
+          <div class="mobile-calendar-transaction-heading"><h3 id="mobileCalendarTransactionTitle"></h3><button type="button" id="mobileCalendarAllDays">All days</button></div>
+          <div id="mobileCalendarTransactions"></div>
         </section>
       </section>
       <div class="filters card" id="dashboardFilters"></div>
@@ -282,9 +312,9 @@
   <!-- Mobile bottom navigation -->
   <nav class="bottom-nav" id="bottomNav" aria-label="Main (mobile)">
     <span class="nav-pill" aria-hidden="true"></span>
+    <button class="bn-item active" data-page="dashboard"><svg class="ic" aria-hidden="true"><use href="#i-home"/></svg><span>Home</span></button>
     <button class="bn-item" data-page="records"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg><span>Records</span></button>
-    <button class="bn-item" data-page="balance"><svg class="ic" aria-hidden="true"><use href="#i-scale"/></svg><span>Balance</span></button>
-    <button class="bn-item calendar-tab" id="mobileCalendarNav" data-page="dashboard"><svg class="ic" aria-hidden="true"><use href="#i-calendar"/></svg><span>Calendar</span></button>
+    <button class="bn-item calendar-tab" id="mobileCalendarNav" type="button" aria-label="Open Financial Year calendar"><svg class="ic" aria-hidden="true"><use href="#i-calendar"/></svg><span>Calendar</span></button>
     <button class="bn-item" data-page="incomeExpenses"><svg class="ic" aria-hidden="true"><use href="#i-up"/></svg><span>Cash Flow</span></button>
     <button class="bn-item" data-page="settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></button>
   </nav>
@@ -397,6 +427,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>

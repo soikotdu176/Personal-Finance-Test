@@ -557,7 +557,7 @@ dialog.modal[open]::backdrop { opacity: 1; }
 
 @media (max-width: 768px) {
   #bottomNav { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  body.mobile-dashboard .topbar { display: none; }
+  body.mobile-dashboard .topbar, body.mobile-calendar-view .topbar { display: none; }
   body.mobile-dashboard #dashboardPage { padding: 0 14px calc(var(--bottom-h) + 32px + env(safe-area-inset-bottom, 0px)); }
   body.mobile-dashboard #dashboardFilters,
   body.mobile-dashboard #summaryCards,
@@ -618,9 +618,59 @@ dialog.modal[open]::backdrop { opacity: 1; }
   .mobile-transaction-empty { padding: 24px 14px; border: 1px dashed var(--line-strong); border-radius: 18px; color: var(--muted); text-align: center; font-size: 12px; }
   body.mobile-dashboard #bottomNav .bn-item { min-width: 0; font-size: 9px; }
   body.mobile-dashboard #bottomNav .bn-item .ic { width: 20px; height: 20px; }
-  body.mobile-dashboard #bottomNav .calendar-tab { z-index: 2; min-height: 50px; margin-top: -14px; border: 4px solid var(--surface-solid); border-radius: 18px; color: #fff; background: linear-gradient(145deg, #7778e4, #605fd0); box-shadow: 0 7px 17px rgba(92, 91, 194, .3); font-size: 9px; }
-  body.mobile-dashboard #bottomNav .calendar-tab .ic { width: 21px; height: 21px; }
-  body.mobile-dashboard #bottomNav .nav-pill { display: none; }
+  body.mobile-calendar-view #dashboardPage { padding: 0 14px calc(var(--bottom-h) + 32px + env(safe-area-inset-bottom, 0px)); }
+  body.mobile-calendar-view #dashboardPage > .mobile-overview,
+  body.mobile-calendar-view #dashboardPage > #dashboardFilters,
+  body.mobile-calendar-view #dashboardPage > #summaryCards,
+  body.mobile-calendar-view #dashboardPage > .charts-grid,
+  body.mobile-calendar-view #dashboardPage > #recentIncomeCard,
+  body.mobile-calendar-view #dashboardPage > .table-card { display: none; }
+  .mobile-calendar-page:not(.hidden) { display: block; }
+  body.mobile-calendar-view #bottomNav .calendar-tab { z-index: 2; min-height: 50px; margin-top: -14px; border: 4px solid var(--surface-solid); border-radius: 18px; color: #fff; background: linear-gradient(145deg, #7778e4, #605fd0); box-shadow: 0 7px 17px rgba(92, 91, 194, .3); font-size: 9px; }
+  body.mobile-calendar-view #bottomNav .calendar-tab .ic { width: 21px; height: 21px; }
+  body.mobile-calendar-view #bottomNav .nav-pill { display: none; }
+  .mobile-calendar-page { padding-bottom: 4px; }
+  .mobile-calendar-header { margin: 0 -14px 12px; padding: calc(12px + env(safe-area-inset-top, 0px)) 18px 17px; color: #292b4a; background: linear-gradient(132deg, #dce5ff 0%, #efe1ff 49%, #ffe1d8 100%); border-radius: 0 0 25px 25px; box-shadow: 0 12px 26px rgba(104,97,174,.12); }
+  .mobile-calendar-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .mobile-calendar-eyebrow { color: #626583; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+  .mobile-calendar-title-row h2 { margin: 1px 0 0; color: #292b4a; font-size: 21px; font-weight: 800; letter-spacing: -.03em; }
+  .mobile-calendar-year-field { display: block; color: #555879; font-size: 11px; font-weight: 800; }
+  .mobile-calendar-year-field select { display: block; width: 100%; margin-top: 5px; border: 1px solid rgba(86,87,135,.13); border-radius: 13px; color: #343653; background: rgba(255,255,255,.78); font-size: 14px; font-weight: 800; }
+  .mobile-calendar-month-nav { display: grid; grid-template-columns: 42px minmax(0,1fr) 42px; align-items: center; margin: 8px 0 6px; }
+  .mobile-calendar-month-nav h3 { margin: 0; color: var(--text); font-size: 16px; font-weight: 800; text-align: center; }
+  .mobile-calendar-month-nav button { width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 13px; color: var(--text-2); background: var(--surface-solid); font-size: 24px; line-height: 1; }
+  .mobile-calendar-month-nav button:disabled { opacity: .35; cursor: default; }
+  .mobile-calendar-month-strip { display: flex; gap: 7px; overflow-x: auto; margin: 0 -2px 12px; padding: 4px 2px 7px; scrollbar-width: none; scroll-snap-type: x proximity; }
+  .mobile-calendar-month-strip::-webkit-scrollbar { display: none; }
+  .mobile-calendar-month { flex: 0 0 57px; min-height: 39px; padding: 0 5px; border: 1px solid var(--line); border-radius: 13px; color: var(--muted); background: var(--surface-solid); font-size: 10px; font-weight: 800; scroll-snap-align: center; }
+  .mobile-calendar-month.active { border-color: transparent; color: #fff; background: linear-gradient(145deg,#7778e4,#605fd0); box-shadow: 0 5px 13px rgba(92,91,194,.24); }
+  .mobile-calendar-summary { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 7px; margin: 0 0 11px; }
+  .mobile-calendar-summary article { min-width: 0; padding: 10px 8px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface-solid); box-shadow: 0 4px 12px rgba(30,41,59,.045); }
+  .mobile-calendar-summary span, .mobile-calendar-summary strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-calendar-summary span { color: var(--muted); font-size: 9px; font-weight: 700; }
+  .mobile-calendar-summary strong { margin-top: 3px; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .mobile-calendar-summary .calendar-income strong { color: #078662; }
+  .mobile-calendar-summary .calendar-expense strong { color: #d94e68; }
+  .mobile-calendar-summary .calendar-net strong { color: var(--primary-2); }
+  .mobile-calendar-grid-card { padding: 10px 8px 9px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface-solid); box-shadow: 0 6px 18px rgba(30,41,59,.055); }
+  .mobile-calendar-weekdays, .mobile-calendar-grid { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); gap: 3px; }
+  .mobile-calendar-weekdays { margin-bottom: 5px; color: var(--muted); font-size: 9px; font-weight: 800; text-align: center; }
+  .mobile-calendar-weekdays span { padding: 3px 0; }
+  .calendar-day { position: relative; min-width: 0; min-height: 37px; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 11px; color: var(--text-2); background: transparent; font-size: 11px; font-weight: 700; }
+  .calendar-day:disabled { cursor: default; }
+  .calendar-day:not(:disabled):active { transform: scale(.92); }
+  .calendar-day.today { border-color: rgba(99,102,241,.36); color: var(--primary-2); }
+  .calendar-day.selected { color: #fff; background: linear-gradient(145deg,#7778e4,#605fd0); }
+  .calendar-day.has-transactions::after { position: absolute; bottom: 3px; width: 4px; height: 4px; border-radius: 50%; background: #10a878; content: ""; }
+  .calendar-day.selected.has-transactions::after { background: #fff; }
+  .calendar-day.empty { pointer-events: none; }
+  .mobile-calendar-transaction-section { margin-top: 16px; }
+  .mobile-calendar-transaction-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 2px 9px; }
+  .mobile-calendar-transaction-heading h3 { overflow: hidden; margin: 0; color: var(--text); font-size: 14px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-calendar-transaction-heading button { flex: none; padding: 6px 9px; border: 0; border-radius: 999px; color: var(--primary-2); background: var(--primary-soft); font-size: 10px; font-weight: 800; }
+  .mobile-calendar-transactions { display: grid; gap: 7px; }
+  .mobile-calendar-transactions .mobile-transaction-card { margin-bottom: 0; }
+  .mobile-calendar-empty { padding: 21px 12px; border: 1px dashed var(--line-strong); border-radius: 16px; color: var(--muted); text-align: center; font-size: 11px; }
   .mobile-speed-dial:not(.hidden) { position: fixed; inset: 0; z-index: 90; pointer-events: none; }
   .mobile-speed-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; opacity: 0; background: rgba(17, 24, 45, .35); backdrop-filter: blur(0); -webkit-backdrop-filter: blur(0); pointer-events: none; transition: opacity .32s ease, backdrop-filter .32s ease; }
   .mobile-speed-dial.open .mobile-speed-backdrop { opacity: 1; backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); pointer-events: auto; }
