@@ -519,6 +519,7 @@ async function init(){
   bindGlobalActions();
   bindDelegatedActions();
   renderAll();
+  updateMobileMode();
   playEnter(document.getElementById('dashboardPage'));
   placePills(true);
   if(document.fonts&&document.fonts.ready)document.fonts.ready.then(()=>placePills(true));
@@ -607,6 +608,8 @@ function closeDrawer(){
 function showPage(page){
   if(!PAGE_TITLES[page])return;
   currentPage=page;
+  document.body.classList.toggle('mobile-dashboard',isMobileViewport()&&page==='dashboard');
+  document.body.classList.remove('mobile-analytics');
   document.querySelectorAll('[data-page]').forEach(b=>{
     const active=b.dataset.page===page;
     b.classList.toggle('active',active);
@@ -624,6 +627,7 @@ function showPage(page){
   if(page==='balance')renderBalance();
   if(page==='backup')renderBackupHistory();
   if(page==='settings')renderSettings();
+  if(page==='dashboard'&&isMobileViewport())renderMobileDashboard(mobileNetBalance);
   playEnter(panel);
   placePills();
   window.scrollTo({top:0,behavior:reducedMotion()?'auto':'smooth'});
@@ -640,7 +644,10 @@ function bindNavigation(){
   };
   $el('menuToggle').onclick=toggle;
   $el('scrim').onclick=closeDrawer;
-  window.addEventListener('resize',()=>placePills(true));
+  window.addEventListener('resize',()=>{
+    placePills(true);
+    updateMobileMode();
+  });
 }
 
 function bindGlobalActions(){
@@ -676,6 +683,49 @@ function bindGlobalActions(){
   $el('recordForm').onsubmit=saveRecord;
   $el('incomeForm').onsubmit=saveIncomeRecord;
   $el('addIncomeBtn').onclick=()=>openIncomeModal();
+  $el('mobileQuickAction').onclick=openMobileSpeedDial;
+  $el('mobileMoreAction').onclick=openMobileSpeedDial;
+  $el('mobileSpeedToggle').onclick=toggleMobileSpeedDial;
+  $el('mobileSpeedBackdrop').onclick=closeMobileSpeedDial;
+  $el('mobilePeriodSelect').onchange=e=>{mobilePeriodKey=e.target.value;renderMobileDashboard(mobileNetBalance)};
+  $el('mobilePeriodStrip').onclick=e=>{
+    const period=e.target.closest('[data-mobile-period]');
+    if(!period)return;
+    mobilePeriodKey=period.dataset.mobilePeriod;
+    renderMobileDashboard(mobileNetBalance);
+  };
+  $el('mobileChartsAction').onclick=()=>{
+    document.body.classList.add('mobile-analytics');
+    document.querySelector('#dashboardPage > .charts-grid').scrollIntoView({behavior:reducedMotion()?'auto':'smooth',block:'start'});
+  };
+  $el('mobileAllTransactions').onclick=()=>showPage('incomeExpenses');
+  $el('mobileCalendarNav').onclick=()=>{
+    showPage('dashboard');
+    document.getElementById('mobilePeriodStrip').scrollIntoView({behavior:reducedMotion()?'auto':'smooth',block:'center'});
+  };
+  $el('mobileShortcuts').onclick=e=>{
+    const dismiss=e.target.closest('[data-dismiss-shortcut]');
+    if(dismiss){
+      e.stopPropagation();
+      dismissedMobileShortcuts.add(dismiss.dataset.dismissShortcut);
+      renderMobileShortcuts();
+      return;
+    }
+    const action=e.target.closest('[data-mobile-shortcut]');
+    if(!action)return;
+    const shortcut=mobileQuickShortcuts[Number(action.dataset.mobileShortcut)];
+    closeMobileSpeedDial();
+    if(shortcut)openIncomeModal(null,shortcut);
+  };
+  $el('mobileSpeedPanel').onclick=e=>{
+    const action=e.target.closest('[data-mobile-action]')?.dataset.mobileAction;
+    if(!action)return;
+    closeMobileSpeedDial();
+    if(action==='settings'){showPage('settings');return}
+    if(action==='Income'||action==='Expense'){openIncomeModal(null,{type:action});return}
+    if(action==='transfer'){showPage('records');openRecordModal()}
+  };
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMobileSpeedDial()});
   $el('exportIncomeExcel').onclick=e=>runWithLoading(e.currentTarget,exportIncomeExcel);
   $el('exportIncomePdf').onclick=e=>runWithLoading(e.currentTarget,exportIncomePdf);
   $el('goIncomePage').onclick=()=>showPage('incomeExpenses');
@@ -969,6 +1019,122 @@ function dashboardBalanceRecords(){
    Dashboard rendering
    ========================================================================== */
 const kpiPrev=[];
+let mobilePeriodKey='';
+let mobileNetBalance=0;
+let mobileQuickShortcuts=[];
+const dismissedMobileShortcuts=new Set();
+const isMobileViewport=()=>window.matchMedia('(max-width: 768px)').matches;
+
+function updateMobileMode(){
+  const mobile=isMobileViewport();
+  document.body.classList.toggle('mobile-dashboard',mobile&&currentPage==='dashboard');
+  document.getElementById('mobileOverview').classList.toggle('hidden',!mobile||currentPage!=='dashboard');
+  const speedDial=document.getElementById('mobileSpeedDial');
+  if(mobile)speedDial.classList.remove('hidden');
+  else{closeMobileSpeedDial();speedDial.classList.add('hidden')}
+  if(mobile&&currentPage==='dashboard')renderMobileDashboard(mobileNetBalance);
+}
+function mobilePeriods(){
+  const now=new Date();
+  return Array.from({length:5},(_,i)=>{
+    const date=new Date(now.getFullYear(),now.getMonth()+i-2,1);
+    const year=date.getFullYear(),month=date.getMonth();
+    const key=`${year}-${String(month+1).padStart(2,'0')}`;
+    const end=new Date(year,month+1,0);
+    const isoEnd=`${year}-${String(month+1).padStart(2,'0')}-${String(end.getDate()).padStart(2,'0')}`;
+    return {key,from:`${key}-01`,to:isoEnd,date,label:date.toLocaleDateString(undefined,{month:'short',year:'2-digit'}).toUpperCase(),name:date.toLocaleDateString(undefined,{month:'long'})};
+  });
+}
+function renderMobileDashboard(netBalance=mobileNetBalance){
+  if(!isMobileViewport())return;
+  mobileNetBalance=netBalance;
+  const periods=mobilePeriods();
+  if(!periods.some(p=>p.key===mobilePeriodKey))mobilePeriodKey=periods[2].key;
+  const selected=periods.find(p=>p.key===mobilePeriodKey)||periods[2];
+  const periodSelect=document.getElementById('mobilePeriodSelect');
+  periodSelect.innerHTML=periods.map(p=>`<option value="${p.key}">${esc(p.name)} Balance</option>`).join('');
+  periodSelect.value=selected.key;
+  document.getElementById('mobileNetBalance').textContent=formatMoney(netBalance);
+  document.getElementById('mobilePeriodStrip').innerHTML=periods.map(p=>`<button type="button" class="mobile-period-item ${p.key===selected.key?'active':''}" data-mobile-period="${p.key}" aria-pressed="${p.key===selected.key}">${esc(p.label)}</button>`).join('');
+  const transactions=state.incomeExpenses.filter(r=>r.date&&r.date>=selected.from&&r.date<=selected.to);
+  const income=transactions.filter(r=>r.type==='Income').reduce((sum,r)=>sum+(Number(r.amount)||0),0);
+  const expenses=transactions.filter(r=>r.type==='Expense').reduce((sum,r)=>sum+(Number(r.amount)||0),0);
+  document.getElementById('mobileIncomeTotal').textContent=`+${formatMoney(income)}`;
+  document.getElementById('mobileExpenseTotal').textContent=`−${formatMoney(expenses)}`;
+  const grouped=new Map();
+  transactions.forEach(r=>{
+    if(!grouped.has(r.date))grouped.set(r.date,[]);
+    grouped.get(r.date).push(r);
+  });
+  const groups=[...grouped.entries()].sort((a,b)=>b[0].localeCompare(a[0]));
+  const rows=groups.map(([date,records])=>{
+    const dailyNet=records.reduce((sum,r)=>sum+(r.type==='Income'?1:-1)*Math.abs(Number(r.amount)||0),0);
+    const dateValue=new Date(`${date}T12:00:00`);
+    const dateLabel=dateValue.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+    const weekday=dateValue.toLocaleDateString(undefined,{weekday:'long'});
+    const cards=records.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))).map(r=>{
+      const type=r.type==='Income'?'income':'expense';
+      const category=String(r.category||'Other');
+      const subtitle=[r.account,r.description].filter(Boolean).join(' · ')||r.majorHead||'';
+      const signedAmount=(type==='income'?'+':'−')+formatMoney(Math.abs(Number(r.amount)||0));
+      return `<article class="mobile-transaction-card ${type}"><span class="mobile-transaction-icon" aria-hidden="true">${esc([...category][0]||'•')}</span><span class="mobile-transaction-copy"><strong>${esc(category)} &gt; ${esc(r.subcategory||'Other')}</strong><span>${esc(subtitle)}</span></span><strong class="mobile-transaction-amount">${esc(signedAmount)}</strong><span class="mobile-transaction-status" aria-label="Completed">✓</span></article>`;
+    }).join('');
+    return `<section class="mobile-day-group"><div class="mobile-day-heading"><span><strong>${esc(dateLabel)}</strong> ${esc(weekday)}</span><strong class="mobile-day-total ${dailyNet>=0?'positive':''}">${esc(formatMoney(dailyNet))}</strong></div>${cards}</section>`;
+  }).join('');
+  document.getElementById('mobileDailyTransactions').innerHTML=rows||'<div class="mobile-transaction-empty">No transactions for this period yet.</div>';
+}
+function renderMobileShortcuts(){
+  const recent=[...state.incomeExpenses].sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  const entries=[];
+  const seen=new Set();
+  const add=(type,majorHead,category,subcategory)=>{
+    if(!category)return;
+    const key=[type,majorHead,category,subcategory||''].join('|');
+    if(seen.has(key)||dismissedMobileShortcuts.has(key))return;
+    seen.add(key);entries.push({type,majorHead,category,subcategory,key});
+  };
+  recent.forEach(r=>add(r.type,r.majorHead,r.category,r.subcategory));
+  if(entries.length<4){
+    state.incomeGroups.forEach(g=>(g.categories||[]).forEach(c=>(c.subcategories||[]).forEach(sub=>add(g.type,g.majorHead,c.name,sub))));
+  }
+  mobileQuickShortcuts=entries.slice(0,4);
+  document.getElementById('mobileShortcuts').innerHTML=mobileQuickShortcuts.map((shortcut,i)=>`<div class="mobile-shortcut-row" style="--action-index:${i}"><button type="button" class="speed-action mobile-shortcut-action" data-mobile-shortcut="${i}" title="${esc(shortcut.category)} > ${esc(shortcut.subcategory||'')}"><span class="speed-action-icon">${shortcut.type==='Income'?'↗':'↘'}</span><span>${esc(shortcut.category)} &gt; ${esc(shortcut.subcategory||'Other')}</span></button><button type="button" class="mobile-shortcut-dismiss" data-dismiss-shortcut="${esc(shortcut.key)}" aria-label="Dismiss ${esc(shortcut.category)} shortcut">×</button></div>`).join('');
+}
+function openMobileSpeedDial(){
+  if(!isMobileViewport())return;
+  renderMobileShortcuts();
+  const dial=document.getElementById('mobileSpeedDial');
+  dial.classList.remove('hidden');
+  const backdrop=document.getElementById('mobileSpeedBackdrop');
+  const panel=document.getElementById('mobileSpeedPanel');
+  backdrop.removeAttribute('inert');
+  backdrop.setAttribute('aria-hidden','false');
+  panel.removeAttribute('inert');
+  panel.setAttribute('aria-hidden','false');
+  requestAnimationFrame(()=>dial.classList.add('open'));
+  document.getElementById('mobileSpeedToggle').setAttribute('aria-expanded','true');
+  document.getElementById('mobileSpeedToggle').setAttribute('aria-label','Close quick actions');
+}
+function closeMobileSpeedDial(){
+  const dial=document.getElementById('mobileSpeedDial');
+  if(!dial)return;
+  const toggle=document.getElementById('mobileSpeedToggle');
+  if(dial.classList.contains('hidden')&&!dial.classList.contains('open'))return;
+  const backdrop=document.getElementById('mobileSpeedBackdrop');
+  const panel=document.getElementById('mobileSpeedPanel');
+  if(backdrop===document.activeElement||panel.contains(document.activeElement))toggle.focus({preventScroll:true});
+  dial.classList.remove('open');
+  backdrop.setAttribute('aria-hidden','true');
+  backdrop.setAttribute('inert','');
+  panel.setAttribute('aria-hidden','true');
+  panel.setAttribute('inert','');
+  toggle.setAttribute('aria-expanded','false');
+  toggle.setAttribute('aria-label','Open quick actions');
+}
+function toggleMobileSpeedDial(){
+  if(document.getElementById('mobileSpeedDial').classList.contains('open'))closeMobileSpeedDial();
+  else openMobileSpeedDial();
+}
 function renderDashboard(){
   const balance=dashboardBalanceRecords();
   const assets=sumAmount(balance.filter(r=>r.type==='Asset'));
@@ -980,6 +1146,7 @@ function renderDashboard(){
   const totalIncome=incomeRecords.filter(r=>r.type==='Income').reduce((s,r)=>s+(Number(r.amount)||0),0);
   const totalExpenses=incomeRecords.filter(r=>r.type==='Expense').reduce((s,r)=>s+(Number(r.amount)||0),0);
   const netCash=totalIncome-totalExpenses;
+  mobileNetBalance=assets-liabilities;
   const cards=[
     ['up','Total Assets',assets,'money'],['down','Total Liabilities',liabilities,'money'],['scale','Net Worth',assets-liabilities,'money'],
     ['layers','Asset Categories',assetCategories,'int'],['layers','Liability Categories',liabilityCategories,'int'],['file','PDF Documents',documentCount,'int'],
@@ -992,6 +1159,7 @@ function renderDashboard(){
   renderIncomeCharts(incomeRecords);
   renderRecentIncome(incomeRecords);
   renderDashboardTable();
+  renderMobileDashboard(mobileNetBalance);
 }
 
 function animateKpis(){
@@ -3016,13 +3184,13 @@ function bindIncomeDocManager(){
     renderIncomeDocManager();
   };
 }
-function openIncomeModal(id=null){
+function openIncomeModal(id=null,defaults={}){
   editingIncomeId=id;
   const record=id?state.incomeExpenses.find(r=>r.id===id):null;
   resetIncomeDocDraft(record);
   document.getElementById('incomeModalTitle').textContent=record?'Edit Transaction':'Add Income / Expense';
   document.getElementById('incomeModalSubtitle').textContent=record?`${record.type} · ${record.majorHead}`:'Fields adapt to the selected type and classification';
-  const startType=record?.type||'Expense';
+  const startType=record?.type||defaults.type||'Expense';
   const dateValue=record?record.date||todayISO():todayISO();
   document.getElementById('incomeFormFields').innerHTML=`<div class="income-form-grid">
     <label>Transaction Type *<select id="incomeTypeSelect" required><option value="Income" ${startType==='Income'?'selected':''}>Income</option><option value="Expense" ${startType==='Expense'?'selected':''}>Expense</option></select></label>
@@ -3043,18 +3211,21 @@ function openIncomeModal(id=null){
     const heads=incomeMajorHeads(typeSel.value);
     majorSel.innerHTML=heads.map(h=>`<option value="${esc(h)}">${esc(h)}</option>`).join('');
     if(record&&record.type===typeSel.value&&heads.includes(record.majorHead))majorSel.value=record.majorHead;
+    else if(defaults.majorHead&&heads.includes(defaults.majorHead))majorSel.value=defaults.majorHead;
     updateCategory();
   };
   const updateCategory=()=>{
     const cats=incomeCategoriesFor(majorSel.value);
     catSel.innerHTML=cats.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
     if(record&&record.majorHead===majorSel.value&&cats.includes(record.category))catSel.value=record.category;
+    else if(defaults.category&&cats.includes(defaults.category))catSel.value=defaults.category;
     updateSubcategory();
   };
   const updateSubcategory=()=>{
     const subs=incomeSubcategoriesFor(majorSel.value,catSel.value);
     subSel.innerHTML=(subs.length?subs:[catSel.value].filter(Boolean)).map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
     if(record&&record.category===catSel.value&&subs.includes(record.subcategory))subSel.value=record.subcategory;
+    else if(defaults.subcategory&&subs.includes(defaults.subcategory))subSel.value=defaults.subcategory;
   };
   typeSel.onchange=updateMajor;
   majorSel.onchange=updateCategory;
