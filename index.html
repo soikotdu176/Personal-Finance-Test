@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=22">
+  <link rel="stylesheet" href="styles.css?v=23">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -400,16 +400,16 @@
             <select id="transferSourceAccount" required></select>
             <span class="hint" id="transferSourceHint"></span>
           </label>
-          <label>Amount *
+          <label><span class="lbl">Amount *</span>
             <span class="calc-field">
               <input id="transferSourceAmount" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" required>
               <button type="button" class="calc-trigger" data-calc-target="transferSourceAmount" aria-label="Open calculator for the transfer amount" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button>
             </span>
           </label>
-          <label>Currency
+          <label><span class="lbl">Currency</span>
             <select id="transferSourceCurrency"><option value="BDT">BDT (৳)</option><option value="USD">USD ($)</option><option value="EUR">EUR (€)</option><option value="GBP">GBP (£)</option></select>
           </label>
-          <label class="transfer-status">Status
+          <label class="transfer-status"><span class="lbl">Status</span>
             <span class="status-toggle">
               <input type="checkbox" id="transferSourceStatus" checked>
               <span class="status-toggle-track" aria-hidden="true"></span>
@@ -425,16 +425,16 @@
             <select id="transferDestinationAccount" required></select>
             <span class="hint" id="transferDestinationHint"></span>
           </label>
-          <label>Amount *
+          <label><span class="lbl">Amount *</span>
             <span class="calc-field">
               <input id="transferDestinationAmount" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" required>
               <button type="button" class="calc-trigger" data-calc-target="transferDestinationAmount" aria-label="Open calculator for the received amount" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button>
             </span>
           </label>
-          <label>Currency
+          <label><span class="lbl">Currency</span>
             <select id="transferDestinationCurrency"><option value="BDT">BDT (৳)</option><option value="USD">USD ($)</option><option value="EUR">EUR (€)</option><option value="GBP">GBP (£)</option></select>
           </label>
-          <label class="transfer-status">Status
+          <label class="transfer-status"><span class="lbl">Status</span>
             <span class="status-toggle">
               <input type="checkbox" id="transferDestinationStatus" checked>
               <span class="status-toggle-track" aria-hidden="true"></span>
@@ -442,8 +442,8 @@
             </span>
           </label>
           <div class="form-section">Details</div>
-          <label>Date<input id="transferDate" type="date"></label>
-          <label>Time<input id="transferTime" type="time"></label>
+          <label><span class="lbl">Date</span><input id="transferDate" type="date"></label>
+          <label><span class="lbl">Time</span><input id="transferTime" type="time"></label>
           <label class="full">Notes<textarea id="transferNotes" rows="2" placeholder="e.g. Cash-out charge included"></textarea></label>
           <div class="form-section">Attachment</div>
           <label class="full transfer-pdf-field">Attach PDF (Optional)
@@ -586,6 +586,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=22"></script>
+  <script src="app.js?v=23"></script>
 </body>
 </html>

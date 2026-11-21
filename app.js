@@ -2452,19 +2452,19 @@ function openRecordModal(id=null){
   const startType=record?.type||'Asset';
   const amountValue=record?recordAmount(record):'';
   document.getElementById('recordFormFields').innerHTML=`<div class="form-grid">
-    <label>Financial Type *<select id="recordType" required><option value="Asset" ${startType==='Asset'?'selected':''}>Asset</option><option value="Liability" ${startType==='Liability'?'selected':''}>Liability</option></select></label>
-    <label>Category *<select id="recordCategory" required></select></label>
-    <label>Subcategory *<select id="recordSubcategory" required></select></label>
-    <label>Date<input id="recordDate" type="date" value="${esc(record?record.date||'':todayISO())}"></label>
+    <label><span class="lbl">Financial Type *</span><select id="recordType" required><option value="Asset" ${startType==='Asset'?'selected':''}>Asset</option><option value="Liability" ${startType==='Liability'?'selected':''}>Liability</option></select></label>
+    <label><span class="lbl">Category *</span><select id="recordCategory" required></select></label>
+    <label><span class="lbl">Subcategory *</span><select id="recordSubcategory" required></select></label>
+    <label><span class="lbl">Date</span><input id="recordDate" type="date" value="${esc(record?record.date||'':todayISO())}"></label>
     <div class="form-section" id="subSectionTitle">Details</div>
     <div class="sub-fields" id="subFields"></div>
     <label class="full"><span id="detailsLabelText">Details / Description</span><textarea id="recordDetails" rows="3">${esc(record?.details||record?.description||'')}</textarea><span class="hint" id="detailsHint"></span></label>
-    <label>Amount / Balance *<span class="calc-field"><input id="recordAmount" type="number" step="0.01" inputmode="decimal" required value="${esc(amountValue===0?'0':amountValue)}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="recordAmount" aria-label="Open calculator for Amount / Balance" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button></span><span class="hint" id="amountHint"></span></label>
+    <label><span class="lbl">Amount / Balance *</span><span class="calc-field"><input id="recordAmount" type="number" step="0.01" inputmode="decimal" required value="${esc(amountValue===0?'0':amountValue)}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="recordAmount" aria-label="Open calculator for Amount / Balance" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button></span><span class="hint" id="amountHint"></span></label>
     <label class="full record-funding-field" id="recordFundingField">Funded from Asset Subcategory
       <select id="recordFunding">${assetFundingOptionsHtml(formState.fundingAccounts)}</select>
       <span class="hint" id="recordFundingHint"></span>
     </label>
-    <label>Document (PDF)<input id="recordDocument" type="file" accept=".pdf,application/pdf" multiple><span class="hint">You can attach more than one PDF.</span></label>
+    <label><span class="lbl">Document (PDF)</span><input id="recordDocument" type="file" accept=".pdf,application/pdf" multiple><span class="hint">You can attach more than one PDF.</span></label>
     <div class="doc-manager" id="docManager"><h4>Attached documents</h4><div class="doc-list" id="docManagerList"></div></div>
   </div>`;
 
@@ -4641,13 +4641,13 @@ function openIncomeModal(id=null,defaults={}){
   const startType=record?.type||defaults.type||'Expense';
   const dateValue=record?record.date||todayISO():todayISO();
   document.getElementById('incomeFormFields').innerHTML=`<div class="income-form-grid">
-    <label>Transaction Type *<select id="incomeTypeSelect" required><option value="Income" ${startType==='Income'?'selected':''}>Income</option><option value="Expense" ${startType==='Expense'?'selected':''}>Expense</option></select></label>
-    <label>Date *<input id="incomeDate" type="date" required value="${esc(dateValue)}"></label>
-    <label>Major Head *<select id="incomeMajorHeadSelect" required></select></label>
-    <label>Category *<select id="incomeCategorySelect" required></select></label>
-    <label>Subcategory *<select id="incomeSubcategorySelect" required></select></label>
-    <label>Account / Payment Method<select id="incomeAccount">${ACCOUNTS.map(a=>`<option value="${esc(a)}" ${a===(record?.account||'Cash in Hand')?'selected':''}>${esc(a)}</option>`).join('')}</select></label>
-    <label>Amount (BDT) *<span class="calc-field"><input id="incomeAmount" type="number" step="0.01" min="0" inputmode="decimal" required value="${esc(record?record.amount:'')}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="incomeAmount" aria-label="Open calculator for Amount (BDT)" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button></span></label>
+    <label><span class="lbl">Transaction Type *</span><select id="incomeTypeSelect" required><option value="Income" ${startType==='Income'?'selected':''}>Income</option><option value="Expense" ${startType==='Expense'?'selected':''}>Expense</option></select></label>
+    <label><span class="lbl">Date *</span><input id="incomeDate" type="date" required value="${esc(dateValue)}"></label>
+    <label><span class="lbl">Major Head *</span><select id="incomeMajorHeadSelect" required></select></label>
+    <label><span class="lbl">Category *</span><select id="incomeCategorySelect" required></select></label>
+    <label><span class="lbl">Subcategory *</span><select id="incomeSubcategorySelect" required></select></label>
+    <label><span class="lbl">Account / Payment Method</span><select id="incomeAccount">${ACCOUNTS.map(a=>`<option value="${esc(a)}" ${a===(record?.account||'Cash in Hand')?'selected':''}>${esc(a)}</option>`).join('')}</select></label>
+    <label><span class="lbl">Amount (BDT) *</span><span class="calc-field"><input id="incomeAmount" type="number" step="0.01" min="0" inputmode="decimal" required value="${esc(record?record.amount:'')}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="incomeAmount" aria-label="Open calculator for Amount (BDT)" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button></span></label>
     <label class="full">Description / Notes<textarea id="incomeDescription" rows="2">${esc(record?.description||'')}</textarea></label>
     <label class="full">Receipt / Voucher (PDF)<input id="incomeDocument" type="file" accept=".pdf,application/pdf"><span class="hint">Optional receipt or voucher PDF.</span></label>
     <div class="doc-manager full" id="incomeDocManager"><h4>Attached receipt</h4><div class="doc-list" id="incomeDocManagerList"></div></div>
@@ -5588,14 +5588,14 @@ function openOfficeModal(id=null){
   const noAccountChange=!!(record&&record.noAccountChange);
   const option=(value,label,selected)=>`<option value="${esc(value)}" ${selected?'selected':''}>${esc(label)}</option>`;
   document.getElementById('officeFormFields').innerHTML=`<div class="income-form-grid">
-    <label>Entry Type *<select id="officeTypeSelect" required>${option('Office Purchase (Cash Outflow)','Office Purchase (Cash Outflow)',typeValue==='Office Purchase (Cash Outflow)'||typeValue==='Outflow')}${option('Bill Received (Cash Inflow)','Bill Received (Cash Inflow)',typeValue==='Bill Received (Cash Inflow)'||typeValue==='Inflow')}${option('Opening Balance (Outflow)','Opening Balance (Outflow)',typeValue==='Opening Balance (Outflow)')}${option('Opening Balance (Inflow)','Opening Balance (Inflow)',typeValue==='Opening Balance (Inflow)')}</select></label>
-    <label>Date *<input id="officeDate" type="date" required value="${esc(dateValue)}"></label>
+    <label><span class="lbl">Entry Type *</span><select id="officeTypeSelect" required>${option('Office Purchase (Cash Outflow)','Office Purchase (Cash Outflow)',typeValue==='Office Purchase (Cash Outflow)'||typeValue==='Outflow')}${option('Bill Received (Cash Inflow)','Bill Received (Cash Inflow)',typeValue==='Bill Received (Cash Inflow)'||typeValue==='Inflow')}${option('Opening Balance (Outflow)','Opening Balance (Outflow)',typeValue==='Opening Balance (Outflow)')}${option('Opening Balance (Inflow)','Opening Balance (Inflow)',typeValue==='Opening Balance (Inflow)')}</select></label>
+    <label><span class="lbl">Date *</span><input id="officeDate" type="date" required value="${esc(dateValue)}"></label>
     <label class="full">Particulars *<input id="officeParticulars" type="text" required maxlength="200" value="${esc(record?record.particulars:'')}" placeholder="e.g. Office stationery purchase"></label>
-    <label>Category *<select id="officeCategory" required>${officeCategoryChoices().map(c=>option(c,c,category===c)).join('')}</select></label>
-    <label>Cash &amp; Bank Account<select id="officeAccount">${option('','None',!accountLabel)}${accounts.map(a=>option(a,a,accountLabel===a)).join('')}${extraAccount?option(extraAccount,`${extraAccount} (not in Settings)`,true):''}</select></label>
+    <label><span class="lbl">Category *</span><select id="officeCategory" required>${officeCategoryChoices().map(c=>option(c,c,category===c)).join('')}</select></label>
+    <label><span class="lbl">Cash &amp; Bank Account</span><select id="officeAccount">${option('','None',!accountLabel)}${accounts.map(a=>option(a,a,accountLabel===a)).join('')}${extraAccount?option(extraAccount,`${extraAccount} (not in Settings)`,true):''}</select></label>
     <label class="office-account-check full"><span class="office-check-row"><input type="checkbox" id="officeNoAccountChange" ${noAccountChange?'checked':''}><span>I Do not want to change Account</span></span><span class="hint" id="officeNoAccountHint">Records the entry here only — the Cash &amp; Bank balance stays exactly as it is.</span></label>
-    <label>Amount (BDT) *<span class="calc-field"><input id="officeAmount" type="number" step="0.01" min="0" inputmode="decimal" required value="${esc(record?record.amount:'')}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="officeAmount" aria-label="Open calculator for Amount (BDT)" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator">${icon('calc')}</button></span></label>
-    <label>Balance effect<span class="hint" id="officeEffectHint"></span></label>
+    <label><span class="lbl">Amount (BDT) *</span><span class="calc-field"><input id="officeAmount" type="number" step="0.01" min="0" inputmode="decimal" required value="${esc(record?record.amount:'')}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="officeAmount" aria-label="Open calculator for Amount (BDT)" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator">${icon('calc')}</button></span></label>
+    <label><span class="lbl">Balance effect</span><span class="hint" id="officeEffectHint"></span></label>
     <label class="full">Reference / Notes<textarea id="officeNotes" rows="2" placeholder="Bill number, vendor, purpose…">${esc(record?record.notes||'':'')}</textarea></label>
     <label class="full">Bill / Voucher (PDF)<input id="officeDocument" type="file" accept=".pdf,application/pdf"><span class="hint">Optional bill or voucher PDF, stored on this device only.</span></label>
     <div class="doc-manager full" id="officeDocManager"><h4>Attached bill</h4><div class="doc-list" id="officeDocManagerList"></div></div>

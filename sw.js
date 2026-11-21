@@ -1,13 +1,13 @@
 /* Personal Finance service worker - offline-first caching for the app shell and CDN libraries. */
-const VERSION = 'v16.6.0';
+const VERSION = 'v16.7.0';
 const SHELL_CACHE = `assetbook-shell-${VERSION}`;
 const RUNTIME_CACHE = `assetbook-runtime-${VERSION}`;
 
 const SHELL_ASSETS = [
   './',
   'index.html',
-  'styles.css?v=22',
-  'app.js?v=22',
+  'styles.css?v=23',
+  'app.js?v=23',
   'manifest.json',
   'icons/icon.svg',
   'icons/icon-192.png',
