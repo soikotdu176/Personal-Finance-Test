@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=18">
+  <link rel="stylesheet" href="styles.css?v=22">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -85,6 +85,7 @@
       <button class="nav-item" data-page="records"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg><b>Assets &amp; Liabilities</b></button>
       <button class="nav-item" data-page="incomeExpenses"><svg class="ic" aria-hidden="true"><use href="#i-up"/></svg><b>Income &amp; Expenses</b></button>
       <button class="nav-item" data-page="balance"><svg class="ic" aria-hidden="true"><use href="#i-scale"/></svg><b>Balance Sheet</b></button>
+      <button class="nav-item" data-page="officePurchases"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><b>Office Purchase &amp; Bill</b></button>
       <button class="nav-item" data-page="backup"><svg class="ic" aria-hidden="true"><use href="#i-backup"/></svg><b>Data Backup &amp; Restore</b></button>
       <button class="nav-item" data-page="settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg><b>Settings</b></button>
     </nav>
@@ -254,6 +255,24 @@
       <div class="card balance-card" id="balanceSheet"></div>
     </section>
 
+    <section class="content hidden" id="officePurchasesPage" data-page-panel>
+      <div class="cards-grid" id="officeSummaryCards"></div>
+      <div class="filters card office-filter-card" id="officeFilters"></div>
+      <div class="card table-card office-table-card">
+        <div class="table-toolbar">
+          <div class="tt-title"><h3 id="officeTableTitle">Office Purchase &amp; Bill Ledger</h3><p id="officeRecordCount" aria-live="polite"></p></div>
+          <div class="tt-actions">
+            <button class="btn btn-xls" id="officeExportExcel"><svg class="ic" aria-hidden="true"><use href="#i-sheet"/></svg><span>Export Excel</span></button>
+            <button class="btn btn-pdf" id="officeExportPdf"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><span>Export PDF</span></button>
+            <button class="btn btn-primary" id="addOfficeBtn"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg><span>Add Entry</span></button>
+          </div>
+        </div>
+        <div class="table-wrap" id="officeTableWrap"><table id="officeTable" class="office-table"></table></div>
+        <div id="officeAccountSummary" class="office-account-summary"></div>
+        <div class="pagination" id="officePagination"></div>
+      </div>
+    </section>
+
     <section class="content hidden" id="backupPage" data-page-panel>
       <div class="backup-grid">
         <div class="card action-card">
@@ -304,6 +323,17 @@
             <p class="hint">Each import is tracked as a batch. Deleting a batch also removes the records it imported.</p>
             <div id="migrationHistoryList"></div>
           </div>
+        </div>
+        <div class="card settings-card" id="officeMigrationCard">
+          <h3>Office Purchase &amp; Bill</h3>
+          <p>Import the FY-wise <b>Office Purchase &amp; Bill.xlsx</b> workbook (sheets such as <b>2025-26</b>, left cash outflow / right cash inflow). Rows are deduplicated and each import is tracked as a migration batch. Imported entries appear on the Office Purchase &amp; Bill page, and any entry linked to a Cash &amp; Bank account from <b>Manage Categories</b> also moves that account's balance.</p>
+          <input type="file" id="officeImport" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
+          <div class="inline-form office-migration-actions">
+            <button class="btn" id="officeImportBtn">Import Office Workbook</button>
+            <button class="btn" id="officeTemplateBtn">Download Template</button>
+            <button class="btn" id="officeExportBtn">Export Office Workbook</button>
+          </div>
+          <p class="hint">Export produces the same side-by-side layout, so the file can be re-imported without duplicates.</p>
         </div>
         <div class="card settings-card" id="installCard">
           <h3>Mobile App</h3>
@@ -438,6 +468,14 @@
     </form>
   </dialog>
 
+  <dialog id="officeModal" class="modal" aria-labelledby="officeModalTitle">
+    <form id="officeForm" method="dialog">
+      <div class="modal-head"><div><h2 id="officeModalTitle">Add Office Entry</h2><p id="officeModalSubtitle"></p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
+      <div class="modal-body" id="officeFormFields"></div>
+      <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="submit" class="btn btn-primary">Save Entry</button></div>
+    </form>
+  </dialog>
+
   <dialog id="migrationEditModal" class="modal" aria-labelledby="migrationEditTitle">
     <form method="dialog">
       <div class="modal-head"><div><h2 id="migrationEditTitle">Edit Migration</h2><p id="migrationEditSubtitle"></p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
@@ -548,6 +586,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=18"></script>
+  <script src="app.js?v=22"></script>
 </body>
 </html>

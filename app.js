@@ -7,11 +7,11 @@
    ========================================================================== */
 
 const DB_NAME = 'AssetBookDB';
-const DB_VERSION = 4;                       // v4: migration history batches (migrationId on imported rows)
-const APP_VERSION = '2026-11-20-v9';
+const DB_VERSION = 5;                       // v5: standalone Office Purchase & Bill ledger (records + PDF links)
+const APP_VERSION = '2026-11-21-v10';
 const DATA_VERSION_KEY = 'assetbook-data-version';
 let db;
-let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [] };
+let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [], officePurchases: [] };
 let charts = {};
 let editingRecordId = null;
 let savingRecord = false;
@@ -27,6 +27,13 @@ let incomePage = 1;
 let incomeTab = 'transactions';
 const incomeFilters = { search: '', year: '', month: '', type: '', majorHead: '', category: '', subcategory: '' };
 const incomeDocDraft = { existing: [], removed: new Set(), replaced: new Map(), added: [] };
+/* Office Purchase & Bill page state (kept separate from the Dashboard / Income state). */
+let editingOfficeId = null;
+let savingOffice = false;
+let officePage = 1;
+let officeYearChosen = false;
+const officeFilters = { year: '', type: '', account: '', category: '', search: '' };
+const officeDocDraft = { existing: [], removed: new Set(), added: [] };
 
 const defaultCategories = [
   {id:'c-cash',type:'Asset',name:'Cash',subcategories:['Savings Accounts','Cash in Hand']},
@@ -95,6 +102,7 @@ const ACCOUNTS = ['Cash in Hand','bKash','Basic Bank Limited','Card','Other'];
 const PROJECT_DATASET = [
   'Project/Assets & Liabilities.xlsx',
   'Project/Income & Expenses.xlsx',
+  'Project/Office Purchase & Bill.xlsx',
   'Project/budge-01-07-2026-31-07-2026_1795143633525.csv'
 ];
 const PROJECT_DATASET_FLAG = 'assetbook-project-dataset';
@@ -120,6 +128,11 @@ function openDB() {
       if(!database.objectStoreNames.contains('incomeGroups')) database.createObjectStore('incomeGroups',{keyPath:'id'});
       // v4: migration batch metadata (Settings → Excel & Budge CSV Migration history).
       if(!database.objectStoreNames.contains('migrationHistory')) database.createObjectStore('migrationHistory',{keyPath:'id'});
+      // v5: Office Purchase & Bill ledger - completely separate from the Dashboard records.
+      if(!database.objectStoreNames.contains('officePurchases')){
+        const op=database.createObjectStore('officePurchases',{keyPath:'id'});
+        ['date','incomeYear','type','account','category','migrationId','importHash'].forEach(k=>op.createIndex(k,k,{unique:false}));
+      }
       if(event.oldVersion<2&&event.target.transaction) migrateDocumentBlobs(event.target.transaction);
     };
     request.onsuccess=()=>resolve(request.result);
@@ -517,9 +530,9 @@ async function loadProjectDataset(){
       const blob=await response.blob();
       const name=decodeURIComponent(path.split('/').pop());
       const file=new File([blob],name,{type:blob.type||(/\.csv$/i.test(name)?'text/csv':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')});
-      const before=state.records.length+state.incomeExpenses.length;
+      const before=state.records.length+state.incomeExpenses.length+state.officePurchases.length;
       await runImport(file,null);
-      imported+=Math.max(0,state.records.length+state.incomeExpenses.length-before);
+      imported+=Math.max(0,state.records.length+state.incomeExpenses.length+state.officePurchases.length-before);
     }catch(error){console.info('[dataset] skipped',path,error)}
   }
   try{localStorage.setItem(PROJECT_DATASET_FLAG,'1')}catch(e){}
@@ -556,6 +569,7 @@ async function init(){
   state.settings.incomeYears ||= ['2026-27','2025-26','2024-25','2023-24','2022-23'];
   // Fill an empty database from Project/ before the first render so the Dashboard is complete.
   await loadProjectDataset();
+  await reconcileOfficeCarryForwards();
   bindNavigation();
   bindGlobalActions();
   bindDelegatedActions();
@@ -576,6 +590,7 @@ async function loadState(){
   state.incomeExpenses=await getAll('incomeExpenses');
   state.incomeGroups=await getAll('incomeGroups');
   state.migrationHistory=await getAll('migrationHistory');
+  state.officePurchases=await getAll('officePurchases');
   if(!state.incomeGroups.length){for(const group of defaultIncomeGroups) state.incomeGroups.push(group)}
 }
 
@@ -613,7 +628,7 @@ function initTheme(){
 /* ==========================================================================
    Navigation (sidebar + mobile bottom bar) with animated active pill
    ========================================================================== */
-const PAGE_TITLES={dashboard:['Dashboard','Financial overview'],records:['Assets & Liabilities','Manage financial records'],incomeExpenses:['Income & Expenses','Track cash flow, income and spending'],balance:['Balance Sheet','Consolidated financial position'],backup:['Data Backup & Restore','Portable data management'],settings:['Settings','Application preferences']};
+const PAGE_TITLES={dashboard:['Dashboard','Financial overview'],records:['Assets & Liabilities','Manage financial records'],incomeExpenses:['Income & Expenses','Track cash flow, income and spending'],officePurchases:['Office Purchase & Bill','FY-wise office outflow, inflow and cash & bank effects'],balance:['Balance Sheet','Consolidated financial position'],backup:['Data Backup & Restore','Portable data management'],settings:['Settings','Application preferences']};
 
 function playEnter(panel){
   if(!panel)return;
@@ -694,6 +709,7 @@ function showPage(page){
   if(page==='records')renderRecordSections();
   if(page==='incomeExpenses')renderIncomePage();
   if(page==='balance')renderBalance();
+  if(page==='officePurchases')renderOfficePage();
   if(page==='backup')renderBackupHistory();
   if(page==='settings')renderSettings();
   if(page==='dashboard'&&isMobileViewport())renderMobileDashboard();
@@ -852,6 +868,15 @@ function bindGlobalActions(){
   $el('migrationEditModal').addEventListener('close',()=>{replaceMigrationId=null});
   const wipe=$el('deleteAllData');
   if(wipe)wipe.onclick=deleteAllLocalData;
+  /* Office Purchase & Bill page + its Settings migration card */
+  $el('addOfficeBtn').onclick=()=>openOfficeModal();
+  $el('officeForm').onsubmit=saveOfficeEntry;
+  $el('officeExportExcel').onclick=e=>runWithLoading(e.currentTarget,exportOfficeExcel);
+  $el('officeExportPdf').onclick=e=>runWithLoading(e.currentTarget,exportOfficePdf);
+  $el('officeImportBtn').onclick=()=>$el('officeImport').click();
+  $el('officeImport').onchange=importOfficeExcel;
+  $el('officeTemplateBtn').onclick=downloadOfficeTemplate;
+  $el('officeExportBtn').onclick=e=>runWithLoading(e.currentTarget,exportOfficeWorkbook);
   bindPdfViewer();
   bindCalculator();
 }
@@ -892,6 +917,10 @@ function bindDelegatedActions(){
       case 'edit-migration': editMigration(id); break;
       case 'delete-migration': await deleteMigration(id); break;
       case 'remove-migration-row': await removeMigrationRow(mig,store,id); break;
+      case 'edit-office': openOfficeModal(id); break;
+      case 'view-office': viewOfficeEntry(id); break;
+      case 'delete-office': await deleteOfficeEntry(id); break;
+      case 'office-page': officePage=Number(id)||1; renderOfficeTable(); break;
     }
   });
 }
@@ -909,6 +938,7 @@ function renderAll(){
   renderDashboard();
   renderRecordSections();
   renderIncomePage();
+  renderOfficePage();
   renderSettings();
   renderBackupHistory();
   renderBalance();
@@ -1179,14 +1209,16 @@ function applyFundingLegs(balanceRecords,records,year){
   }
   return legs.length?[...balanceRecords,...legs]:balanceRecords;
 }
-/** Reduce a record set to its effective balance records for `year`. Transfers never appear as
- *  records here - only as signed movements on the accounts they belong to. */
+/** Reduce a record set to its effective balance records for `year`. Transfers and office Cash &
+ *  Bank movements never appear as records here - only as signed movements on the accounts they
+ *  belong to. */
 function effectiveRecordsForBalance(records,year){
   const base=records.filter(r=>!isTransferRecord(r));
   const cash=latestCashRecords(base.filter(isCashRecord), year);
   const carried=base.filter(r=>!isCashRecord(r)&&carriesIntoYear(r,year));
   const withTransfers=applyTransferLegs([...carried,...cash],(state.records||[]).filter(isTransferRecord),year);
-  return applyFundingLegs(withTransfers,carried,year);
+  const withFunding=applyFundingLegs(withTransfers,carried,year);
+  return applyOfficeAccountLegs(withFunding,year);
 }
 
 const sumAmount=records=>records.reduce((s,r)=>s+recordAmount(r),0);
@@ -3398,13 +3430,15 @@ async function addIncomeYear(){
   state.settings.incomeYears=[...new Set([...(state.settings.incomeYears||[]),year])].sort((a,b)=>String(b).localeCompare(String(a)));
   await put('settings',{key:'incomeYears',value:state.settings.incomeYears});
   document.getElementById('newYear').value='';
-  renderSettings();renderDashboardFilters();toast('Income year added');
+  await reconcileOfficeCarryForwards();
+  renderSettings();renderDashboardFilters();renderOfficePage();toast('Income year added');
 }
 async function deleteIncomeYear(year){
   if(await confirm(`Delete income year ${year}?`,'Delete Income Year')){
     state.settings.incomeYears=(state.settings.incomeYears||[]).filter(y=>String(y)!==String(year));
     await put('settings',{key:'incomeYears',value:state.settings.incomeYears});
-    renderSettings();renderDashboardFilters();toast('Income year deleted');
+    await reconcileOfficeCarryForwards();
+    renderSettings();renderDashboardFilters();renderOfficePage();toast('Income year deleted');
   }
 }
 
@@ -3418,6 +3452,7 @@ async function createBackup(){
       records:state.records,
       categories:state.categories,
       incomeExpenses:state.incomeExpenses,
+      officePurchases:state.officePurchases,
       incomeGroups:state.incomeGroups,
       migrationHistory:state.migrationHistory,
       documents:state.documents.map(({blob,...doc})=>doc),
@@ -3426,11 +3461,11 @@ async function createBackup(){
       version:'1.1'
     };
     zip.file('backup.json',JSON.stringify(backup,null,2));
-    zip.file('metadata.json',JSON.stringify({name:'Personal Finance Management System',version:'1.1',database:DB_NAME,createdAt:backup.backupDate,records:state.records.length,incomeExpenses:state.incomeExpenses.length,documents:state.documents.length},null,2));
+    zip.file('metadata.json',JSON.stringify({name:'Personal Finance Management System',version:'1.1',database:DB_NAME,createdAt:backup.backupDate,records:state.records.length,incomeExpenses:state.incomeExpenses.length,officePurchases:state.officePurchases.length,documents:state.documents.length},null,2));
     const folder=zip.folder('documents');
     for(const doc of state.documents){
       const bytes=await getDocBlob(doc.id);                 // read each PDF only while it is being written
-      const kind={Income:'income',Expense:'expenses',Liability:'liabilities'}[doc.financialType]||'assets';
+      const kind={Income:'income',Expense:'expenses',Liability:'liabilities',Inflow:'office',Outflow:'office'}[doc.financialType]||'assets';
       if(bytes)folder.file(`${kind}/${doc.id}-${doc.name||'document.pdf'}`,bytes);
     }
     const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE'});
@@ -3462,6 +3497,7 @@ async function performRestore(){
     const backup=JSON.parse(await backupFile.async('text'));
     if(!backup.records||!backup.categories||backup.version!==undefined&&Number.parseFloat(backup.version)<1)throw new Error('Unsupported or invalid backup format');
     const incomeExpenses=backup.incomeExpenses||[];
+    const officePurchases=backup.officePurchases||[];
     const incomeGroups=backup.incomeGroups||[];
     const migrationHistory=backup.migrationHistory||[];
     const documents=(backup.documents||[]).map(doc=>{const clean=Object.assign({},doc);delete clean.blob;return clean});
@@ -3482,6 +3518,7 @@ async function performRestore(){
       await replaceStore('records',backup.records||[]);
       await replaceStore('incomeGroups',incomeGroups);
       await replaceStore('incomeExpenses',incomeExpenses);
+      await replaceStore('officePurchases',officePurchases);
       await replaceStore('migrationHistory',migrationHistory);
       await replaceStore('documents',documents);
       await replaceStore('documentBlobs',blobs);
@@ -3490,6 +3527,7 @@ async function performRestore(){
       for(const record of backup.records||[]){if(!await getOne('records',record.id))await put('records',record)}
       for(const group of incomeGroups){if(!await getOne('incomeGroups',group.id))await put('incomeGroups',group)}
       for(const entry of incomeExpenses){if(!await getOne('incomeExpenses',entry.id))await put('incomeExpenses',entry)}
+      for(const entry of officePurchases){if(!await getOne('officePurchases',entry.id))await put('officePurchases',entry)}
       for(const mig of migrationHistory){if(!await getOne('migrationHistory',mig.id))await put('migrationHistory',mig)}
       for(const document of documents){if(!await getOne('documents',document.id))await put('documents',document)}
       for(const blob of blobs){if(!await getOne('documentBlobs',blob.id))await put('documentBlobs',blob)}
@@ -3498,7 +3536,7 @@ async function performRestore(){
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,s)=>(out[s.key]=s.value,out),state.settings||{});
     renderAll();
-    toast(`Backup restored: ${backup.records?.length||0} record(s), ${incomeExpenses.length} transaction(s) and ${blobs.length} document(s)`);
+    toast(`Backup restored: ${backup.records?.length||0} record(s), ${incomeExpenses.length} transaction(s), ${officePurchases.length} office entr${officePurchases.length===1?'y':'ies'} and ${blobs.length} document(s)`);
   }catch(error){
     console.error(error);toast(error.message||'Unable to restore backup.',true);
   }finally{
@@ -3685,7 +3723,10 @@ async function runImport(file,replaceId){
       const workbook=XLSX.read(await file.arrayBuffer(),{type:'array'});
       const first=workbook.SheetNames[0];
       const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[first],{header:1,defval:'',raw:true});
-      if(detectBudgeHeader(aoa)>=0){
+      // The dedicated office ledger has its own FY-sheet shape, so route it before the asset/income readers.
+      if(isOfficeWorkbook(workbook)){
+        await importOfficeWorkbook(workbook,replaceId,file.name);
+      }else if(detectBudgeHeader(aoa)>=0){
         await importBudgeFile(aoa,file.name,replaceId);
       }else if(isIncomeExpensesWorkbook(workbook)){
         await importIncomeExpensesWorkbook(workbook,replaceId,file.name);
@@ -4830,6 +4871,1057 @@ async function exportIncomePdf(){
   toast(`Income & Expenses PDF report generated (${total} page${total===1?'':'s'})`);
 }
 
+/* ==========================================================================
+   Office Purchase & Bill - a standalone fiscal-year ledger.
+
+   The ledger stays separate: nothing here writes to state.records or
+   state.incomeExpenses, so an office entry never becomes a ledger row of its
+   own and the Income & Expenses pages are unaffected.
+
+   Cash & Bank effect: an entry linked to a Cash & Bank account reduces that
+   account on Outflow and increases it on Inflow. The effect is DERIVED from the
+   office ledger itself (see applyOfficeAccountLegs) and never written into the
+   global Cash & Bank records, so editing the amount, re-linking the account or
+   deleting the entry can never double-count the movement - and the "I Do not
+   want to change Account" checkbox simply opts one entry out.
+   ========================================================================== */
+const OFFICE_CATEGORIES=['Office Purchase','Bill Received','Personal Print','Office Fund','Reimbursement','Opening Balance','Other'];
+
+function isOfficeOpeningType(type){
+  return /^(Opening Balance)/i.test(String(type||''));
+}
+function officeTypeKind(type){
+  const value=String(type||'');
+  if(/Opening Balance.*Inflow/i.test(value)||value==='Inflow')return 'Inflow';
+  return 'Outflow';
+}
+function normalizeOfficeType(type){
+  const value=String(type||'');
+  if(/Opening Balance.*Inflow/i.test(value)||/^inflow$/i.test(value))return /Opening/i.test(value)?'Opening Balance (Inflow)':'Inflow';
+  if(/Opening Balance.*Outflow/i.test(value)||/^outflow$/i.test(value))return /Opening/i.test(value)?'Opening Balance (Outflow)':'Outflow';
+  if(/Bill Received/i.test(value))return 'Bill Received (Cash Inflow)';
+  if(/Office Purchase/i.test(value))return 'Office Purchase (Cash Outflow)';
+  return value;
+}
+
+/** Income Years strictly from Settings (never auto-generated or derived from office entries). */
+function officeIncomeYears(){
+  return [...new Set((state.settings&&state.settings.incomeYears||[]).map(y=>normIncomeYear(y)).filter(Boolean))]
+    .sort((a,b)=>String(b).localeCompare(String(a)));
+}
+/** Active/default selector: today's fiscal year when configured in Settings, else the newest configured year. */
+function officeCurrentYear(){
+  const years=officeIncomeYears();
+  if(!years.length)return '';
+  const current=fiscalYearFromDate(todayISO())||'';
+  return years.includes(current)?current:years[0];
+}
+function officeEntryYear(entry){
+  return normIncomeYear(entry&&entry.incomeYear)||fiscalYearFromDate(entry&&entry.date)||'';
+}
+/** Office FY dropdown: exactly the Settings -> Income Years list. */
+function officeYearList(){
+  return officeIncomeYears();
+}
+/** Identity of a Cash & Bank account name: trimmed, single-spaced and case-insensitive, so
+ *  " bKash ", "Bkash" and "bKASH" are one and the same account everywhere on this page. */
+const officeAccountKey=value=>String(value??'').replace(/\s+/g,' ').trim().toLowerCase();
+/**
+ * Every Cash & Bank account the user maintains in Settings -> Manage Categories: the subcategories
+ * of each Asset category named "Cash" / "Cash & Bank". Nothing is hardcoded - add or rename an
+ * account in Settings and the dropdown follows. Duplicates across categories (and case variants such
+ * as "bKash" / "bkash") collapse into one option; the spelling that appears first wins.
+ * @returns {Map<string,{label:string,category:string}>} keyed by officeAccountKey()
+ */
+function officeAccountIndex(){
+  const index=new Map();
+  for(const category of state.categories||[]){
+    if(category.type!=='Asset'||!isCashCategoryName(category.name))continue;
+    for(const raw of category.subcategories||[]){
+      const label=String(raw??'').replace(/\s+/g,' ').trim();
+      if(!label)continue;
+      const key=officeAccountKey(label);
+      if(!index.has(key))index.set(key,{label,category:category.name});
+    }
+  }
+  return index;
+}
+/** Deduplicated Cash & Bank account labels for every account dropdown on the page. */
+function officeAccountChoices(){
+  return [...officeAccountIndex().values()].map(account=>account.label);
+}
+/** The configured account behind a stored name (matched case-insensitively), or null. */
+function officeAccountOption(name){
+  const key=officeAccountKey(name);
+  return key?officeAccountIndex().get(key)||null:null;
+}
+/** An entry moves its Cash & Bank account unless it is an opening-balance row, the user ticked
+ *  "I Do not want to change Account", or the account is not configured in Settings any more. */
+function officeAccountApplies(entry){
+  return !!entry&&!isOfficeOpeningType(entry.type)&&!entry.noAccountChange&&!!officeAccountOption(entry.account);
+}
+/** Signed Cash & Bank movement of one entry: an inflow adds to the account, an outflow deducts. */
+function officeAccountDelta(entry){
+  const amount=Math.abs(Number(entry&&entry.amount)||0);
+  return officeTypeKind(entry&&entry.type)==='Inflow'?amount:-amount;
+}
+function officeCategoryChoices(){
+  const names=[...OFFICE_CATEGORIES,...(state.officePurchases||[]).map(r=>r.category).filter(Boolean)];
+  return [...new Set(names.map(n=>String(n||'').trim()).filter(Boolean))];
+}
+function officeOpeningBalances(){
+  const map=state.settings&&state.settings.officeOpeningBalances;
+  return map&&typeof map==='object'&&!Array.isArray(map)?map:{};
+}
+function officeOpeningBalance(year){
+  const entries=(state.officePurchases||[]).filter(r=>isOfficeOpeningType(r.type)&&officeEntryYear(r)===normIncomeYear(year));
+  if(entries.length){
+    return entries.reduce((sum,r)=>sum+(officeTypeKind(r.type)==='Inflow'?-1:1)*Math.abs(Number(r.amount)||0),0);
+  }
+  const value=Number(officeOpeningBalances()[year]);
+  return Number.isFinite(value)?value:0;
+}
+/** Outflow is money spent (deducts cash), inflow is money received (adds cash). */
+function officeTotals(entries){
+  const index=officeAccountIndex();
+  const movesAccount=entry=>!isOfficeOpeningType(entry.type)&&!entry.noAccountChange&&index.has(officeAccountKey(entry.account));
+  let outflow=0,inflow=0,cashOutflow=0,cashInflow=0;
+  for(const entry of entries||[]){
+    const amount=Math.abs(Number(entry.amount)||0);
+    const kind=officeTypeKind(entry.type);
+    if(kind==='Inflow'){inflow+=amount;if(movesAccount(entry))cashInflow+=amount}
+    else{outflow+=amount;if(movesAccount(entry))cashOutflow+=amount}
+  }
+  return {outflow,inflow,net:outflow-inflow,cashOutflow,cashInflow,cashEffect:cashInflow-cashOutflow,count:(entries||[]).length};
+}
+function officeClosingBalance(entries,opening){
+  const regular=(entries||[]).filter(entry=>!isOfficeOpeningType(entry.type));
+  return (Number(opening)||0)+officeTotals(regular).net;
+}
+/**
+ * Cash & Bank movements of the office ledger - derived on the fly, exactly like the transfer and
+ * funding legs above. Nothing is ever written into state.records, so saving, re-linking, opting out
+ * ("I Do not want to change Account") or deleting an entry always leaves the account with the right
+ * balance and can never double-count a movement. An opening-balance row is a carried-forward figure,
+ * not a payment, so it never touches an account.
+ * The same snapshot rule as funding applies: a movement older than the account's newest snapshot is
+ * already baked into that snapshot and is therefore skipped; a movement in a later Income Year than
+ * the one being reported is ignored for that year.
+ */
+function applyOfficeAccountLegs(balanceRecords,year){
+  const entries=(state.officePurchases||[]).filter(entry=>!isOfficeOpeningType(entry.type)&&!entry.noAccountChange&&entry.account);
+  if(!entries.length)return balanceRecords;
+  const index=officeAccountIndex();
+  if(!index.size)return balanceRecords;
+  const range=year?fiscalRange(year):null;
+  const cutoff=range?range.to:'';
+  const snapshots=new Map();
+  const spelling=new Map();
+  (balanceRecords||[]).forEach(record=>{
+    // Only user-entered snapshots gate a movement - transfer / funding / office legs must not.
+    if(!isCashRecord(record)||record.syntheticTransferLeg)return;
+    const key=cashSubcategoryKey(record.subcategory);
+    if(!spelling.has(key))spelling.set(key,String(record.subcategory||'').trim());
+    const effective=cashEffectiveDate(record);
+    const snapshot=snapshots.get(key);
+    if(!snapshot||effective>snapshot.date)snapshots.set(key,{date:effective,savedAt:String(record.updatedAt||record.createdAt||'')});
+  });
+  const legs=[];
+  for(const entry of entries){
+    const account=index.get(officeAccountKey(entry.account));
+    if(!account)continue;                                        // account no longer in Settings
+    const amount=officeAccountDelta(entry);
+    if(!amount)continue;
+    const date=normalizeExcelDate(entry.date)||String(entry.date||'').slice(0,10);
+    if(cutoff&&date&&date>cutoff)continue;                       // spent in a later Income Year
+    const key=cashSubcategoryKey(account.label);
+    const snapshot=snapshots.get(key);
+    if(snapshot&&snapshot.date&&date){
+      if(date<snapshot.date)continue;                            // the snapshot is newer
+      if(date===snapshot.date&&snapshot.savedAt>=String(entry.updatedAt||entry.createdAt||''))continue;
+    }
+    legs.push({
+      id:`${entry.id}::office`,syntheticTransferLeg:true,officeEntryId:entry.id,
+      // Reuse the spelling the ledger already uses, so a leg merges into its account row instead
+      // of creating a second row that differs only by capitalisation.
+      type:'Asset',category:account.category,subcategory:spelling.get(key)||account.label,
+      particulars:'',accountDetail:'',date,incomeYear:entry.incomeYear||fiscalYearFromDate(date)||'',
+      amount,balance:amount,details:'',documentIds:[]
+    });
+  }
+  return legs.length?[...balanceRecords,...legs]:balanceRecords;
+}
+
+function officeFiscalYearStart(year){
+  const start=parseInt(String(normIncomeYear(year)).slice(0,4),10);
+  return Number.isFinite(start)?`${start}-07-01`:'';
+}
+
+function officeYearSort(a,b){
+  const ay=parseInt(String(a).slice(0,4),10)||0;
+  const by=parseInt(String(b).slice(0,4),10)||0;
+  return ay-by;
+}
+async function reconcileOfficeCarryForwards(){
+  let changed=false;
+  for(const entry of state.officePurchases||[]){
+    const normalized=normalizeOfficeType(entry.type);
+    if(normalized!==entry.type){entry.type=normalized;changed=true}
+  }
+  const removeIds=(state.officePurchases||[]).filter(r=>r.openingAuto&&!r.openingOverride).map(r=>r.id);
+  if(removeIds.length){
+    await removeMany('officePurchases',removeIds);
+    changed=true;
+  }
+  state.officePurchases=(state.officePurchases||[]).filter(r=>!(r.openingAuto&&!r.openingOverride));
+
+  const legacy=officeOpeningBalances();
+  // Carry-forward stays strictly inside the ordered Income Years configured in Settings:
+  // each year can only carry its closing balance into the *next configured* year, never a phantom year.
+  const ordered=[...new Set((state.settings.incomeYears||[]).map(y=>normIncomeYear(y)).filter(Boolean))].sort(officeYearSort);
+  const add=[];
+  for(let i=0;i<ordered.length;i++){
+    const year=ordered[i];
+    let openings=(state.officePurchases||[]).filter(r=>isOfficeOpeningType(r.type)&&officeEntryYear(r)===year);
+    if(!openings.length){
+      const legacyValue=Number(legacy[year]);
+      if(Number.isFinite(legacyValue)&&legacyValue!==0){
+        const record={
+          id:uid('office'),type:legacyValue<0?'Opening Balance (Inflow)':'Opening Balance (Outflow)',
+          date:officeFiscalYearStart(year),particulars:'Opening Balance',category:'Opening Balance',
+          account:'',notes:'Migrated opening balance',amount:Math.abs(legacyValue),
+          incomeYear:year,openingOverride:true,openingImported:true,
+          createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()
+        };
+        add.push(record);state.officePurchases.push(record);changed=true;
+        openings=[record];
+      }
+    }
+    const opening=openings.reduce((sum,r)=>sum+(officeTypeKind(r.type)==='Inflow'?-1:1)*Math.abs(Number(r.amount)||0),0);
+    const regular=(state.officePurchases||[]).filter(r=>officeEntryYear(r)===year&&!isOfficeOpeningType(r.type));
+    const close=opening+officeTotals(regular).net;
+    if(close!==0){
+      const next=ordered[i+1];          // only the next configured Income Year
+      if(next){
+        const nextManual=(state.officePurchases||[]).filter(r=>isOfficeOpeningType(r.type)&&officeEntryYear(r)===next);
+        if(!nextManual.length){
+          const record={
+            id:uid('office'),type:close>0?'Opening Balance (Outflow)':'Opening Balance (Inflow)',
+            date:officeFiscalYearStart(next),particulars:'Opening Balance',category:'Opening Balance',
+            account:'',notes:'Automatically carried forward',amount:Math.abs(close),
+            incomeYear:next,openingAuto:true,openingOverride:false,
+            createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()
+          };
+          add.push(record);state.officePurchases.push(record);changed=true;
+        }
+      }
+    }
+  }
+  if(add.length)await putMany('officePurchases',add);
+  if(changed){
+    await loadState();
+  }
+  return changed;
+}
+/** Stable chronological order: date, then creation time, then id (so the running net never flickers). */
+function officeEntryOrder(a,b){
+  return String(a.date||'').localeCompare(String(b.date||''))
+    ||String(a.createdAt||'').localeCompare(String(b.createdAt||''))
+    ||String(a.id||'').localeCompare(String(b.id||''));
+}
+/** Running net per entry id, starting from the FY opening balance. */
+function officeRunningMap(entries,opening){
+  const map=new Map();
+  let run=Number(opening)||0;
+  for(const entry of [...(entries||[])].sort(officeEntryOrder)){
+    run+=(officeTypeKind(entry.type)==='Inflow'?-1:1)*(Math.abs(Number(entry.amount)||0));
+    map.set(entry.id,run);
+  }
+  return map;
+}
+/** Guesses the Cash & Bank account from the workbook wording (used only while importing).
+ *  Only accounts configured in Settings are ever returned, so an import can never invent an
+ *  account that does not exist in Manage Categories. */
+function guessOfficeAccount(particulars){
+  const text=String(particulars||'');
+  if(!text.trim())return '';
+  const options=officeAccountChoices();
+  const exact=options.find(name=>text.toLowerCase().includes(name.toLowerCase()));
+  if(exact)return exact;
+  const pick=re=>options.find(name=>re.test(name))||'';
+  if(/basic\s*bank|basic\s*a\/c/i.test(text))return pick(/basic/i);
+  if(/bkash|bikash/i.test(text))return pick(/bkash/i);
+  if(/\bcash\b/i.test(text))return pick(/cash/i);
+  if(/\bcard\b/i.test(text))return pick(/card/i);
+  return '';
+}
+/** Import classification: inflows become office funds / print income, outflows are purchases. */
+function guessOfficeCategory(type,particulars){
+  const text=String(particulars||'');
+  if(type==='Inflow'){
+    if(/print/i.test(text))return 'Personal Print';
+    if(/bill/i.test(text))return 'Bill Received';
+    return 'Office Fund';
+  }
+  return 'Office Purchase';
+}
+
+/**
+ * Reads one FY sheet of "Office Purchase & Bill.xlsx".
+ * Layout: left block A-C = Date / Detail / Amount (cash outflow), right block E-G =
+ * Date / Detail / Amount (cash inflow), row 4 holds the brought-forward "Balance".
+ * Parsing stops at the "Total" row; blank rows and the Print footer are ignored.
+ * @returns {{fy:string,entries:Array,openingBalance:number|null,skipped:number,detected:boolean}}
+ */
+function parseOfficeSheet(aoa,sheetName){
+  const fy=normIncomeYear(sheetName);
+  const rows=Array.isArray(aoa)?aoa:[];
+  const headerIndex=rows.slice(0,8).findIndex(row=>{
+    const cells=(row||[]).map(cell=>nrm(cell));
+    return cells.includes('cash outflow')||cells.includes('cash inflow')
+      ||(cells.includes('date')&&cells.some(cell=>cell.includes('amount')));
+  });
+  if(headerIndex<0)return {fy,entries:[],openingBalance:null,skipped:0,detected:false};
+  const fallbackDate=(fiscalRange(fy)||{}).from||'';
+  const entries=[];
+  const occurrences=new Map();
+  let openingBalance=null,skipped=0,unnamed=0,undated=0;
+  /**
+   * The real workbook keeps the inflow block in E-G, but several sheets have the inflow dates
+   * typed one column left (D). A numeric serial such as the row's serial number would look like
+   * January 1900, so only plausible calendar years are accepted.
+   */
+  const plausibleDate=(value)=>{
+    const iso=normalizeExcelDate(value);
+    if(!iso)return '';
+    const year=Number(iso.slice(0,4));
+    return year>=1990&&year<=2100?iso:'';
+  };
+  /** Exported workbooks carry a "Cash & Bank" column (D on the outflow side, H on the inflow side). */
+  const carriesAccounts=rows.slice(0,8).some(row=>{
+    const cells=(row||[]).map(cell=>nrm(cell));
+    return (cells[3]&&cells[3].includes('cash'))||(cells[7]&&cells[7].includes('cash'));
+  });
+  /** A configured account is stored with its Settings spelling; anything else is kept verbatim so
+   *  re-importing an export never loses an account that was removed from Settings meanwhile. */
+  const accountCell=(value)=>{
+    const text=String(value??'').replace(/\s+/g,' ').trim();
+    if(!text||!/[a-z]/i.test(text)||plausibleDate(value))return '';
+    const configured=officeAccountOption(text);
+    if(configured)return configured.label;
+    return carriesAccounts?text:'';
+  };
+  const push=(type,date,detail,amount,rowNumber,account)=>{
+    if(!detail||!amount)return;
+    if(!date)undated++;
+    const iso=date||fallbackDate;
+    const value=Math.abs(amount);
+    const base=[sheetName,type,iso,detail,value.toFixed(2)].join('|');
+    const seen=(occurrences.get(base)||0)+1;
+    occurrences.set(base,seen);
+    entries.push({type,date:iso,particulars:detail,amount:value,
+      category:guessOfficeCategory(type,detail),account:account||guessOfficeAccount(detail),
+      sourceSheet:sheetName,sourceRow:rowNumber,
+      importHash:hashString(['office',base,seen].join('|'))});
+  };
+  for(let r=headerIndex+1;r<rows.length;r++){
+    const row=rows[r]||[];
+    if(/^(total|grand total)\b/.test(nrm(row[0])))break;
+    if(nrm(row[0])==='date'&&nrm(row[1])==='detail')continue;
+    if(!row.some(cell=>String(cell??'').trim()))continue;
+    const leftDetail=String(row[1]??'').trim();
+    const leftAmount=parseExcelNumber(row[2]);
+    if(/^(balance|opening balance|brought forward)$/i.test(leftDetail)){
+      if(leftAmount!==0||openingBalance===null)openingBalance=leftAmount;
+    }else if(leftDetail&&leftAmount){
+      push('Outflow',plausibleDate(row[0]),leftDetail,leftAmount,r+1,accountCell(row[3]));
+    }else if(leftAmount&&!leftDetail){
+      // The sheet totals include these rows, so import them instead of silently dropping cash.
+      push('Outflow',plausibleDate(row[0]),'Cash Outflow',leftAmount,r+1);
+      unnamed++;
+    }else if(leftDetail&&nrm(row[0])!=='total'){
+      // A detail line without a readable amount (memo/note row) — reported, never imported.
+      skipped++;
+    }
+    const rightDetail=String(row[5]??'').trim();
+    const rightAmount=parseExcelNumber(row[6]);
+    const rightDate=plausibleDate(row[4])||plausibleDate(row[3]);
+    const rightAccount=accountCell(row[7]);
+    if(/^(balance|closing balance|carried forward)$/i.test(rightDetail))continue;
+    if(rightDetail&&rightAmount){
+      push('Inflow',rightDate,rightDetail,rightAmount,r+1,rightAccount);
+    }else if(rightAmount&&!rightDetail){
+      push('Inflow',rightDate,'Cash Inflow',rightAmount,r+1,rightAccount);
+      unnamed++;
+    }
+  }
+  return {fy,entries,openingBalance,skipped,unnamed,undated,detected:true};
+}
+/** A sheet belongs to an office ledger only when it carries the Cash Outflow / Cash Inflow caption. */
+function officeSheetSignature(aoa){
+  return (Array.isArray(aoa)?aoa:[]).slice(0,8).some(row=>{
+    const cells=(row||[]).map(cell=>nrm(cell));
+    return cells.some(cell=>/^cash (outflow|inflow)\b/.test(cell));
+  });
+}
+/** A workbook is treated as an office ledger when it has fiscal-year sheets with the outflow/inflow header. */
+function isOfficeWorkbook(workbook){
+  if(!workbook||!workbook.SheetNames||!window.XLSX)return false;
+  return workbook.SheetNames.some(name=>{
+    if(!/^\d{4}\s*[-–]\s*\d{2,4}$/.test(String(name).trim()))return false;
+    const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[name],{header:1,defval:'',raw:true});
+    return officeSheetSignature(aoa)&&parseOfficeSheet(aoa,name).detected;
+  });
+}
+
+/**
+ * Imports every FY sheet of an office workbook. Rows already stored (same sheet/type/row) are
+ * skipped, so importing the same file twice never duplicates the ledger. When the import replaces
+ * an existing office batch, that batch's rows and PDFs are removed first.
+ */
+async function importOfficeWorkbook(workbook,replaceId,fileName){
+  const target=replaceId?state.migrationHistory.find(m=>m.id===replaceId):null;
+  const replacing=!!target&&target.migrationType==='Office Purchase & Bill';
+  const migrationId=replacing?target.id:uid('mig');
+  const seen=new Set(replacing?[]:state.officePurchases.map(r=>r.importHash).filter(Boolean));
+  const rows=[],years=new Set(),openings=Object.assign({},officeOpeningBalances());
+  let skipped=0,unnamed=0,undated=0,openingCount=0,duplicates=0;
+  for(const sheetName of workbook.SheetNames){
+    if(!/^\d{4}\s*[-–]\s*\d{2,4}$/.test(String(sheetName).trim()))continue;
+    const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[sheetName],{header:1,defval:'',raw:true});
+    const parsed=parseOfficeSheet(aoa,sheetName);
+    if(!parsed.detected){skipped++;continue}
+    if(parsed.openingBalance!==null&&openings[parsed.fy]===undefined){
+      openings[parsed.fy]=parsed.openingBalance;
+      openingCount++;
+      const base=[sheetName,'opening',officeFiscalYearStart(parsed.fy),Math.abs(parsed.openingBalance).toFixed(2)].join('|');
+      rows.push({
+        id:uid('office'),migrationId,incomeYear:parsed.fy,date:officeFiscalYearStart(parsed.fy),
+        particulars:'Opening Balance',category:'Opening Balance',
+        type:parsed.openingBalance<0?'Opening Balance (Inflow)':'Opening Balance (Outflow)',
+        account:'',notes:'Imported from Office Purchase & Bill workbook',
+        amount:Math.abs(parsed.openingBalance),openingOverride:true,openingImported:true,
+        sourceSheet:sheetName,sourceRow:4,importHash:hashString(['office',base].join('|')),
+        createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()
+      });
+    }
+    for(const entry of parsed.entries){
+      if(seen.has(entry.importHash)){duplicates++;continue}
+      seen.add(entry.importHash);
+      rows.push(Object.assign({id:uid('office'),migrationId,incomeYear:parsed.fy,
+        createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()},entry));
+      years.add(parsed.fy);
+    }
+    skipped+=parsed.skipped;
+    unnamed+=parsed.unnamed||0;
+    undated+=parsed.undated||0;
+  }
+  if(!rows.length&&!openingCount){
+    toast(duplicates?'These office rows are already imported — nothing new to add.':'No Office Purchase & Bill rows were found in that workbook.',!duplicates);
+    return 0;
+  }
+  if(replacing)await removeMigrationRows(migrationId);
+  if(rows.length)await putMany('officePurchases',rows);
+  if(openingCount){
+    state.settings.officeOpeningBalances=openings;
+    await put('settings',{key:'officeOpeningBalances',value:openings});
+  }
+  if(years.size){
+    const list=[...new Set([...(state.settings.incomeYears||[]),...years])].sort((a,b)=>String(b).localeCompare(String(a)));
+    state.settings.incomeYears=list;
+    await put('settings',{key:'incomeYears',value:list});
+  }
+  await saveMigrationMeta(migrationId,replacing?target.id:null,'Office Purchase & Bill',fileName,rows.length,skipped+duplicates);
+  await loadState();
+  await reconcileOfficeCarryForwards();
+  // Show the newest imported FY straight away instead of an empty current-year ledger.
+  const newestFy=[...years].sort((a,b)=>String(b).localeCompare(String(a)))[0];
+  if(newestFy){officeFilters.year=newestFy;officeYearChosen=true}
+  renderAll();
+  const bits=[`${rows.length} row${rows.length===1?'':'s'} imported`];
+  if(duplicates)bits.push(`${duplicates} duplicate${duplicates===1?'':'s'} skipped`);
+  if(unnamed)bits.push(`${unnamed} row${unnamed===1?'':'s'} had no detail (imported as Cash Inflow/Outflow)`);
+  if(skipped)bits.push(`${skipped} row${skipped===1?'':'s'} skipped (no readable amount)`);
+  if(undated)bits.push(`${undated} row${undated===1?'':'s'} had no date (dated to the FY start)`);
+  if(openingCount)bits.push(`${openingCount} opening balance${openingCount===1?'':'s'} recorded`);
+  toast(`Office Purchase & Bill: ${bits.join(', ')}.`);
+  return rows.length;
+}
+/** Settings -> Import Office Workbook. */
+async function importOfficeExcel(event){
+  const file=event.target.files&&event.target.files[0];
+  event.target.value='';
+  if(!file)return;
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  if(file.size>MAX_IMPORT_BYTES){toast('That file is larger than 30 MB. Split it and import the parts.',true);return}
+  try{
+    const workbook=XLSX.read(await file.arrayBuffer(),{type:'array'});
+    if(!isOfficeWorkbook(workbook)){
+      toast('No office ledger was found. Use FY sheets (e.g. 2025-26) with the Cash Outflow / Cash Inflow columns.',true);
+      return;
+    }
+    await importOfficeWorkbook(workbook,replaceMigrationId,file.name);
+  }catch(error){
+    console.error(error);
+    toast('Could not read that workbook'+(error.message?` — ${error.message}`:''),true);
+  }
+}
+
+/* --- Office Purchase & Bill page --- */
+function officeFilterText(){
+  const f=officeFilters;
+  return ['FY',f.year||'All','Type',f.type||'All','Cash & Bank',f.account==='__none__'?'Not linked':(f.account||'All'),'Category',f.category||'All','Search',f.search||'All'].join('  |  ');
+}
+function getFilteredOfficeEntries(){
+  const f=officeFilters;
+  const search=String(f.search||'').toLowerCase();
+  return (state.officePurchases||[]).filter(r=>{
+    if(f.year&&officeEntryYear(r)!==normIncomeYear(f.year))return false;
+    if(f.type&&r.type!==f.type)return false;
+    if(f.account==='__none__'){if(r.account)return false}
+    else if(f.account&&officeAccountKey(r.account)!==officeAccountKey(f.account))return false;
+    if(f.category&&r.category!==f.category)return false;
+    if(search){
+      const hay=[r.particulars,r.category,r.account,r.notes,r.date].map(v=>String(v??'').toLowerCase()).join(' ');
+      if(!hay.includes(search))return false;
+    }
+    return true;
+  });
+}
+/** Entries of the selected fiscal year (ignores the type/account/search filters). */
+function officeYearEntries(){
+  const year=normIncomeYear(officeFilters.year||officeCurrentYear());
+  return (state.officePurchases||[]).filter(r=>officeEntryYear(r)===year);
+}
+function renderOfficeFilters(){
+  if(!officeYearChosen){officeFilters.year=officeCurrentYear();officeYearChosen=true}
+  const host=document.getElementById('officeFilters');
+  if(!host)return;
+  const years=officeYearList();
+  if(officeFilters.year&&!years.includes(officeFilters.year))officeFilters.year=years[0]||'';
+  const f=officeFilters;
+  const fy=f.year||officeCurrentYear();
+  const opening=officeOpeningBalance(fy);
+  const option=(value,label,selected)=>`<option value="${esc(value)}" ${selected?'selected':''}>${esc(label)}</option>`;
+  const accounts=officeAccountChoices();
+  const categories=officeCategoryChoices();
+  const anyFilter=!!(f.type||f.account||f.category||f.search);
+  host.innerHTML=`<div class="filter-row">
+    <select id="officeYearFilter" aria-label="Financial year">${years.map(y=>option(y,y,f.year===y)).join('')}</select>
+    <select id="officeTypeFilter" aria-label="Entry type">${option('','All Types',!f.type)}${option('Office Purchase (Cash Outflow)','Office Purchase (Cash Outflow)',f.type==='Office Purchase (Cash Outflow)')}${option('Bill Received (Cash Inflow)','Bill Received (Cash Inflow)',f.type==='Bill Received (Cash Inflow)')}${option('Opening Balance (Outflow)','Opening Balance (Outflow)',f.type==='Opening Balance (Outflow)')}${option('Opening Balance (Inflow)','Opening Balance (Inflow)',f.type==='Opening Balance (Inflow)')}</select>
+    <select id="officeAccountFilter" aria-label="Cash and bank account">${option('','All Cash & Bank Accounts',!f.account)}${option('__none__','Not linked to an account',f.account==='__none__')}${accounts.map(a=>option(a,a,f.account===a)).join('')}</select>
+    <select id="officeCategoryFilter" aria-label="Category">${option('','All Categories',!f.category)}${categories.map(c=>option(c,c,f.category===c)).join('')}</select>
+    <input class="search" id="officeSearch" placeholder="Search office entries…" aria-label="Search office entries" value="${esc(f.search)}">
+    <button type="button" class="btn filter-reset" id="officeClear" ${anyFilter?'':'disabled'}>Clear Filters</button>
+  </div>`;
+  host.querySelectorAll('select').forEach(el=>el.classList.toggle('is-active',!!el.value&&el.id!=='officeYearFilter'));
+  const rerender=()=>{officePage=1;renderOfficePage()};
+  const bind=(id,key)=>{const el=document.getElementById(id);if(el)el.onchange=()=>{officeFilters[key]=el.value;rerender()}};
+  bind('officeYearFilter','year');
+  bind('officeTypeFilter','type');
+  bind('officeAccountFilter','account');
+  bind('officeCategoryFilter','category');
+  const searchEl=document.getElementById('officeSearch');
+  if(searchEl){let timer=null;searchEl.oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>{
+    officeFilters.search=searchEl.value;officePage=1;
+    const clear=document.getElementById('officeClear');
+    if(clear)clear.disabled=!(officeFilters.type||officeFilters.account||officeFilters.category||officeFilters.search);
+    renderOfficeSummary();renderOfficeTable();renderOfficeAccounts();
+  },180)}}
+  const clear=document.getElementById('officeClear');
+  if(clear)clear.onclick=()=>{officeFilters.type='';officeFilters.account='';officeFilters.category='';officeFilters.search='';rerender()};
+}
+
+function renderOfficeSummary(){
+  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
+  const entries=officeYearEntries();
+  const opening=officeOpeningBalance(fy);
+  const totals=officeTotals(entries);
+  const balance=totals.net;
+  const card=(i,iconName,label,value,kpi,kpiInk,cls,meta)=>`<div class="summary-card" style="--i:${i};--kpi:${kpi};--kpi-ink:${kpiInk}"><div class="summary-icon">${icon(iconName)}</div><div><p>${label}</p><strong class="kpi-value ${cls||''}">${formatMoney(value)}</strong><span class="office-card-meta">${meta}</span></div></div>`;
+  const cashMeta=totals.cashOutflow||totals.cashInflow
+    ?`Paid ${formatMoney(totals.cashOutflow)} · Received ${formatMoney(totals.cashInflow)}`
+    :'No entries linked to an account';
+  document.getElementById('officeSummaryCards').innerHTML=[
+    card(0,'down','Total Outflow',totals.outflow,'var(--rose-soft)','#e11d48','',`${entries.filter(r=>r.type!=='Inflow').length} payment(s) · FY ${fy}`),
+    card(1,'up','Total Inflow',totals.inflow,'var(--emerald-soft)','#059669','',`${entries.filter(r=>officeTypeKind(r.type)==='Inflow').length} receipt(s) · FY ${fy}`),
+    card(2,'scale','Net Balance',balance,'var(--primary-soft)','var(--primary-2)',balance>=0?'kpi-pos':'kpi-neg',`Opening ${formatMoney(opening)}`),
+    card(3,'layers','Cash &amp; Bank Effect',totals.cashEffect,'rgba(245,158,11,.14)','#d97706',totals.cashEffect>=0?'kpi-pos':'kpi-neg',cashMeta)
+  ].join('');
+}
+function renderOfficeTable(){
+  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
+  const yearEntries=officeYearEntries();
+  const records=getFilteredOfficeEntries().sort(officeEntryOrder);
+  const opening=officeOpeningBalance(fy);
+  // The balance column always reflects the whole FY ledger, even when type/account filters hide rows.
+  const runMap=officeRunningMap(yearEntries.filter(r=>!isOfficeOpeningType(r.type)),opening);
+  const pageSize=25,pages=Math.max(1,Math.ceil(records.length/pageSize));
+  officePage=Math.min(Math.max(1,officePage),pages);
+  const start=(officePage-1)*pageSize;
+  const pageRows=records.slice(start,start+pageSize);
+  const title=document.getElementById('officeTableTitle');
+  if(title)title.textContent=`Office Purchase & Bill · ${fy}`;
+  const count=document.getElementById('officeRecordCount');
+  if(count)count.textContent=`${records.length} entr${records.length===1?'y':'ies'} shown · ${yearEntries.length} in FY ${fy} · page ${officePage} of ${pages}`;
+  const table=document.getElementById('officeTable');
+  if(!table)return;
+  const openingRow='';
+  const body=pageRows.map((r,i)=>{
+    const id=esc(r.id);
+    const doc=(r.documentIds||[]).length
+      ?`<button type="button" class="action-link" data-cmd="open-pdf" data-id="${esc(r.documentIds[0])}">Bill</button>`
+      :'<span class="doc-none">—</span>';
+    const kind=officeTypeKind(r.type);
+    return `<tr style="--i:${Math.min(i,12)}"><td>${esc(fmtDate(r.date)||'—')}</td><td><strong>${esc(r.particulars)}</strong>${r.notes?`<span class="muted-sub">${esc(r.notes)}</span>`:''}${isOfficeOpeningType(r.type)?'<span class="tag">Opening Balance</span>':''}</td><td>${esc(r.category||'—')}</td><td>${esc(r.account||'None')}${r.noAccountChange&&!isOfficeOpeningType(r.type)?'<span class="tag">no change</span>':''}</td><td class="num">${kind==='Inflow'?'—':`<strong class="amount expense">${formatMoney(r.amount)}</strong>`}</td><td class="num">${kind==='Inflow'?`<strong class="amount income">${formatMoney(r.amount)}</strong>`:'—'}</td><td class="num"><strong>${formatMoney(runMap.has(r.id)?runMap.get(r.id):opening)}</strong></td><td>${doc}</td><td class="actions-cell"><button type="button" class="action-link" data-cmd="view-office" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-office" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-office" data-id="${id}">Delete</button></td></tr>`;
+  }).join('');
+  const totals=officeTotals(records);
+  const totalRow=records.length
+    ?`<tr class="office-total-row"><td colspan="4">Total (filtered)</td><td class="num">${formatMoney(totals.outflow)}</td><td class="num">${formatMoney(totals.inflow)}</td><td class="num">${formatMoney(totals.net)}</td><td colspan="2"></td></tr>`
+    :'';
+  table.innerHTML=`<thead><tr><th scope="col">Date</th><th scope="col">Particulars</th><th scope="col">Category</th><th scope="col">Cash &amp; Bank</th><th scope="col" class="num">Outflow</th><th scope="col" class="num">Inflow</th><th scope="col" class="num">Balance</th><th scope="col">Bill</th><th scope="col">Actions</th></tr></thead><tbody>${openingRow}${body||`<tr><td colspan="9"><div class="empty-state">No office entries match these filters. Add an entry or import the FY workbook from Settings.</div></td></tr>`}${totalRow}</tbody>`;
+  const pager=document.getElementById('officePagination');
+  if(pager)pager.innerHTML=pages>1?Array.from({length:pages},(_,i)=>`<button type="button" class="${i+1===officePage?'active':''}" data-cmd="office-page" data-id="${i+1}" aria-label="Page ${i+1}">${i+1}</button>`).join(''):'';
+}
+
+function renderOfficeAccounts(){
+  const host=document.getElementById('officeAccountSummary');
+  if(!host)return;
+  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
+  const entries=officeYearEntries();
+  if(!entries.length){host.innerHTML='';return}
+  const index=officeAccountIndex();
+  const groups=new Map();
+  for(const entry of entries){
+    if(isOfficeOpeningType(entry.type))continue;
+    const configured=index.get(officeAccountKey(entry.account));
+    const key=officeAccountKey(entry.account)||'__none__';
+    if(!groups.has(key))groups.set(key,{name:configured?configured.label:(String(entry.account||'').trim()||'Not linked to an account'),outflow:0,inflow:0,count:0,skipped:0});
+    const g=groups.get(key);
+    g.count++;
+    if(!officeAccountApplies(entry)){g.skipped++;continue}
+    if(officeTypeKind(entry.type)==='Inflow')g.inflow+=Math.abs(Number(entry.amount)||0);
+    else g.outflow+=Math.abs(Number(entry.amount)||0);
+  }
+  const cards=[...groups.entries()].sort((a,b)=>{
+    if(a[0]==='__none__')return 1;
+    if(b[0]==='__none__')return -1;
+    return a[1].name.localeCompare(b[1].name);
+  }).map(([key,g])=>{
+    const effect=g.inflow-g.outflow;
+    const meta=`${g.count} entr${g.count===1?'y':'ies'}${g.skipped?` · ${g.skipped} no change`:''}`;
+    return `<div class="office-account-card"><div class="office-account-top"><strong>${esc(g.name)}</strong><span>${meta}</span></div><div class="office-account-figures"><span class="out">−${formatMoney(g.outflow)}</span><span class="in">+${formatMoney(g.inflow)}</span></div><div class="office-account-net ${effect>=0?'kpi-pos':'kpi-neg'}">Net effect ${effect>=0?'+':'−'}${formatMoney(Math.abs(effect))}</div></div>`;
+  }).join('');
+  host.innerHTML=`<div class="office-account-head"><h3>Cash &amp; Bank Effect · ${esc(fy)}</h3><p>Each linked account moves by these amounts on the Dashboard and Balance Sheet — nothing is written twice.</p></div><div class="office-account-grid">${cards}</div>`;
+}
+function renderOfficePage(){
+  renderOfficeFilters();
+  renderOfficeSummary();
+  renderOfficeTable();
+  renderOfficeAccounts();
+}
+
+/* --- Office entry modal --- */
+function resetOfficeDocDraft(record){
+  officeDocDraft.existing=record?(record.documentIds||[]).map(id=>state.documents.find(d=>d.id===id)).filter(Boolean):[];
+  officeDocDraft.removed=new Set();officeDocDraft.added=[];
+}
+function renderOfficeDocManager(){
+  const host=document.getElementById('officeDocManagerList');
+  if(!host)return;
+  const rows=[];
+  officeDocDraft.existing.forEach(d=>{
+    const removed=officeDocDraft.removed.has(d.id);
+    const name=d.name||d.title||'bill.pdf';
+    rows.push(`<div class="doc-row ${removed?'removed':''}"><div class="doc-info"><strong>${esc(name)}</strong><span>${formatFileSize(d.size)}</span>${removed?'<span class="tag warn">Will be removed</span>':''}</div><div class="doc-actions">${removed?'':`<button type="button" class="action-link" data-oact="view" data-id="${esc(d.id)}">View</button>`}<button type="button" class="action-link ${removed?'':'danger'}" data-oact="${removed?'undo':'remove'}" data-id="${esc(d.id)}">${removed?'Undo remove':'Remove'}</button></div></div>`);
+  });
+  officeDocDraft.added.forEach((f,i)=>{
+    rows.push(`<div class="doc-row"><div class="doc-info"><strong>${esc(f.name)}</strong><span>${formatFileSize(f.size)}</span><span class="tag new">New</span></div><div class="doc-actions"><button type="button" class="action-link" data-oact="view-new" data-idx="${i}">View</button><button type="button" class="action-link danger" data-oact="remove-new" data-idx="${i}">Remove</button></div></div>`);
+  });
+  host.innerHTML=rows.join('')||'<div class="doc-empty">No bill PDF attached yet.</div>';
+}
+async function officeDocDraftSource(id){
+  const meta=officeDocDraft.existing.find(d=>d.id===id);
+  if(!meta)return null;
+  const blob=await getDocBlob(id);
+  if(!blob)return null;
+  return {blob,name:meta.name||meta.title||'bill.pdf',size:meta.size||blob.size};
+}
+function bindOfficeDocManager(){
+  const host=document.getElementById('officeDocManager');
+  if(host)host.onclick=async event=>{
+    const btn=event.target.closest('[data-oact]');
+    if(!btn)return;
+    const {oact,id,idx}=btn.dataset;
+    if(oact==='view'){const src=await officeDocDraftSource(id);if(src)await openPdfViewer(src)}
+    else if(oact==='remove'){officeDocDraft.removed.add(id);renderOfficeDocManager()}
+    else if(oact==='undo'){officeDocDraft.removed.delete(id);renderOfficeDocManager()}
+    else if(oact==='view-new'){const f=officeDocDraft.added[+idx];if(f)await openPdfViewer({blob:f,name:f.name,size:f.size})}
+    else if(oact==='remove-new'){officeDocDraft.added.splice(+idx,1);renderOfficeDocManager()}
+  };
+  const input=document.getElementById('officeDocument');
+  if(input)input.onchange=event=>{
+    const files=[...event.target.files];
+    officeDocDraft.added.push(...files.filter(isPdfFile));
+    if(files.some(f=>!isPdfFile(f)))toast('Only PDF files can be attached.',true);
+    event.target.value='';
+    renderOfficeDocManager();
+  };
+}
+
+function openOfficeModal(id=null){
+  editingOfficeId=id;
+  const record=id?state.officePurchases.find(r=>r.id===id):null;
+  resetOfficeDocDraft(record);
+  document.getElementById('officeModalTitle').textContent=record?'Edit Office Entry':'Add Office Entry';
+  document.getElementById('officeModalSubtitle').textContent=record?`${record.type} · ${record.particulars}`:'Outflow reduces Cash & Bank, inflow adds to it';
+  const dateValue=record?record.date||todayISO():todayISO();
+  const typeValue=record?normalizeOfficeType(record.type):'Office Purchase (Cash Outflow)';
+  const account=record?record.account||'':'';
+  const category=record?record.category||'':'Office Purchase';
+  const accounts=officeAccountChoices();
+  // An account that is no longer in Settings (or one whose spelling changed) stays selectable while
+  // editing, so saving an old entry can never silently drop or re-link its Cash & Bank account.
+  const configuredAccount=officeAccountOption(account);
+  const accountLabel=configuredAccount?configuredAccount.label:String(account||'').trim();
+  const extraAccount=accountLabel&&!accounts.some(name=>name===accountLabel)?accountLabel:'';
+  const noAccountChange=!!(record&&record.noAccountChange);
+  const option=(value,label,selected)=>`<option value="${esc(value)}" ${selected?'selected':''}>${esc(label)}</option>`;
+  document.getElementById('officeFormFields').innerHTML=`<div class="income-form-grid">
+    <label>Entry Type *<select id="officeTypeSelect" required>${option('Office Purchase (Cash Outflow)','Office Purchase (Cash Outflow)',typeValue==='Office Purchase (Cash Outflow)'||typeValue==='Outflow')}${option('Bill Received (Cash Inflow)','Bill Received (Cash Inflow)',typeValue==='Bill Received (Cash Inflow)'||typeValue==='Inflow')}${option('Opening Balance (Outflow)','Opening Balance (Outflow)',typeValue==='Opening Balance (Outflow)')}${option('Opening Balance (Inflow)','Opening Balance (Inflow)',typeValue==='Opening Balance (Inflow)')}</select></label>
+    <label>Date *<input id="officeDate" type="date" required value="${esc(dateValue)}"></label>
+    <label class="full">Particulars *<input id="officeParticulars" type="text" required maxlength="200" value="${esc(record?record.particulars:'')}" placeholder="e.g. Office stationery purchase"></label>
+    <label>Category *<select id="officeCategory" required>${officeCategoryChoices().map(c=>option(c,c,category===c)).join('')}</select></label>
+    <label>Cash &amp; Bank Account<select id="officeAccount">${option('','None',!accountLabel)}${accounts.map(a=>option(a,a,accountLabel===a)).join('')}${extraAccount?option(extraAccount,`${extraAccount} (not in Settings)`,true):''}</select></label>
+    <label class="office-account-check full"><span class="office-check-row"><input type="checkbox" id="officeNoAccountChange" ${noAccountChange?'checked':''}><span>I Do not want to change Account</span></span><span class="hint" id="officeNoAccountHint">Records the entry here only — the Cash &amp; Bank balance stays exactly as it is.</span></label>
+    <label>Amount (BDT) *<span class="calc-field"><input id="officeAmount" type="number" step="0.01" min="0" inputmode="decimal" required value="${esc(record?record.amount:'')}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="officeAmount" aria-label="Open calculator for Amount (BDT)" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator">${icon('calc')}</button></span></label>
+    <label>Balance effect<span class="hint" id="officeEffectHint"></span></label>
+    <label class="full">Reference / Notes<textarea id="officeNotes" rows="2" placeholder="Bill number, vendor, purpose…">${esc(record?record.notes||'':'')}</textarea></label>
+    <label class="full">Bill / Voucher (PDF)<input id="officeDocument" type="file" accept=".pdf,application/pdf"><span class="hint">Optional bill or voucher PDF, stored on this device only.</span></label>
+    <div class="doc-manager full" id="officeDocManager"><h4>Attached bill</h4><div class="doc-list" id="officeDocManagerList"></div></div>
+  </div>`;
+  const accountHint=document.getElementById('officeNoAccountHint');
+  if(accountHint&&!accounts.length)accountHint.textContent='No Cash & Bank accounts yet — add them in Settings → Manage Categories to link one.';
+  document.querySelector('#officeForm .modal-foot').innerHTML='<button type="button" class="btn" data-close-modal>Cancel</button><button type="submit" class="btn btn-primary">Save Entry</button>';
+  document.querySelectorAll('#officeForm [data-close-modal]').forEach(b=>b.onclick=()=>document.getElementById('officeModal').close());
+  const updateHint=()=>{
+    const hint=document.getElementById('officeEffectHint');
+    const typeEl=document.getElementById('officeTypeSelect');
+    const accEl=document.getElementById('officeAccount');
+    const dateEl=document.getElementById('officeDate');
+    const skipEl=document.getElementById('officeNoAccountChange');
+    if(!hint||!typeEl)return;
+    const fy=fiscalYearFromDate(dateEl&&dateEl.value)||officeCurrentYear();
+    const opening=isOfficeOpeningType(typeEl.value);
+    // Opening-balance rows are carried-forward figures, so they never touch an account.
+    if(skipEl)skipEl.disabled=opening;
+    if(accEl)accEl.disabled=opening;
+    if(opening){
+      if(accEl)accEl.value='';
+      if(skipEl)skipEl.checked=false;
+      hint.textContent=`No Cash & Bank adjustment · FY ${fy}`;
+      return;
+    }
+    const label=accEl?accEl.value:'';
+    if(!label){hint.textContent=`No Cash & Bank adjustment · FY ${fy}`;return}
+    if(skipEl&&skipEl.checked){hint.textContent=`${label} stays as it is · FY ${fy}`;return}
+    const effect=officeTypeKind(typeEl.value)==='Inflow'?'adds to':'reduces';
+    hint.textContent=`${effect} ${label} · FY ${fy}`;
+  };
+  ['officeTypeSelect','officeAccount','officeDate','officeNoAccountChange'].forEach(elId=>{const el=document.getElementById(elId);if(el)el.onchange=updateHint});
+  updateHint();
+  bindOfficeDocManager();
+  renderOfficeDocManager();
+  document.getElementById('officeModal').showModal();
+}
+
+async function saveOfficeEntry(event){
+  event.preventDefault();
+  if(savingOffice)return;
+  const form=event.target;
+  if(form.querySelector('select:invalid,input:invalid,textarea:invalid')){form.reportValidity();return}
+  const amount=Math.abs(Number(document.getElementById('officeAmount').value||0));
+  if(!amount){toast('Enter an amount greater than zero.',true);return}
+  savingOffice=true;
+  try{
+    const date=document.getElementById('officeDate').value||todayISO();
+    const type=normalizeOfficeType(document.getElementById('officeTypeSelect').value);
+    const opening=isOfficeOpeningType(type);
+    const particulars=document.getElementById('officeParticulars').value.trim();
+    const category=opening?'Opening Balance':document.getElementById('officeCategory').value;
+    // Store the Settings spelling of the account, so "bkash" picked earlier merges with "bKash".
+    const accountPick=opening?'':document.getElementById('officeAccount').value;
+    const configuredAccount=officeAccountOption(accountPick);
+    const account=opening?'':(configuredAccount?configuredAccount.label:String(accountPick||'').trim());
+    const skipEl=document.getElementById('officeNoAccountChange');
+    const noAccountChange=!opening&&!!(skipEl&&skipEl.checked);
+    const notes=document.getElementById('officeNotes').value.trim();
+    const old=editingOfficeId?state.officePurchases.find(r=>r.id===editingOfficeId):null;
+    const record=Object.assign({},old||{});
+    Object.assign(record,{id:old?old.id:uid('office'),type,date,particulars,category,account,notes,amount,
+      incomeYear:fiscalYearFromDate(date)||(old&&old.incomeYear)||officeCurrentYear()});
+    // Opting out is stored on the entry itself: the Cash & Bank effect is derived from this flag, so
+    // ticking or un-ticking it later restores the balance without any manual reversal.
+    if(noAccountChange)record.noAccountChange=true;else delete record.noAccountChange;
+    if(opening){
+      record.openingOverride=true;
+      record.openingImported=false;
+      record.openingAuto=false;
+    }else{
+      delete record.openingOverride;
+      delete record.openingImported;
+      delete record.openingAuto;
+    }
+    if(!record.createdAt)record.createdAt=new Date().toISOString();
+    record.updatedAt=new Date().toISOString();
+
+    let documentIds=[...(old&&old.documentIds||[])];
+    for(const docId of officeDocDraft.removed){
+      await remove('documents',docId);await remove('documentBlobs',docId);
+      documentIds=documentIds.filter(x=>x!==docId);
+    }
+    for(const file of officeDocDraft.added){
+      const docId=uid('doc');
+      await put('documentBlobs',{id:docId,blob:file});
+      await put('documents',{id:docId,recordId:record.id,title:file.name,name:file.name,type:file.type||'application/pdf',size:file.size,category,subcategory:account||'',financialType:type,incomeYear:record.incomeYear||'',createdAt:new Date().toISOString()});
+      documentIds.push(docId);
+    }
+    record.documentIds=documentIds;
+
+    await put('officePurchases',record);
+    await loadState();
+    await reconcileOfficeCarryForwards();
+    document.getElementById('officeModal').close();
+    editingOfficeId=null;
+    // The entry may have just moved a Cash & Bank account, so refresh every page - not just this one.
+    renderAll();
+    toast(old?'Office entry saved':'Office entry added');
+  }catch(error){
+    console.error(error);
+    const quota=error&&error.name==='QuotaExceededError';
+    toast(quota?'Could not save — browser storage is full.':'Could not save the office entry'+(error.message?` — ${error.message}`:''),true);
+  }finally{
+    savingOffice=false;
+  }
+}
+async function deleteOfficeEntry(id){
+  const record=state.officePurchases.find(r=>r.id===id);
+  if(!record)return;
+  if(!(await confirm(`Delete "${record.particulars}" (${formatMoney(record.amount)})? Any attached bill PDF will also be removed.`,'Delete Office Entry')))return;
+  try{
+    const docIds=new Set([...(record.documentIds||[]),...state.documents.filter(d=>d.recordId===id).map(d=>d.id)]);
+    for(const docId of docIds){await remove('documents',docId);await remove('documentBlobs',docId)}
+    await remove('officePurchases',id);
+    await loadState();
+    await reconcileOfficeCarryForwards();
+    // Deleting the entry also removes its derived Cash & Bank movement, so refresh every page.
+    renderAll();
+    toast('Office entry deleted');
+  }catch(error){
+    console.error(error);
+    toast('Could not delete the office entry.',true);
+  }
+}
+function viewOfficeEntry(id){
+  const record=state.officePurchases.find(r=>r.id===id);
+  if(!record)return;
+  editingOfficeId=null;
+  document.getElementById('officeModalTitle').textContent=`${record.type} · ${record.category||'Office'}`;
+  document.getElementById('officeModalSubtitle').textContent=record.particulars;
+  const docs=(record.documentIds||[]).map(docId=>state.documents.find(d=>d.id===docId)).filter(Boolean);
+  const docSection=docs.length?`<label class="full document-view-section">Attached Bill<div class="document-view-list">${docs.map(d=>`<div class="document-view-item"><div class="document-info"><strong>${esc(d.name||d.title||'bill.pdf')}</strong><span>${formatFileSize(d.size)}</span></div><div class="document-actions"><button type="button" class="btn" data-cmd="open-pdf" data-id="${esc(d.id)}">View PDF</button><button type="button" class="btn btn-primary" data-cmd="download-pdf" data-id="${esc(d.id)}">Download</button></div></div>`).join('')}</div></label>`:'';
+  const show=(label,value)=>`<label><span class="k">${esc(label)}</span><strong class="view-field">${value===''||value===undefined||value===null?'—':esc(value)}</strong></label>`;
+  const configured=officeAccountOption(record.account);
+  const accountName=configured?configured.label:String(record.account||'').trim();
+  const accountEffect=!accountName
+    ?'No account linked'
+    :isOfficeOpeningType(record.type)
+      ?'Opening balance — no adjustment'
+      :record.noAccountChange
+        ?'Account left unchanged'
+        :`${officeTypeKind(record.type)==='Inflow'?'Adds':'Deducts'} ${formatMoney(record.amount)} ${officeTypeKind(record.type)==='Inflow'?'to':'from'} ${accountName}`;
+  document.getElementById('officeFormFields').innerHTML=`<div class="income-form-grid">${show('Type',record.type)}${show('Date',fmtDate(record.date))}${show('Particulars',record.particulars)}${show('Category',record.category)}${show('Cash & Bank Account',accountName||'Not linked')}${show('Amount',formatMoney(record.amount))}${show('Account effect',accountEffect)}${show('Financial Year',officeEntryYear(record))}${show('Reference / Notes',record.notes)}${docSection}</div>`;
+  const footer=document.querySelector('#officeForm .modal-foot');
+  footer.innerHTML='<button type="button" class="btn" data-close-modal>Close</button><button type="button" class="btn btn-primary" id="officeViewEdit">Edit Entry</button>';
+  footer.querySelector('[data-close-modal]').onclick=()=>document.getElementById('officeModal').close();
+  const editBtn=document.getElementById('officeViewEdit');
+  if(editBtn)editBtn.onclick=()=>{document.getElementById('officeModal').close();openOfficeModal(id)};
+  document.getElementById('officeModal').showModal();
+}
+
+/* --- Office page exports --- */
+/** Side-by-side FY sheet layout that parseOfficeSheet() can read back without duplicates. */
+function officeSheetAoa(fy,entries,opening){
+  const rows=entries.filter(r=>!isOfficeOpeningType(r.type)).slice().sort(officeEntryOrder);
+  const outflow=rows.filter(r=>officeTypeKind(r.type)==='Outflow');
+  const inflow=rows.filter(r=>officeTypeKind(r.type)==='Inflow');
+  const totals=officeTotals(rows);
+  const openingSigned=Number.isFinite(Number(opening))?Number(opening):officeOpeningBalance(fy);
+  const closing=(Number(openingSigned)||0)+totals.net;
+  // The caption parses back as the opening balance and the closing "Balance" row is ignored, so an
+  // exported sheet re-imports to the same position. A negative opening is written as-is (a credit
+  // position) instead of losing its sign in an "(Inflow)" caption.
+  const aoa=[[`Office Purchase & Bill - FY ${fy}`,'','','','','','',''],[],['Cash Outflow','','','','Cash Inflow'],[],
+    ['','Opening Balance',openingSigned,'','','Balance',closing,''],['Date','Detail','Amount','Cash & Bank','Date','Detail','Amount','Cash & Bank']];
+  const lines=Math.max(outflow.length,inflow.length);
+  for(let i=0;i<lines;i++){
+    const out=outflow[i],inn=inflow[i];
+    aoa.push([out?out.date:'',out?out.particulars:'',out?(Number(out.amount)||0):'',out?(out.account||''):'',
+      inn?inn.date:'',inn?inn.particulars:'',inn?(Number(inn.amount)||0):'',inn?(inn.account||''):'']);
+  }
+  aoa.push(['Total','',totals.outflow,'','','',totals.inflow,'']);
+  return {aoa,totals,closing};
+}
+function officeExcelWorkbook(){
+  const workbook=XLSX.utils.book_new();
+  const years=officeYearList();
+  for(const fy of years.slice().reverse()){
+    const entries=(state.officePurchases||[]).filter(r=>officeEntryYear(r)===fy);
+    const {aoa}=officeSheetAoa(fy,entries,officeOpeningBalance(fy));
+    const ws=XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols']=[{wch:12},{wch:38},{wch:14},{wch:18},{wch:12},{wch:38},{wch:14},{wch:18}];
+    XLSX.utils.book_append_sheet(workbook,ws,`${fy}`.slice(0,31));
+  }
+  return workbook;
+}
+function exportOfficeExcel(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
+  const list=getFilteredOfficeEntries().sort(officeEntryOrder);
+  if(!list.length){toast('No office entries match the current filters.',true);return}
+  const opening=officeOpeningBalance(fy);
+  const totals=officeTotals(list);
+  // Balances stay on the whole FY ledger, so a filtered export still shows the true position.
+  const runMap=officeRunningMap(officeYearEntries().filter(r=>!isOfficeOpeningType(r.type)),opening);
+  const runBalance=r=>runMap.has(r.id)?runMap.get(r.id):opening;
+  const rows=[['Office Purchase & Bill'],[`Financial Year: ${fy}`],[`Generated ${generatedStamp()}`],[],
+    ['Filter',officeFilterText()],['Opening Balance',opening],[],['Date','Particulars','Category','Cash & Bank Account','Outflow','Inflow','Balance','Bill Attached','Notes']];
+  rows.push(['','Opening Balance'+(opening<0?' (Inflow)':' (Outflow)'),'','','','',opening,'','']);
+  for(const r of list){
+    rows.push([r.date||'',r.particulars||'',r.category||'',r.account||'',
+      officeTypeKind(r.type)==='Inflow'?'':Number(r.amount)||0,officeTypeKind(r.type)==='Inflow'?Number(r.amount)||0:'',
+      runBalance(r),(r.documentIds||[]).length?'Yes':'No',r.notes||'']);
+  }
+  rows.push(['Total (filtered)','','','',totals.outflow,totals.inflow,totals.net,'','']);
+  rows.push([]);rows.push(['Cash & Bank Effect (derived from this ledger only)']);
+  rows.push(['Account','Outflow','Inflow','Net Effect','Entries']);
+  const byAccount=new Map();
+  for(const r of list){
+    if(isOfficeOpeningType(r.type))continue;
+    const key=r.account||'Not linked to an account';
+    if(!byAccount.has(key))byAccount.set(key,{outflow:0,inflow:0,count:0});
+    const g=byAccount.get(key);g.count++;
+    if(officeTypeKind(r.type)==='Inflow')g.inflow+=Math.abs(Number(r.amount)||0);else g.outflow+=Math.abs(Number(r.amount)||0);
+  }
+  for(const [name,g] of byAccount)rows.push([name,g.outflow,g.inflow,g.inflow-g.outflow,g.count]);
+  const ws=XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols']=[{wch:12},{wch:38},{wch:18},{wch:22},{wch:14},{wch:14},{wch:14},{wch:12},{wch:28}];
+  const workbook=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook,ws,`Office ${fy}`.slice(0,31));
+  XLSX.writeFile(workbook,`Office-Purchase-Bill-${fy}-${todayISO()}.xlsx`);
+  toast('Office ledger exported to Excel');
+}
+function exportOfficeWorkbook(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  if(!(state.officePurchases||[]).length){toast('There are no office entries to export yet.',true);return}
+  XLSX.writeFile(officeExcelWorkbook(),`Office-Purchase-Bill-Workbook-${todayISO()}.xlsx`);
+  toast('Office workbook exported');
+}
+function downloadOfficeTemplate(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const years=officeYearList();
+  const fy=normIncomeYear(officeFilters.year||officeCurrentYear())||years[0]||'';
+  const current=parseInt(String(fy).slice(0,4),10)||new Date().getFullYear();
+  const targets=[`${current}-${String((current+1)%100).padStart(2,'0')}`,`${current+1}-${String((current+2)%100).padStart(2,'0')}`];
+  const workbook=XLSX.utils.book_new();
+  for(const year of targets){
+    const {aoa}=officeSheetAoa(year,[],0);
+    const ws=XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols']=[{wch:12},{wch:38},{wch:14},{wch:18},{wch:12},{wch:38},{wch:14},{wch:18}];
+    XLSX.utils.book_append_sheet(workbook,ws,year);
+  }
+  XLSX.writeFile(workbook,`Office-Purchase-Bill-Template-${todayISO()}.xlsx`);
+  toast('Template downloaded — fill each FY sheet, then import it from Settings');
+}
+
+async function exportOfficePdf(){
+  const JsPDF=window.jspdf&&window.jspdf.jsPDF;
+  if(!JsPDF){toast('PDF library is unavailable. Check your internet connection.',true);return}
+  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
+  const list=getFilteredOfficeEntries().sort(officeEntryOrder);
+  if(!list.length){toast('No office entries match the current filters.',true);return}
+  const opening=officeOpeningBalance(fy);
+  const totals=officeTotals(list);
+  const runMap=officeRunningMap(officeYearEntries().filter(r=>!isOfficeOpeningType(r.type)),opening);
+  const doc=new JsPDF({orientation:'landscape',unit:'pt',format:'a4',compress:true});
+  if(typeof doc.autoTable!=='function'){toast('PDF table plugin is unavailable. Check your internet connection.',true);return}
+  doc.setProperties({title:`Office Purchase & Bill - FY ${fy}`,subject:officeFilterText(),creator:'SOIKOT RAIHAN'});
+  const M=32,FOOT=30;
+  const pageW=()=>doc.internal.pageSize.getWidth();
+  const pageH=()=>doc.internal.pageSize.getHeight();
+  const drawHeader=()=>{
+    const W=pageW();
+    doc.setFillColor(15,23,42);doc.rect(0,0,W,74,'F');
+    doc.setFont('helvetica','bold');doc.setFontSize(15);doc.setTextColor(255,255,255);
+    doc.text('Office Purchase & Bill',M,32);
+    doc.setFont('helvetica','normal');doc.setFontSize(8.5);doc.setTextColor(203,213,225);
+    doc.text(`Financial Year ${fy}  ·  Generated ${generatedStamp()}`,M,48);
+    doc.text(officeFilterText(),M,61);
+    doc.setFont('helvetica','bold');doc.setFontSize(11);doc.setTextColor(255,255,255);
+    doc.text(`Balance ${pdfMoney(officeClosingBalance(officeYearEntries(),opening))}`,W-M,40,{align:'right'});
+  };
+  drawHeader();
+  const body=[];
+  body.push([{content:opening<0?'Opening Balance (Inflow)':'Opening Balance (Outflow)',colSpan:4,styles:{fontStyle:'bold',fillColor:[241,245,249]}},{content:'',styles:{fillColor:[241,245,249]}},{content:'',styles:{fillColor:[241,245,249]}},{content:pdfMoney(Math.abs(opening)),styles:{halign:'right',fontStyle:'bold',fillColor:[241,245,249]}}]);
+  for(const r of list){
+    body.push([fmtDate(r.date)||'-',r.particulars||'-',r.category||'-',r.account||'-',
+      officeTypeKind(r.type)==='Inflow'?'-':pdfMoney(r.amount),officeTypeKind(r.type)==='Inflow'?pdfMoney(r.amount):'-',
+      pdfMoney(runMap.has(r.id)?runMap.get(r.id):opening)]);
+  }
+  doc.autoTable({
+    startY:86,theme:'grid',margin:{left:M,right:M,top:86,bottom:FOOT},
+    head:[['Date','Particulars','Category','Cash & Bank','Outflow','Inflow','Balance']],
+    body,
+    foot:[[{content:'Total (filtered)',colSpan:4,styles:{halign:'right'}},{content:pdfMoney(totals.outflow),styles:{halign:'right'}},{content:pdfMoney(totals.inflow),styles:{halign:'right'}},{content:pdfMoney(totals.net),styles:{halign:'right'}}]],
+    headStyles:{fillColor:[15,23,42],textColor:[255,255,255],fontStyle:'bold',fontSize:8.5},
+    footStyles:{fillColor:[238,242,255],textColor:[49,46,129],fontStyle:'bold'},
+    styles:{fontSize:8,cellPadding:5,overflow:'linebreak'},
+    columnStyles:{0:{cellWidth:62},1:{cellWidth:'auto'},2:{cellWidth:90},3:{cellWidth:96},4:{cellWidth:76,halign:'right'},5:{cellWidth:76,halign:'right'},6:{cellWidth:80,halign:'right'}},
+    didDrawPage:data=>{if(data.pageNumber>1)drawHeader()}
+  });
+  let y=doc.lastAutoTable.finalY+16;
+  if(y>pageH()-FOOT-60){doc.addPage();drawHeader();y=100}
+  const cashRows=[['Account','Outflow','Inflow','Net Effect','Entries']];
+  const byAccount=new Map();
+  for(const r of list){
+    if(isOfficeOpeningType(r.type))continue;
+    const key=r.account||'Not linked to an account';
+    if(!byAccount.has(key))byAccount.set(key,{outflow:0,inflow:0,count:0});
+    const g=byAccount.get(key);g.count++;
+    if(officeTypeKind(r.type)==='Inflow')g.inflow+=Math.abs(Number(r.amount)||0);else g.outflow+=Math.abs(Number(r.amount)||0);
+  }
+  for(const [name,g] of byAccount)cashRows.push([name,pdfMoney(g.outflow),pdfMoney(g.inflow),pdfMoney(g.inflow-g.outflow),String(g.count)]);
+  doc.autoTable({
+    startY:y,theme:'grid',margin:{left:M,right:M,top:86,bottom:FOOT},
+    head:[cashRows[0]],body:cashRows.slice(1),
+    headStyles:{fillColor:[71,85,105],textColor:[255,255,255],fontStyle:'bold',fontSize:8},
+    styles:{fontSize:8,cellPadding:5},
+    columnStyles:{1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'}},
+    didDrawPage:data=>{if(data.pageNumber>1)drawHeader()}
+  });
+  const total=doc.getNumberOfPages();
+  for(let i=1;i<=total;i++){
+    doc.setPage(i);
+    const W=pageW(),H=pageH();
+    doc.setDrawColor(226,232,240);doc.setLineWidth(.6);doc.line(M,H-26,W-M,H-26);
+    doc.setFont('helvetica','normal');doc.setFontSize(8);doc.setTextColor(100,116,139);
+    doc.text('Personal Finance  ·  SOIKOT RAIHAN  ·  Office Purchase & Bill',M,H-13);
+    doc.text(`Page ${i} of ${total}`,W-M,H-13,{align:'right'});
+  }
+  doc.save(`Office-Purchase-Bill-${fy}-${todayISO()}.pdf`);
+  toast(`Office ledger PDF generated (${total} page${total===1?'':'s'})`);
+}
+
 /* --- Income / Expense category management (Settings) --- */
 function renderCategoryFormFields(){
   const type=document.getElementById('categoryType').value;
@@ -5085,12 +6177,15 @@ async function saveMigrationMeta(id,isReplace,type,fileName,imported,skipped){
 async function removeMigrationRows(migrationId){
   const recordIds=state.records.filter(r=>r.migrationId===migrationId).map(r=>r.id);
   const ieIds=state.incomeExpenses.filter(r=>r.migrationId===migrationId).map(r=>r.id);
+  const officeIds=(state.officePurchases||[]).filter(r=>r.migrationId===migrationId).map(r=>r.id);
   const docIds=new Set();
   for(const r of state.records)if(r.migrationId===migrationId)(r.documentIds||[]).forEach(d=>docIds.add(d));
   for(const r of state.incomeExpenses)if(r.migrationId===migrationId)(r.documentIds||[]).forEach(d=>docIds.add(d));
-  for(const d of state.documents)if(recordIds.includes(d.recordId)||ieIds.includes(d.recordId))docIds.add(d.id);
+  for(const r of state.officePurchases||[])if(r.migrationId===migrationId)(r.documentIds||[]).forEach(d=>docIds.add(d));
+  for(const d of state.documents)if(recordIds.includes(d.recordId)||ieIds.includes(d.recordId)||officeIds.includes(d.recordId))docIds.add(d.id);
   if(recordIds.length)await removeMany('records',recordIds);
   if(ieIds.length)await removeMany('incomeExpenses',ieIds);
+  if(officeIds.length)await removeMany('officePurchases',officeIds);
   if(docIds.size){await removeMany('documents',[...docIds]);await removeMany('documentBlobs',[...docIds])}
 }
 function renderMigrationHistory(){
@@ -5102,6 +6197,7 @@ function renderMigrationHistory(){
     : '<div class="empty-state">No migrations recorded in this browser yet.</div>';
 }
 function migrationRowSummary(r,store){
+  if(store==='officePurchases')return {date:r.date,type:r.type,category:r.category,subcategory:r.account||r.particulars||'',amount:Number(r.amount)||0};
   return store==='records'
     ? {date:r.date,type:r.type,category:r.category,subcategory:r.subcategory,amount:recordAmount(r)}
     : {date:r.date,type:r.type,category:r.category,subcategory:r.subcategory,amount:Number(r.amount)||0};
@@ -5111,7 +6207,8 @@ function renderMigrationEditor(id){
   if(!mig)return;
   const recRows=state.records.filter(r=>r.migrationId===id).map(r=>({r,store:'records'}));
   const ieRows=state.incomeExpenses.filter(r=>r.migrationId===id).map(r=>({r,store:'incomeExpenses'}));
-  const rows=[...recRows,...ieRows];
+  const officeRows=(state.officePurchases||[]).filter(r=>r.migrationId===id).map(r=>({r,store:'officePurchases'}));
+  const rows=[...recRows,...ieRows,...officeRows];
   document.getElementById('migrationEditTitle').textContent='Edit Migration';
   document.getElementById('migrationEditSubtitle').textContent=`${mig.migrationType} · ${mig.fileName}`;
   document.getElementById('migrationEditMeta').textContent=`${rows.length} record(s) in this batch · imported ${new Date(mig.timestamp).toLocaleString()}`;
@@ -5136,6 +6233,10 @@ async function removeMigrationRow(migId,store,id){
     const r=state.incomeExpenses.find(x=>x.id===id);
     docIds=[...(r?.documentIds||[]),...state.documents.filter(d=>d.recordId===id).map(d=>d.id)];
     await remove('incomeExpenses',id);
+  }else if(store==='officePurchases'){
+    const r=(state.officePurchases||[]).find(x=>x.id===id);
+    docIds=[...(r?.documentIds||[]),...state.documents.filter(d=>d.recordId===id).map(d=>d.id)];
+    await remove('officePurchases',id);
   }else{
     const r=state.records.find(x=>x.id===id);
     docIds=[...(r?.documentIds||[]),...state.documents.filter(d=>d.recordId===id).map(d=>d.id)];
@@ -5145,7 +6246,7 @@ async function removeMigrationRow(migId,store,id){
   await loadState();
   const mig=state.migrationHistory.find(m=>m.id===migId);
   if(mig){
-    mig.importedCount=state.records.filter(r=>r.migrationId===migId).length+state.incomeExpenses.filter(r=>r.migrationId===migId).length;
+    mig.importedCount=state.records.filter(r=>r.migrationId===migId).length+state.incomeExpenses.filter(r=>r.migrationId===migId).length+(state.officePurchases||[]).filter(r=>r.migrationId===migId).length;
     await put('migrationHistory',mig);
     renderMigrationEditor(migId);
   }
@@ -5154,7 +6255,7 @@ async function removeMigrationRow(migId,store,id){
 async function deleteMigration(id){
   const mig=state.migrationHistory.find(m=>m.id===id);
   if(!mig)return;
-  const count=state.records.filter(r=>r.migrationId===id).length+state.incomeExpenses.filter(r=>r.migrationId===id).length;
+  const count=state.records.filter(r=>r.migrationId===id).length+state.incomeExpenses.filter(r=>r.migrationId===id).length+(state.officePurchases||[]).filter(r=>r.migrationId===id).length;
   if(!(await confirm(`Delete migration "${mig.fileName}" and the ${count} record(s) it imported? This cannot be undone.`,'Delete Migration')))return;
   await removeMigrationRows(id);
   await remove('migrationHistory',id);

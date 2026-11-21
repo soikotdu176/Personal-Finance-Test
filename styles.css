@@ -470,6 +470,14 @@ dialog.modal[open]::backdrop { opacity: 1; }
 }
 
 @media (max-width: 768px) {
+  #officePurchasesPage .filter-row,
+  #officePurchasesPage .tt-actions,
+  #officePurchasesPage .office-account-top,
+  #officePurchasesPage .office-account-figures { min-width: 0; }
+  #officePurchasesPage .office-table-card,
+  #officePurchasesPage .office-filter-card { min-width: 0; }
+  #officePurchasesPage .actions-cell,
+  #officePurchasesPage .office-card-meta { white-space: normal; overflow-wrap: anywhere; }
   :root { --bottom-h: 64px; }
   .sidebar { z-index: 60; transform: translateX(-102%); box-shadow: var(--shadow-lg); }
   .sidebar.open { transform: none; }
@@ -1224,3 +1232,111 @@ dialog.calc-popover:focus, dialog.calc-popover:focus-visible { outline: none; }
 @media (max-width: 430px) {
   .record-funding-field select { font-size: 12px; }
 }
+/* ==========================================================================
+   Office Purchase & Bill page
+   A standalone FY ledger: summary cards, filters with an opening-balance field,
+   the running-balance table and the per-account Cash & Bank effect cards.
+   ========================================================================== */
+.office-filter-card .filter-row { align-items: flex-end; }
+.office-opening-field {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.office-opening-field > span:first-child { flex-basis: 100%; }
+.office-opening-field .calc-field { margin-top: 0; }
+.office-opening-field .calc-field > input { min-width: 130px; width: 150px; font-weight: 600; }
+.office-opening-field .btn { flex: none; }
+.office-card-meta { display: block; margin-top: 4px; font-size: 11px; font-weight: 600; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+
+.office-table { min-width: 900px; }
+.office-table tbody td { vertical-align: middle; }
+.office-table .office-opening-row td {
+  background: var(--surface-2); color: var(--muted);
+  font-size: 12px; font-weight: 700; letter-spacing: .01em;
+}
+.office-table .office-total-row td {
+  background: var(--primary-soft); color: var(--primary-2);
+  font-weight: 800; border-top: 1px solid var(--line-strong);
+}
+.office-table td .amount { font-variant-numeric: tabular-nums; }
+.office-table td .amount.expense { color: #e11d48; }
+.office-table td .amount.income { color: #059669; }
+html[data-theme="dark"] .office-table td .amount.expense { color: #fb7185; }
+html[data-theme="dark"] .office-table td .amount.income { color: #34d399; }
+
+.office-account-summary { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.office-account-head h3 { margin: 0 0 2px; font-size: 15px; }
+.office-account-head p { margin: 0 0 12px; font-size: 12px; color: var(--muted); }
+.office-account-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 12px; }
+.office-account-card {
+  padding: 13px 14px; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--surface-2); min-width: 0;
+  transition: transform .35s var(--spring), box-shadow .25s ease, border-color .2s ease;
+}
+.office-account-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--line-strong); }
+.office-account-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.office-account-top strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.office-account-top span { flex: none; font-size: 11px; font-weight: 600; color: var(--muted); }
+.office-account-figures { display: flex; align-items: baseline; gap: 12px; margin-top: 8px; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.office-account-figures .out { color: #e11d48; }
+.office-account-figures .in { color: #059669; }
+html[data-theme="dark"] .office-account-figures .out { color: #fb7185; }
+html[data-theme="dark"] .office-account-figures .in { color: #34d399; }
+.office-account-net { margin-top: 6px; font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
+
+/* Office modal: "I Do not want to change Account" opt-out (one compact line, no clipped text) */
+.income-form-grid > label.office-account-check { margin-bottom: 6px; }
+.office-check-row {
+  display: flex; align-items: center; gap: 9px; min-height: 24px;
+  font-size: 12.5px; font-weight: 700; color: var(--text-2); line-height: 1.3; cursor: pointer;
+}
+.office-check-row input[type="checkbox"] {
+  display: inline-block; width: 17px; height: 17px; min-height: 0; flex: none;
+  margin: 0; padding: 0; border-radius: 4px; accent-color: var(--primary); cursor: pointer;
+}
+.office-check-row input[type="checkbox"]:disabled { cursor: not-allowed; }
+.office-check-row input[type="checkbox"]:disabled + span { opacity: .55; }
+.office-check-row > span { min-width: 0; }
+.office-account-check .hint { margin-top: 3px; line-height: 1.35; }
+
+.office-migration-actions { flex-wrap: wrap; }
+.office-migration-actions .btn { flex: 1 1 auto; }
+
+@media (max-width: 768px) {
+  #officePurchasesPage .cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  #officePurchasesPage .summary-card { padding: 13px; gap: 10px; }
+  #officePurchasesPage .summary-icon { width: 38px; height: 38px; border-radius: 11px; }
+  #officePurchasesPage .summary-icon .ic { width: 18px; height: 18px; }
+  #officePurchasesPage .summary-card strong { font-size: 17px; }
+  .office-card-meta { font-size: 10px; }
+  .office-filter-card { padding: 12px; }
+  .office-filter-card .filter-row { gap: 8px; }
+  .office-filter-card .filter-row select,
+  .office-filter-card .filter-row input { min-width: 0; flex: 1 1 calc(50% - 4px); }
+  .office-filter-card .filter-row .search { flex-basis: 100%; }
+  .office-opening-field { flex: 1 1 100%; }
+  .office-opening-field .calc-field { flex: 1 1 auto; }
+  .office-opening-field .calc-field > input { width: 100%; }
+  .office-filter-card .filter-reset { margin-left: 0; flex: 1 1 100%; }
+  /* Income Year dropdown: compact, full-width and never clipped or overflowing on small screens. */
+  #officePurchasesPage .office-filter-card #officeYearFilter { width: 100%; min-width: 0; max-width: 100%; }
+  .office-table-card .table-toolbar { gap: 8px; }
+  .office-table-card .tt-actions { width: 100%; }
+  .office-table-card .tt-actions .btn { flex: 1 1 auto; }
+  .office-account-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .office-account-card { padding: 11px 12px; }
+  .office-account-figures { font-size: 12px; gap: 8px; }
+  #officeModal .office-check-row { font-size: 12px; gap: 8px; min-height: 22px; }
+  #officeModal .office-check-row input[type="checkbox"] { width: 16px; height: 16px; }
+  #officeModal .office-account-check .hint { font-size: 10.5px; margin-top: 2px; }
+}
+
+@media (max-width: 430px) {
+  #officePurchasesPage .cards-grid { grid-template-columns: 1fr; }
+  .office-account-grid { grid-template-columns: 1fr; }
+  .office-filter-card .filter-row select,
+  .office-filter-card .filter-row input { flex-basis: 100%; }
+  #officeModal .office-check-row { font-size: 11.5px; }
+}
+
