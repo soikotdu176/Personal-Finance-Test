@@ -242,6 +242,165 @@ const $el=id=>document.getElementById(id)||document.createElement('div');
 const uid=prefix=>`${prefix}-${crypto.randomUUID ? crypto.randomUUID() : Date.now()+'-'+Math.random().toString(16).slice(2)}`;
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const icon=name=>`<svg class="ic" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+
+/* ==========================================================================
+   Category / subcategory icons
+   Every category and subcategory renders a related inline-SVG glyph (symbols
+   live in index.html). Default names resolve through an exact map, names the
+   user adds fall back to keyword rules, and anything unmatched gets a default
+   for its financial type. Reports, Excel/PDF exports and print suppress the
+   glyphs, so generated documents stay text-only.
+   ========================================================================== */
+const CATEGORY_ICON_EXACT={
+  // Assets / liabilities
+  'cash':'ci-wallet','cash in hand':'ci-wallet','savings accounts':'ci-bank',
+  'investments':'ci-chart','cpf':'ci-shield','group insurance and welfare fund gi and wf':'ci-shield',
+  'other investment co operation':'ci-chart','property':'ci-land','land and primary residence':'ci-land',
+  'vehicles':'ci-car','jewelry':'ci-gem','other property':'ci-home','retirement':'ci-shield','gratuity':'ci-coins',
+  'other assets':'ci-box','furniture electronics and equipments':'ci-box','accounts receivable':'ci-file',
+  'accounts payable':'ci-file','bank loan':'ci-bank','other liabilities':'ci-file',
+  // Income
+  'salary and bonuses':'ci-coins','basic and allowances':'ci-coins','incentive bonus':'ci-coins','profit bonus':'ci-coins',
+  'lfa':'ci-plane','festival bonus':'ci-gift','ex gratia':'ci-gift','allowances and other receives':'ci-coins',
+  'lunch subsidy':'ci-food','leverage':'ci-chart','ta da':'ci-transit','training allowance':'ci-education',
+  'honorarium':'ci-coins','previous year profit bonus':'ci-coins','general income':'ci-coins',
+  'bank interest profit':'ci-bank','gift refund':'ci-gift','other income':'ci-coins',
+  // Expenses
+  'food':'ci-food','grocery items':'ci-cart','snacks items':'ci-food','dining eating out':'ci-food','mess':'ci-food',
+  'clothing':'ci-shirt','laundry':'ci-shirt','personal supplies':'ci-box','medicine and doctor':'ci-medical',
+  'pocket money':'ci-gift','contribution for family':'ci-users','special contribution for family':'ci-users',
+  'regular':'ci-users','small amount':'ci-users','big amount':'ci-users',
+  'accommodation':'ci-home','household rent':'ci-home','fuel and maintenance':'ci-fuel','other transportation':'ci-transit',
+  'auto':'ci-car','bus':'ci-transit','train':'ci-transit','others':'ci-tag',
+  'utilities and home support':'ci-bolt','electricity':'ci-bolt','gas water sewer and garbage':'ci-flame',
+  'phone internet tv channels and subscription':'ci-wifi','home support staff and other expenses':'ci-users',
+  'education':'ci-education','education expenses':'ci-education','special and events':'ci-party',
+  'festival party events':'ci-party','domestic and overseas tour holiday etc':'ci-plane','philanthropy etc':'ci-heart',
+  'other special expenses':'ci-sparkle','miscellaneous':'ci-tag','any other expenses':'ci-tag',
+  'tax and surcharge':'ci-percent','payment of tax at source and advance tax':'ci-percent',
+  'payment of tax surcharge or other amounts':'ci-percent',
+  'office purchase and bill':'ci-briefcase','office purchase':'ci-box','bill received':'ci-receipt','personal print':'ci-printer',
+  // Shared subcategories (Own / Spouse / Family / Offspring repeat under many categories)
+  'own':'ci-user','spouse':'ci-users','family':'ci-users','offspring':'ci-users'
+};
+const CATEGORY_ICON_RULES=[
+  {icon:'ci-food',test:/\b(food|grocery|groceries|dining|dinner|lunch|breakfast|snack|snacks|restaurant|cafe|mess|meal|meals|kitchen)\b/},
+  {icon:'ci-shirt',test:/\b(cloth|clothes|clothing|apparel|garment|uniform|laundry|tailor|shoe|shoes)\b/},
+  {icon:'ci-medical',test:/\b(medicine|medical|doctor|hospital|health|clinic|dental|nurse|pharmacy|treatment)\b/},
+  {icon:'ci-gift',test:/\b(gift|pocket money|ex gratia|refund|reward)\b/},
+  {icon:'ci-party',test:/\b(party|event|events|celebration)\b/},
+  {icon:'ci-plane',test:/\b(tour|travel|trip|holiday|vacation|flight|air ticket)\b|\blfa\b/},
+  {icon:'ci-heart',test:/\b(philanthropy|charity|donation|donations|zakat|sadaqah)\b/},
+  {icon:'ci-users',test:/\b(family|spouse|offspring|children|child|kids|dependent|dependents|staff|maid|caregiver)\b/},
+  {icon:'ci-user',test:/\b(self|own|myself|personal)\b/},
+  {icon:'ci-printer',test:/\b(print|printing|photocopy|printer)\b/},
+  {icon:'ci-cart',test:/\b(shopping|supplies|supply|supermarket|bazar|bazaar)\b/},
+  {icon:'ci-briefcase',test:/\b(office|official)\b/},
+  {icon:'ci-receipt',test:/\b(bill|bills|invoice|voucher|receipt)\b/},
+  {icon:'ci-percent',test:/\b(tax|surcharge|vat|duty)\b/},
+  {icon:'ci-fuel',test:/\b(fuel|petrol|diesel|octane|refuel)\b/},
+  {icon:'ci-flame',test:/\b(gas|lpg|cylinder|flame)\b/},
+  {icon:'ci-droplet',test:/\b(water|sewer|sewage|drain|drainage)\b/},
+  {icon:'ci-trash',test:/\b(garbage|trash|waste|dust)\b/},
+  {icon:'ci-bolt',test:/\b(electricity|electric|power|utility|utilities)\b/},
+  {icon:'ci-wifi',test:/\b(internet|broadband|wifi|wi fi|subscription|phone|mobile|tv|television|cable)\b/},
+  {icon:'ci-education',test:/\b(education|school|college|university|tuition|admission|exam|training|book|books)\b/},
+  {icon:'ci-shield',test:/\b(insurance|welfare|provident|cpf|retirement|pension|protection)\b/},
+  {icon:'ci-bank',test:/\b(savings|saving|bank|interest|profit)\b/},
+  {icon:'ci-card',test:/\b(card|credit|debit|visa|mastercard)\b/},
+  {icon:'ci-wallet',test:/\b(cash|bkash|nagad|rocket|wallet)\b/},
+  {icon:'ci-chart',test:/\b(investment|investments|invest|share|shares|stock|stocks|mutual fund|leverage)\b/},
+  {icon:'ci-land',test:/\b(land|plot|real estate)\b/},
+  {icon:'ci-home',test:/\b(property|house|housing|residence|rent|rental|accommodation)\b/},
+  {icon:'ci-gem',test:/\b(jewel|jewelry|jewellery|gold|silver|diamond|gem)\b/},
+  {icon:'ci-car',test:/\b(car|cars|vehicle|vehicles|auto|automobile|motorcycle|bike)\b/},
+  {icon:'ci-transit',test:/\b(transport|transportation|ta da|fare|fares|bus|train|transit|taxi|rickshaw|uber)\b/},
+  {icon:'ci-box',test:/\b(furniture|electronics|equipment|equipments|appliance|appliances|box|package)\b/},
+  {icon:'ci-scale',test:/\b(loan|loans|liability|liabilities|debt|payable|receivable)\b/},
+  {icon:'ci-file',test:/\b(accounts|account|deduction|deductions|loss|losses|penalty|fine|fines)\b/},
+  {icon:'ci-coins',test:/\b(salary|bonus|allowance|allowances|honorarium|gratuity|income|receive|receives|earning|earnings)\b/},
+  {icon:'ci-sparkle',test:/\b(special|festival)\b/},
+  {icon:'ci-tag',test:/\b(misc|miscellaneous|other|others|general)\b/}
+];
+const CATEGORY_ICON_TONES={
+  'ci-food':'amber','ci-cart':'amber','ci-fuel':'amber','ci-bolt':'amber','ci-flame':'amber',
+  'ci-shirt':'violet','ci-user':'indigo','ci-users':'violet','ci-education':'indigo','ci-chart':'indigo',
+  'ci-briefcase':'indigo','ci-sparkle':'violet','ci-card':'violet',
+  'ci-medical':'rose','ci-heart':'rose','ci-scale':'rose','ci-percent':'rose',
+  'ci-gift':'pink','ci-party':'pink','ci-gem':'pink',
+  'ci-home':'teal','ci-land':'teal','ci-plane':'sky','ci-car':'sky','ci-transit':'sky','ci-droplet':'sky','ci-wifi':'sky',
+  'ci-wallet':'emerald','ci-bank':'emerald','ci-coins':'emerald','ci-shield':'emerald',
+  'ci-box':'slate','ci-receipt':'slate','ci-printer':'slate','ci-file':'slate','ci-tag':'slate','ci-trash':'slate'
+};
+const CATEGORY_ICON_DEFAULT={Income:'ci-coins',Expense:'ci-cart',Asset:'ci-wallet',Liability:'ci-scale',Office:'ci-briefcase'};
+const categoryIconCache=new Map();
+/** Normalises a name for lookup: "TA+DA" -> "ta da", "Medicine & Doctor" -> "medicine and doctor". */
+const categoryIconKey=value=>String(value??'').toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').trim();
+function resolveCategoryIcon(label,type){
+  const key=categoryIconKey(label);
+  const kind=type?String(type)[0].toUpperCase()+String(type).slice(1).toLowerCase():'';
+  const cacheKey=`${kind}|${key}`;
+  const cached=categoryIconCache.get(cacheKey);
+  if(cached)return cached;
+  let icon=CATEGORY_ICON_EXACT[key];
+  if(!icon)icon=(CATEGORY_ICON_RULES.find(rule=>rule.test.test(key))||{}).icon;
+  const result={icon:icon||CATEGORY_ICON_DEFAULT[kind]||'ci-tag'};
+  categoryIconCache.set(cacheKey,result);
+  return result;
+}
+/** True while printing or rendering a report: glyphs are skipped entirely, not just hidden. */
+function categoryIconsSuppressed(){
+  if(typeof document==='undefined'||!document.documentElement)return true;
+  const root=document.documentElement;
+  return root.classList.contains('is-printing')||!!(document.body&&document.body.classList.contains('report-mode'));
+}
+/** Inline SVG glyph for a category / subcategory label. `opts.size` overrides the CSS size (px). */
+function catIcon(label,type,opts={}){
+  if(categoryIconsSuppressed())return '';
+  const {icon:name}=resolveCategoryIcon(label,type);
+  const tone=CATEGORY_ICON_TONES[name]||'indigo';
+  const size=Number(opts.size)>0?` style="--ci-size:${Math.round(Number(opts.size))}px"`:'';
+  const extra=opts.className?` ${esc(opts.className)}`:'';
+  return `<i class="cat-icon tone-${tone}${extra}" data-cat-icon="${name}"${size} aria-hidden="true"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#${name}"/></svg></i>`;
+}
+/** Glyph + escaped label, for tables, cards and read-only view sheets. */
+function catLabel(label,type,opts={}){
+  const text=String(label??'').trim();
+  if(!text)return '—';
+  return `<span class="cat-label">${catIcon(text,type,opts)}<span class="cat-label-text">${esc(text)}</span></span>`;
+}
+/** Puts a small glyph inside a form label (select fields) and keeps it in sync with the value. */
+function setFieldIcon(selectId,value,type){
+  const select=document.getElementById(selectId);
+  const label=select&&select.closest('label');
+  if(!label)return;
+  let chip=label.querySelector('.field-icon-chip');
+  if(!chip){
+    const target=label.querySelector('.lbl');
+    if(!target)return;
+    chip=document.createElement('span');
+    chip.className='field-icon-chip';
+    chip.setAttribute('aria-hidden','true');
+    target.prepend(chip);
+  }
+  chip.innerHTML=catIcon(value||'',type,{size:15});
+}
+/** Strips icon markup from any string that reaches a generated report or export. */
+const REPORT_ICON_MARKUP=/<i[^>]*data-cat-icon[\s\S]*?<\/i>/gi;
+function reportPlainText(value){
+  return String(value??'').replace(REPORT_ICON_MARKUP,'').replace(/\s+/g,' ').trim();
+}
+/** Print the current view with category glyphs suppressed (browser print / Save as PDF). */
+function printCurrentView(){
+  const root=document.documentElement;
+  root.classList.add('is-printing');
+  const done=()=>root.classList.remove('is-printing');
+  window.addEventListener('afterprint',done,{once:true});
+  try{window.print()}finally{setTimeout(done,1500)}
+}
+
+
+
 const pad2=n=>String(n).padStart(2,'0');
 const reducedMotion=()=>window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
 function todayISO(){const d=new Date();return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`}
@@ -751,10 +910,10 @@ function bindGlobalActions(){
   };
   $el('dashboardSearch').oninput=debounce(()=>{dashboardPage=1;renderDashboardTable()});
   $el('exportFiltered').onclick=exportFilteredExcel;
-  $el('printDashboard').onclick=()=>window.print();
+  $el('printDashboard').onclick=printCurrentView;
   $el('generatePdfReport').onclick=e=>runWithLoading(e.currentTarget,generatePdfReport);
   $el('generateExcelReport').onclick=e=>runWithLoading(e.currentTarget,generateExcelReport);
-  $el('printBalance').onclick=()=>window.print();
+  $el('printBalance').onclick=printCurrentView;
   $el('exportBalanceExcel').onclick=exportBalanceExcel;
   $el('balanceYear').onchange=e=>{balanceYear=e.target.value;balanceYearChosen=true;renderBalance()};
   $el('balanceClear').onclick=()=>{balanceYear='';balanceYearChosen=true;renderBalance()};
@@ -987,6 +1146,9 @@ function recordAmount(record){
 /** Cash & Bank = an Asset whose category is "Cash" (Savings Accounts / Cash in Hand). The label is
  *  also recognised as "Cash & Bank" / "Cash and Bank" so a renamed category keeps snapshot semantics. */
 const isCashCategoryName=name=>/^(cash|cash\s*&\s*bank|cash\s+and\s+bank)$/i.test(String(name||'').trim());
+/** "Cash & Bank" exactly (also spelled "Cash and Bank"). The built-in Cash category keeps its own
+ *  schemas (Cash Asset Name / Bank Name), so auto-naming Particulars only applies to this label. */
+const isCashBankCategoryName=name=>/^cash\s*(?:&|\band\b)\s*bank$/i.test(String(name||'').trim());
 const isCashRecord=r=>!!r&&r.type==='Asset'&&isCashCategoryName(r.category);
 /** Identity of a Cash & Bank subcategory (bKash, Cash in Hand, Basic Bank Limited, ...). Cash is a
  *  snapshot per item and the item name lives on the subcategory, so transfers and record funding
@@ -1587,7 +1749,7 @@ function renderMobileCalendar(){
       const dayLabel=new Date(`${date}T12:00:00`).toLocaleDateString(undefined,{month:'short',day:'numeric'});
       const note=[record.account,record.description].filter(Boolean).join(' · ')||record.majorHead||'';
       const amount=(type==='income'?'+':'−')+formatMoney(Math.abs(Number(record.amount)||0));
-      return `<article class="mobile-transaction-card ${type}"><span class="mobile-transaction-icon" aria-hidden="true">${esc([...category][0]||'•')}</span><span class="mobile-transaction-copy"><strong>${esc(category)} &gt; ${esc(record.subcategory||'Other')}</strong><span>${esc(dayLabel)}${note?' · '+esc(note):''}</span></span><strong class="mobile-transaction-amount">${esc(amount)}</strong><span class="mobile-transaction-status" aria-label="Completed">✓</span></article>`;
+      return `<article class="mobile-transaction-card ${type}"><span class="mobile-transaction-icon" aria-hidden="true">${catIcon(record.subcategory||category,record.type)}</span><span class="mobile-transaction-copy"><strong>${esc(category)} &gt; ${esc(record.subcategory||'Other')}</strong><span>${esc(dayLabel)}${note?' · '+esc(note):''}</span></span><strong class="mobile-transaction-amount">${esc(amount)}</strong><span class="mobile-transaction-status" aria-label="Completed">✓</span></article>`;
     }).join('')||'<div class="mobile-calendar-empty">No transactions for this selection.</div>';
   const activeMonth=document.querySelector(`#mobileCalendarMonths [data-calendar-month="${selected.key}"]`);
   if(activeMonth)requestAnimationFrame(()=>activeMonth.scrollIntoView({block:'nearest',inline:'center',behavior:reducedMotion()?'auto':'smooth'}));
@@ -1660,7 +1822,7 @@ function renderMobileDashboard(){
       const category=String(r.category||'Other');
       const subtitle=[r.account,r.description].filter(Boolean).join(' · ')||r.majorHead||'';
       const signedAmount=(type==='income'?'+':'−')+formatMoney(Math.abs(Number(r.amount)||0));
-      return `<article class="mobile-transaction-card ${type}"><span class="mobile-transaction-icon" aria-hidden="true">${esc([...category][0]||'•')}</span><span class="mobile-transaction-copy"><strong>${esc(category)} &gt; ${esc(r.subcategory||'Other')}</strong><span>${esc(subtitle)}</span></span><strong class="mobile-transaction-amount">${esc(signedAmount)}</strong><span class="mobile-transaction-status" aria-label="Completed">✓</span></article>`;
+      return `<article class="mobile-transaction-card ${type}"><span class="mobile-transaction-icon">${catIcon(r.subcategory||category,r.type)}</span><span class="mobile-transaction-copy"><strong>${esc(category)} &gt; ${esc(r.subcategory||'Other')}</strong><span>${esc(subtitle)}</span></span><strong class="mobile-transaction-amount">${esc(signedAmount)}</strong><span class="mobile-transaction-status" aria-label="Completed">✓</span></article>`;
     }).join('');
     return `<section class="mobile-day-group"><div class="mobile-day-heading"><span><strong>${esc(dateLabel)}</strong> ${esc(weekday)}</span><strong class="mobile-day-total ${dailyNet>=0?'positive':''}">${esc(formatMoney(dailyNet))}</strong></div>${cards}</section>`;
   }).join('');
@@ -1681,7 +1843,7 @@ function renderMobileShortcuts(){
     state.incomeGroups.forEach(g=>(g.categories||[]).forEach(c=>(c.subcategories||[]).forEach(sub=>add(g.type,g.majorHead,c.name,sub))));
   }
   mobileQuickShortcuts=entries.slice(0,4);
-  document.getElementById('mobileShortcuts').innerHTML=mobileQuickShortcuts.map((shortcut,i)=>`<div class="mobile-shortcut-row" style="--action-index:${i}"><button type="button" class="speed-action mobile-shortcut-action" data-mobile-shortcut="${i}" title="${esc(shortcut.category)} > ${esc(shortcut.subcategory||'')}"><span class="speed-action-icon">${shortcut.type==='Income'?'↗':'↘'}</span><span>${esc(shortcut.category)} &gt; ${esc(shortcut.subcategory||'Other')}</span></button><button type="button" class="mobile-shortcut-dismiss" data-dismiss-shortcut="${esc(shortcut.key)}" aria-label="Dismiss ${esc(shortcut.category)} shortcut">×</button></div>`).join('');
+  document.getElementById('mobileShortcuts').innerHTML=mobileQuickShortcuts.map((shortcut,i)=>`<div class="mobile-shortcut-row" style="--action-index:${i}"><button type="button" class="speed-action mobile-shortcut-action" data-mobile-shortcut="${i}" title="${esc(shortcut.category)} > ${esc(shortcut.subcategory||'')}"><span class="speed-action-icon">${shortcut.type==='Income'?'↗':'↘'}</span><span>${catIcon(shortcut.subcategory||shortcut.category,shortcut.type,{size:16})}${esc(shortcut.category)} &gt; ${esc(shortcut.subcategory||'Other')}</span></button><button type="button" class="mobile-shortcut-dismiss" data-dismiss-shortcut="${esc(shortcut.key)}" aria-label="Dismiss ${esc(shortcut.category)} shortcut">×</button></div>`).join('');
 }
 function openMobileSpeedDial(){
   if(!isMobileViewport())return;
@@ -1867,7 +2029,7 @@ function renderDashboardTable(){
   document.getElementById('dashboardTable').innerHTML=`<thead><tr><th scope="col">Type</th><th scope="col">Date</th><th scope="col">Category</th><th scope="col">Subcategory</th><th scope="col">Particulars</th><th scope="col">Details</th><th scope="col">Income Year</th><th scope="col" class="num">Balance / Amount</th><th scope="col">Documents</th><th scope="col">Action</th></tr></thead><tbody>${pageRecords.map((r,i)=>{
     const meta=isTransferRecord(r)?transferMetaLabel(r):recordMeta(r);
     const id=esc(r.id);
-    return `<tr style="--i:${i}"><td><span class="badge ${r.type.toLowerCase()}">${esc(r.type)}</span>${isTransferRecord(r)?' <span class="badge transfer">Transfer</span>':''}</td><td>${esc(fmtDate(r.date)||'—')}</td><td>${esc(r.category)}</td><td>${esc(r.subcategory)}</td><td><strong>${esc(recordTitle(r))}</strong>${meta?`<span class="muted-sub">${esc(meta)}</span>`:''}</td><td>${esc(r.details||'—')}</td><td>${esc(r.incomeYear||'—')}</td><td class="num"><strong>${formatMoney(recordAmount(r))}</strong></td><td><div class="doc-cell">${docChips(r)||'<span class="doc-none">—</span>'}</div></td><td class="actions-cell"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></td></tr>`;
+    return `<tr style="--i:${i}"><td><span class="badge ${r.type.toLowerCase()}">${esc(r.type)}</span>${isTransferRecord(r)?' <span class="badge transfer">Transfer</span>':''}</td><td>${esc(fmtDate(r.date)||'—')}</td><td>${catLabel(r.category,r.type)}</td><td>${catLabel(r.subcategory,r.type)}</td><td><strong>${esc(recordTitle(r))}</strong>${meta?`<span class="muted-sub">${esc(meta)}</span>`:''}</td><td>${esc(r.details||'—')}</td><td>${esc(r.incomeYear||'—')}</td><td class="num"><strong>${formatMoney(recordAmount(r))}</strong></td><td><div class="doc-cell">${docChips(r)||'<span class="doc-none">—</span>'}</div></td><td class="actions-cell"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></td></tr>`;
   }).join('')||'<tr><td colspan="10"><div class="empty-state">No financial records match these filters.</div></td></tr>'}</tbody>`;
   document.getElementById('dashboardPagination').innerHTML=pages>1?Array.from({length:pages},(_,i)=>`<button type="button" class="${i+1===dashboardPage?'active':''}" data-cmd="page" data-id="${i+1}" aria-label="Page ${i+1}">${i+1}</button>`).join(''):'';
 }
@@ -2375,7 +2537,7 @@ function bindCalculator(){
 /* ==========================================================================
    Add / Edit record modal - fields adapt to Type > Category > Subcategory
    ========================================================================== */
-let formState={draft:{},schema:GENERIC_SCHEMA,amountTouched:false,yearTouched:false};
+let formState={draft:{},schema:GENERIC_SCHEMA,amountTouched:false,yearTouched:false,particularsAuto:''};
 
 function yearOptionsFor(current){
   const list=[...(state.settings.incomeYears||[])];
@@ -2429,6 +2591,32 @@ function renderSubFields(){
   };
   if(schema.amountSync==='market')syncAmountFromValues();
 }
+/**
+ * Cash & Bank keeps the account name in the Subcategory, so Particulars / Name follows it.
+ * `overwrite` is only true when the Subcategory was just chosen by the user; re-renders (opening
+ * the sheet, switching category) keep a name that was typed by hand. A value that we auto-filled
+ * ourselves, or that is still empty, is always refreshed so validation and form state stay in sync.
+ */
+function syncCashBankParticulars(overwrite=false){
+  const typeSelect=document.getElementById('recordType');
+  const categorySelect=document.getElementById('recordCategory');
+  const subSelect=document.getElementById('recordSubcategory');
+  const input=document.getElementById('f_particulars');
+  const active=!!typeSelect&&!!categorySelect&&typeSelect.value==='Asset'&&isCashBankCategoryName(categorySelect.value);
+  const subcategory=active&&subSelect?String(subSelect.value||'').trim():'';
+  // Away from Cash & Bank (or with no subcategory) nothing is written: manual input stays as it is.
+  if(!active||!subcategory||!input)return;
+  const current=String(input.value??'');
+  const auto=String(formState.particularsAuto||'');
+  // A custom name is never replaced until the Subcategory itself is chosen again.
+  if(!overwrite&&current.trim()&&current!==auto)return;
+  formState.particularsAuto=subcategory;
+  formState.draft.particulars=subcategory;
+  if(current===subcategory)return;                 // already in sync: nothing to apply
+  input.value=subcategory;
+  input.dispatchEvent(new Event('input',{bubbles:true}));
+  input.dispatchEvent(new Event('change',{bubbles:true}));
+}
 /** Land: Amount / Balance follows Current Market Value (fallback Purchase Value) until edited by hand. */
 function syncAmountFromValues(){
   if(formState.amountTouched)return;
@@ -2443,7 +2631,7 @@ function openRecordModal(id=null){
   editingRecordId=id;
   const record=existing;
   resetDocDraft(record);
-  formState={draft:{},schema:GENERIC_SCHEMA,amountTouched:false,yearTouched:!!record?.incomeYear,fundingAccounts:assetFundingAccounts()};
+  formState={draft:{},schema:GENERIC_SCHEMA,amountTouched:false,yearTouched:!!record?.incomeYear,particularsAuto:'',fundingAccounts:assetFundingAccounts()};
   if(record)MANAGED_KEYS.forEach(k=>{if(record[k]!==undefined)formState.draft[k]=record[k]});
   document.querySelector('#recordForm .modal-foot').innerHTML='<button type="button" class="btn" data-close-modal>Cancel</button><button type="submit" class="btn btn-primary">Save Record</button>';
   document.querySelectorAll('#recordForm [data-close-modal]').forEach(button=>button.onclick=()=>document.getElementById('recordModal').close());
@@ -2474,9 +2662,8 @@ function openRecordModal(id=null){
   const fundingDefaultHint='Optional — the amount is deducted from this Asset subcategory. Leave None for no change.';
   const describeFunding=()=>{
     const account=fundingSelect.value?formState.fundingAccounts.get(fundingSelect.value):null;
-    fundingHint.textContent=account
-      ?`${account.category} / ${account.subcategory} · Balance ${formatMoney(account.balance)} — the record amount is deducted here.`
-      :fundingDefaultHint;
+    if(!account){fundingHint.textContent=fundingDefaultHint;return}
+    fundingHint.innerHTML=`${catIcon(account.subcategory,'Asset')}${esc(account.category)} / ${esc(account.subcategory)} · Balance ${formatMoney(account.balance)} — the record amount is deducted here.`;
   };
   const syncFunding=()=>{
     // Cash & Bank records are already the money itself, so they never get a funding source.
@@ -2494,6 +2681,7 @@ function openRecordModal(id=null){
     const wanted=keepCategory||categorySelect.value;
     categorySelect.innerHTML=filtered.map(c=>`<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
     if(filtered.some(c=>c.name===wanted))categorySelect.value=wanted;
+    setFieldIcon('recordCategory',categorySelect.value,typeSelect.value);
     updateSubcategories(keepCategory===record?.category?record?.subcategory:undefined);
   };
   const updateSubcategories=(keepSub)=>{
@@ -2503,12 +2691,19 @@ function openRecordModal(id=null){
     const subs=(category?.subcategories||[]).length?category.subcategories:[categorySelect.value].filter(Boolean);
     subSelect.innerHTML=subs.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
     if(keepSub&&subs.includes(keepSub))subSelect.value=keepSub;
+    setFieldIcon('recordSubcategory',subSelect.value,typeSelect.value);
     renderSubFields();
+    syncCashBankParticulars();
     syncFunding();
   };
   typeSelect.onchange=()=>updateCategories();
   categorySelect.onchange=()=>updateSubcategories();
-  subSelect.onchange=renderSubFields;
+  // Choosing a Cash & Bank subcategory renames Particulars / Name (a hand-typed name is kept for
+  // every other category and for subcategory moves made by reopening the sheet).
+  subSelect.onchange=()=>{
+    renderSubFields();
+    syncCashBankParticulars(true);
+  };
   dateInput.onchange=()=>{
     if(formState.yearTouched||!formState.schema.fields.some(f=>f.key==='incomeYear'))return;
     const derived=fiscalYearFromDate(dateInput.value);
@@ -2638,12 +2833,14 @@ function viewRecord(id){
   document.getElementById('recordModalSubtitle').textContent=`${r.category} / ${r.subcategory}`;
   const documentSection=documentViewSection(r);
   const show=(label,value,full=false)=>`<label${full?' class="full"':''}><span class="k">${esc(label)}</span><strong class="view-field">${value===''||value===undefined||value===null?'—':esc(value)}</strong></label>`;
-  const rows=[show('Type',r.type),show('Category',r.category),show('Subcategory',r.subcategory),show('Date',fmtDate(r.date))];
+  const showCat=(label,value,type)=>`<label><span class="k">${esc(label)}</span><strong class="view-field">${catLabel(value,type)}</strong></label>`;
+  const showRaw=(label,html)=>`<label><span class="k">${esc(label)}</span><strong class="view-field">${html||'—'}</strong></label>`;
+  const rows=[show('Type',r.type),showCat('Category',r.category,r.type),showCat('Subcategory',r.subcategory,r.type),show('Date',fmtDate(r.date))];
   schema.fields.forEach(f=>rows.push(show(f.label,f.type==='money'?(r[f.key]?formatMoney(r[f.key]):''):r[f.key])));
   const shown=new Set(schema.fields.map(f=>f.key));
   ['purchaseValue','currentMarketValue'].forEach(k=>{if(!shown.has(k)&&r[k])rows.push(show(k==='purchaseValue'?'Purchase Value':'Current Market Value',formatMoney(r[k])))});
   rows.push(show('Amount / Balance',formatMoney(recordAmount(r))));
-  if(r.funding&&r.funding.subcategory)rows.push(show('Funded From',`${r.funding.category||'Asset'} / ${r.funding.subcategory}`),show('Funding Impact',`${formatMoney(Math.abs(recordAmount(r)))} deducted from that subcategory`));
+  if(r.funding&&r.funding.subcategory)rows.push(showRaw('Funded From',`${catIcon(r.funding.subcategory,'Asset')}${esc(r.funding.category||'Asset')} / ${esc(r.funding.subcategory)}`),show('Funding Impact',`${formatMoney(Math.abs(recordAmount(r)))} deducted from that subcategory`));
   rows.push(show('Details / Description',r.details||r.description||'',true));
   if(r.remarks)rows.push(show('Remarks',r.remarks,true));
   document.getElementById('recordFormFields').innerHTML=`<div class="form-grid">${rows.join('')}${documentSection}</div>`;
@@ -2743,10 +2940,10 @@ function updateTransferHints(){
   const accounts=transferSheetAccounts();
   const hint=key=>{
     const account=accounts.find(item=>item.key===key);
-    return account?`${account.category} / ${account.subcategory} · Balance ${formatMoney(account.balance)}`:'';
+    return account?`${catIcon(account.subcategory,account.type)}${esc(account.category)} / ${esc(account.subcategory)} · Balance ${formatMoney(account.balance)}`:'';
   };
-  $el('transferSourceHint').textContent=hint($el('transferSourceAccount').value);
-  $el('transferDestinationHint').textContent=hint($el('transferDestinationAccount').value);
+  $el('transferSourceHint').innerHTML=hint($el('transferSourceAccount').value);
+  $el('transferDestinationHint').innerHTML=hint($el('transferDestinationAccount').value);
 }
 /** Live "before -> after" preview of both accounts, plus fee / negative-balance warnings. */
 function updateTransferPreview(){
@@ -2766,7 +2963,7 @@ function updateTransferPreview(){
     if(!account)return '';
     const before=account.balance;
     const after=before+transferLegDelta(account,amount,isSource);
-    return `<div class="transfer-preview-row"><span>${esc(transferAccountName(account)||account.subcategory)}</span><strong class="${after<before?'down':after>before?'up':''}">${esc(formatMoney(before))} → ${esc(formatMoney(after))}</strong></div>`;
+    return `<div class="transfer-preview-row"><span>${catIcon(account.subcategory,account.type)}${esc(transferAccountName(account)||account.subcategory)}</span><strong class="${after<before?'down':after>before?'up':''}">${esc(formatMoney(before))} → ${esc(formatMoney(after))}</strong></div>`;
   };
   const rows=[];
   if(source&&sourceAmount)rows.push(row(source,sourceAmount,true));
@@ -3015,12 +3212,16 @@ function viewTransferRecord(record){
   const source=transfer.source||{},destination=transfer.destination||{};
   const amounts=transferAmounts(transfer);
   const show=(label,value,full=false)=>`<label${full?' class="full"':''}><span class="k">${esc(label)}</span><strong class="view-field">${value===''||value===undefined||value===null?'—':esc(value)}</strong></label>`;
+  const accountRow=(label,acc)=>{
+    const text=[acc.category,acc.subcategory].filter(Boolean).join(' / ');
+    return `<label><span class="k">${esc(label)}</span><strong class="view-field">${catIcon(acc.subcategory||acc.category,'Asset')}${text?esc(text):'—'}</strong></label>`;
+  };
   const rows=[
     show('Transfer',`${transferAccountName(source)||source.subcategory||''} → ${transferAccountName(destination)||destination.subcategory||''}`,true),
     show('Date',fmtDate(record.date)),show('Time',transfer.time||''),
-    show('From Account',[source.category,source.subcategory].filter(Boolean).join(' / ')),
+    accountRow('From Account',source),
     show('From Amount',amounts.out?formatMoney(amounts.out):''),
-    show('To Account',[destination.category,destination.subcategory].filter(Boolean).join(' / ')),
+    accountRow('To Account',destination),
     show('To Amount',amounts.incoming?formatMoney(amounts.incoming):''),
     show('Currency',source.currency||''),
     show('Status',`${source.status||'Paid'} → ${destination.status||'Paid'}`),
@@ -3173,7 +3374,7 @@ function renderRecordSections(){
     const transfer=isTransferRecord(r);
     const meta=transfer?transferMetaLabel(r):recordMeta(r);
     const id=esc(r.id);
-    return `<div class="record-item${transfer?' transfer-record':''}" style="--i:${Math.min(i,14)}"><div><h4>${esc(recordTitle(r))}</h4><p>${transfer?'<span class="badge transfer">Transfer</span> ':''}${esc(r.category)} · ${esc(r.subcategory)}${r.incomeYear?' · <span class="record-income-year">'+esc(r.incomeYear)+'</span>':''}</p>${meta?`<p>${esc(meta)}</p>`:''}</div><div class="record-amount"><strong>${formatMoney(recordAmount(r))}</strong><p>${esc(fmtDate(r.date))}</p></div>${docsFor(r).length?`<div class="record-docs">${docChips(r,3)}</div>`:''}<div class="record-actions"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></div></div>`;
+    return `<div class="record-item${transfer?' transfer-record':''}" style="--i:${Math.min(i,14)}"><div><h4>${esc(recordTitle(r))}</h4><p>${transfer?'<span class="badge transfer">Transfer</span> ':''}${catLabel(r.category,r.type)} · ${catLabel(r.subcategory,r.type)}${r.incomeYear?' · <span class="record-income-year">'+esc(r.incomeYear)+'</span>':''}</p>${meta?`<p>${esc(meta)}</p>`:''}</div><div class="record-amount"><strong>${formatMoney(recordAmount(r))}</strong><p>${esc(fmtDate(r.date))}</p></div>${docsFor(r).length?`<div class="record-docs">${docChips(r,3)}</div>`:''}<div class="record-actions"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></div></div>`;
   }).join('');
   const assets=records.filter(r=>r.type==='Asset'),liabilities=records.filter(r=>r.type==='Liability');
   document.getElementById('assetRecordCount').textContent=`${assets.length} records`;
@@ -3238,14 +3439,14 @@ function renderBalance(){
   if(clearBtn)clearBtn.disabled=!balanceYear;
   const data=buildBalanceData(balanceYear);
   const range=balanceYear?fiscalRange(balanceYear):null;
-  const section=(title,sec)=>{
-    const rows=sec.cats.map(c=>`<tr class="cat-row"><td>${esc(c.name)}</td><td>${formatMoney(c.total)}</td></tr>`+
-      c.subs.map(sub=>`<tr class="sub-row"><td>${esc(sub.name)}</td><td>${formatMoney(sub.total)}</td></tr>`).join('')).join('');
+  const section=(title,sec,kind)=>{
+    const rows=sec.cats.map(c=>`<tr class="cat-row"><td>${catLabel(c.name,kind)}</td><td>${formatMoney(c.total)}</td></tr>`+
+      c.subs.map(sub=>`<tr class="sub-row"><td>${catLabel(sub.name,kind)}</td><td>${formatMoney(sub.total)}</td></tr>`).join('')).join('');
     return `<table class="balance-table"><tbody><tr class="total section-title"><td>${title}</td><td></td></tr>${rows}<tr class="total"><td>Total ${title}</td><td>${formatMoney(sec.total)}</td></tr></tbody></table>`;
   };
   document.getElementById('balanceSheet').innerHTML=`<div class="balance-header"><h2>Personal Balance Sheet</h2><p>${balanceYear?`Income Year ${esc(balanceYear)}${range?` · ${esc(fmtDate(range.from))} to ${esc(fmtDate(range.to))}`:''}`:'All Income Years'}</p></div>
-    ${section('ASSETS',data.assets)}
-    ${section('LIABILITIES',data.liabilities)}
+    ${section('ASSETS',data.assets,'Asset')}
+    ${section('LIABILITIES',data.liabilities,'Liability')}
     <table class="balance-table"><tbody><tr class="total net-worth-row"><td>NET WORTH</td><td>${formatMoney(data.net)}</td></tr></tbody></table>`;
 }
 
@@ -3277,19 +3478,19 @@ function renderCategoryTree(){
   const majorHead=document.getElementById('categoryMajorHead').value;
   const tree=state.categories.filter(c=>(!type||c.type===type)&&(!selectedCategory||c.name===selectedCategory)).map(c=>{
     const id=esc(c.id);
-    const subs=c.subcategories.map(s=>`<span>${esc(s)} <button type="button" class="action-link" data-cmd="rename-subcategory" data-id="${id}" data-name="${esc(s)}">Edit</button> <button type="button" class="action-link danger" data-cmd="delete-subcategory" data-id="${id}" data-name="${esc(s)}" aria-label="Delete subcategory ${esc(s)}">×</button></span>`).join('');
-    return `<div class="category-group"><strong>${esc(c.type)} · ${esc(c.name)} <button type="button" class="action-link" data-cmd="rename-category" data-id="${id}">Edit</button></strong>${subs}<button type="button" class="action-link danger" data-cmd="delete-category" data-id="${id}">Delete Category</button></div>`;
+    const subs=c.subcategories.map(s=>`<span>${catIcon(s,c.type)}${esc(s)} <button type="button" class="action-link" data-cmd="rename-subcategory" data-id="${id}" data-name="${esc(s)}">Edit</button> <button type="button" class="action-link danger" data-cmd="delete-subcategory" data-id="${id}" data-name="${esc(s)}" aria-label="Delete subcategory ${esc(s)}">×</button></span>`).join('');
+    return `<div class="category-group"><strong>${catIcon(c.name,c.type)}${esc(c.type)} · ${esc(c.name)} <button type="button" class="action-link" data-cmd="rename-category" data-id="${id}">Edit</button></strong>${subs}<button type="button" class="action-link danger" data-cmd="delete-category" data-id="${id}">Delete Category</button></div>`;
   }).join('');
   const incomeTree=state.incomeGroups.filter(g=>(!type||g.type===type)&&
     (!(type==='Income'||type==='Expense')||majorHead==='__new__'||!majorHead||g.majorHead===majorHead)).map(g=>{
     const gid=esc(g.id);
     const cats=(g.categories||[]).filter(cat=>!selectedCategory||cat.name===selectedCategory).map(cat=>{
       const cname=esc(cat.name);
-      const subs=(cat.subcategories||[]).map(s=>`<span>${esc(s)} <button type="button" class="action-link" data-cmd="rename-income-subcategory" data-id="${gid}" data-cat="${cname}" data-name="${esc(s)}">Edit</button> <button type="button" class="action-link danger" data-cmd="delete-income-subcategory" data-id="${gid}" data-cat="${cname}" data-name="${esc(s)}" aria-label="Delete subcategory ${esc(s)}">×</button></span>`).join('');
-      return `<div class="category-group"><strong>${esc(cat.name)} <button type="button" class="action-link" data-cmd="rename-income-category" data-id="${gid}" data-name="${cname}">Edit</button></strong>${subs}<button type="button" class="action-link danger" data-cmd="delete-income-category" data-id="${gid}" data-name="${cname}">Delete Category</button></div>`;
+      const subs=(cat.subcategories||[]).map(s=>`<span>${catIcon(s,g.type)}${esc(s)} <button type="button" class="action-link" data-cmd="rename-income-subcategory" data-id="${gid}" data-cat="${cname}" data-name="${esc(s)}">Edit</button> <button type="button" class="action-link danger" data-cmd="delete-income-subcategory" data-id="${gid}" data-cat="${cname}" data-name="${esc(s)}" aria-label="Delete subcategory ${esc(s)}">×</button></span>`).join('');
+      return `<div class="category-group"><strong>${catIcon(cat.name,g.type)}${esc(cat.name)} <button type="button" class="action-link" data-cmd="rename-income-category" data-id="${gid}" data-name="${cname}">Edit</button></strong>${subs}<button type="button" class="action-link danger" data-cmd="delete-income-category" data-id="${gid}" data-name="${cname}">Delete Category</button></div>`;
     }).join('');
     if(!cats)return '';
-    return `<div class="category-group income-group"><strong>${esc(g.type)} · ${esc(g.majorHead)} <button type="button" class="action-link" data-cmd="rename-income-group" data-id="${gid}">Edit</button></strong>${cats}<button type="button" class="action-link danger" data-cmd="delete-income-group" data-id="${gid}">Delete Major Head</button></div>`;
+    return `<div class="category-group income-group"><strong>${catIcon(g.majorHead,g.type)}${esc(g.type)} · ${esc(g.majorHead)} <button type="button" class="action-link" data-cmd="rename-income-group" data-id="${gid}">Edit</button></strong>${cats}<button type="button" class="action-link danger" data-cmd="delete-income-group" data-id="${gid}">Delete Major Head</button></div>`;
   }).join('');
   document.getElementById('categoryTree').innerHTML=tree+(incomeTree?`<div class="cat-section-title">Income &amp; Expenses</div>`+incomeTree:'')||'<p class="hint">No categories match these filters.</p>';
 }
@@ -3826,7 +4027,7 @@ function reportCell(r,col){
   if(col.key==='date')return fmtDate(r.date)||'-';
   if(col.key==='amount')return pdfMoney(recordAmount(r));
   if(col.kind==='money')return Number(r[col.key])?pdfMoney(r[col.key]):'-';
-  const v=String(r[col.key]??'').trim();
+  const v=reportPlainText(r[col.key]);
   return v||'-';
 }
 
@@ -4413,7 +4614,7 @@ function renderRecentIncome(records){
   countEl.textContent=`${list.length} of ${records.length} recent`;
   tableEl.innerHTML=`<thead><tr><th scope="col">Date</th><th scope="col">Type</th><th scope="col">Category</th><th scope="col">Subcategory</th><th scope="col">Description</th><th scope="col" class="num">Amount</th></tr></thead><tbody>${list.map(r=>{
     const sign=r.type==='Income'?'+':'−';
-    return `<tr><td>${esc(fmtDate(r.date)||'—')}</td><td><span class="badge ${r.type.toLowerCase()}">${esc(r.type)}</span></td><td>${esc(r.category)}</td><td>${esc(r.subcategory)}</td><td>${esc(r.description||'—')}</td><td class="num"><strong class="amount ${r.type.toLowerCase()}">${sign}${formatMoney(r.amount)}</strong></td></tr>`;
+    return `<tr><td>${esc(fmtDate(r.date)||'—')}</td><td><span class="badge ${r.type.toLowerCase()}">${esc(r.type)}</span></td><td>${catLabel(r.category,r.type)}</td><td>${catLabel(r.subcategory,r.type)}</td><td>${esc(r.description||'—')}</td><td class="num"><strong class="amount ${r.type.toLowerCase()}">${sign}${formatMoney(r.amount)}</strong></td></tr>`;
   }).join('')||'<tr><td colspan="6"><div class="empty-state">No income or expense records in this range.</div></td></tr>'}</tbody>`;
 }
 
@@ -4516,7 +4717,7 @@ function renderIncomeTable(){
     const id=esc(r.id);
     const sign=r.type==='Income'?'+':'−';
     const receipt=(r.documentIds||[]).length?`<button type="button" class="action-link" data-cmd="open-pdf" data-id="${esc(r.documentIds[0])}">Receipt</button>`:'';
-    return `<tr style="--i:${i}"><td>${esc(fmtDate(r.date)||'—')}</td><td><span class="badge ${r.type.toLowerCase()}">${esc(r.type)}</span></td><td>${esc(r.majorHead)}</td><td>${esc(r.category)}</td><td>${esc(r.subcategory)}</td><td>${esc(r.account||'—')}</td><td>${esc(r.description||'—')}</td><td class="num"><strong class="amount ${r.type.toLowerCase()}">${sign}${formatMoney(r.amount)}</strong></td><td class="actions-cell"><button type="button" class="action-link" data-cmd="view-income" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-income" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-income" data-id="${id}">Delete</button>${receipt}</td></tr>`;
+    return `<tr style="--i:${i}"><td>${esc(fmtDate(r.date)||'—')}</td><td><span class="badge ${r.type.toLowerCase()}">${esc(r.type)}</span></td><td>${catLabel(r.majorHead,r.type)}</td><td>${catLabel(r.category,r.type)}</td><td>${catLabel(r.subcategory,r.type)}</td><td>${esc(r.account||'—')}</td><td>${esc(r.description||'—')}</td><td class="num"><strong class="amount ${r.type.toLowerCase()}">${sign}${formatMoney(r.amount)}</strong></td><td class="actions-cell"><button type="button" class="action-link" data-cmd="view-income" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-income" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-income" data-id="${id}">Delete</button>${receipt}</td></tr>`;
   }).join('')||'<tr><td colspan="9"><div class="empty-state">No income or expense records match these filters.</div></td></tr>'}</tbody>`;
   document.getElementById('incomePagination').innerHTML=pages>1?Array.from({length:pages},(_,i)=>`<button type="button" class="${i+1===incomePage?'active':''}" data-cmd="income-page" data-id="${i+1}" aria-label="Page ${i+1}">${i+1}</button>`).join(''):'';
 }
@@ -4562,9 +4763,10 @@ function renderIncomeBreakdown(){
   const data=buildIncomeBreakdown(getFilteredIncomeExpenses());
   const renderSection=(title,sec,isExpense)=>{
     if(!sec.heads.length)return '';
-    const rows=sec.heads.map(h=>`<tr class="bd-major"><td>${esc(h.name)}</td><td>${formatMoney(h.total)}</td></tr>`+
-      h.cats.map(c=>`<tr class="bd-cat"><td>${esc(c.name)}</td><td>${formatMoney(c.total)}</td></tr>`+
-        c.subs.map(s=>`<tr class="bd-sub"><td>${esc(s.name)}</td><td>${formatMoney(s.total)}</td></tr>`).join('')).join('')).join('');
+    const kind=isExpense?'Expense':'Income';
+    const rows=sec.heads.map(h=>`<tr class="bd-major"><td>${catLabel(h.name,kind)}</td><td>${formatMoney(h.total)}</td></tr>`+
+      h.cats.map(c=>`<tr class="bd-cat"><td>${catLabel(c.name,kind)}</td><td>${formatMoney(c.total)}</td></tr>`+
+        c.subs.map(s=>`<tr class="bd-sub"><td>${catLabel(s.name,kind)}</td><td>${formatMoney(s.total)}</td></tr>`).join('')).join('')).join('');
     return `<div class="breakdown-section"><div class="breakdown-title"><span class="pill ${isExpense?'expense':'income'}">${title}</span><span>${sec.count} transaction${sec.count===1?'':'s'} · ${formatMoney(sec.total)}</span></div><div class="table-wrap"><table class="breakdown-table"><thead><tr><th>Particulars</th><th>Amount</th></tr></thead><tbody>${rows}<tr class="bd-total ${isExpense?'expense-total':''}"><td>Total ${title}</td><td>${formatMoney(sec.total)}</td></tr></tbody></table></div></div>`;
   };
   const net=data.income.total-data.expense.total;
@@ -4660,6 +4862,7 @@ function openIncomeModal(id=null,defaults={}){
     majorSel.innerHTML=heads.map(h=>`<option value="${esc(h)}">${esc(h)}</option>`).join('');
     if(record&&record.type===typeSel.value&&heads.includes(record.majorHead))majorSel.value=record.majorHead;
     else if(defaults.majorHead&&heads.includes(defaults.majorHead))majorSel.value=defaults.majorHead;
+    setFieldIcon('incomeMajorHeadSelect',majorSel.value,typeSel.value);
     updateCategory();
   };
   const updateCategory=()=>{
@@ -4667,6 +4870,7 @@ function openIncomeModal(id=null,defaults={}){
     catSel.innerHTML=cats.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
     if(record&&record.majorHead===majorSel.value&&cats.includes(record.category))catSel.value=record.category;
     else if(defaults.category&&cats.includes(defaults.category))catSel.value=defaults.category;
+    setFieldIcon('incomeCategorySelect',catSel.value,typeSel.value);
     updateSubcategory();
   };
   const updateSubcategory=()=>{
@@ -4674,6 +4878,7 @@ function openIncomeModal(id=null,defaults={}){
     subSel.innerHTML=(subs.length?subs:[catSel.value].filter(Boolean)).map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
     if(record&&record.category===catSel.value&&subs.includes(record.subcategory))subSel.value=record.subcategory;
     else if(defaults.subcategory&&subs.includes(defaults.subcategory))subSel.value=defaults.subcategory;
+    setFieldIcon('incomeSubcategorySelect',subSel.value,typeSel.value);
   };
   typeSel.onchange=updateMajor;
   majorSel.onchange=updateCategory;
@@ -4752,7 +4957,8 @@ function viewIncomeRecord(id){
   const docs=(r.documentIds||[]).map(id=>state.documents.find(d=>d.id===id)).filter(Boolean);
   const docSection=docs.length?`<label class="full document-view-section">Attached Receipt<div class="document-view-list">${docs.map(d=>`<div class="document-view-item"><div class="document-info"><strong>${esc(d.name||d.title||'receipt.pdf')}</strong><span>${formatFileSize(d.size)}</span></div><div class="document-actions"><button type="button" class="btn" data-cmd="open-pdf" data-id="${esc(d.id)}">View PDF</button><button type="button" class="btn btn-primary" data-cmd="download-pdf" data-id="${esc(d.id)}">Download</button></div></div>`).join('')}</div></label>`:'';
   const show=(label,value)=>`<label><span class="k">${esc(label)}</span><strong class="view-field">${value===''||value===undefined||value===null?'—':esc(value)}</strong></label>`;
-  document.getElementById('incomeFormFields').innerHTML=`<div class="income-form-grid">${show('Type',r.type)}${show('Date',fmtDate(r.date))}${show('Major Head',r.majorHead)}${show('Category',r.category)}${show('Subcategory',r.subcategory)}${show('Account / Method',r.account)}${show('Amount',formatMoney(r.amount))}${show('Income Year',r.incomeYear)}${show('Description',r.description)}${docSection}</div>`;
+  const showCat=(label,value,type)=>`<label><span class="k">${esc(label)}</span><strong class="view-field">${catLabel(value,type)}</strong></label>`;
+  document.getElementById('incomeFormFields').innerHTML=`<div class="income-form-grid">${show('Type',r.type)}${show('Date',fmtDate(r.date))}${showCat('Major Head',r.majorHead,r.type)}${showCat('Category',r.category,r.type)}${showCat('Subcategory',r.subcategory,r.type)}${show('Account / Method',r.account)}${show('Amount',formatMoney(r.amount))}${show('Income Year',r.incomeYear)}${show('Description',r.description)}${docSection}</div>`;
   document.querySelector('#incomeForm .modal-foot').innerHTML='<button type="button" class="btn" data-close-modal>Close</button>';
   document.querySelectorAll('#incomeForm [data-close-modal]').forEach(b=>b.onclick=()=>document.getElementById('incomeModal').close());
   document.getElementById('incomeModal').showModal();
@@ -5473,7 +5679,7 @@ function renderOfficeTable(){
       ?`<button type="button" class="action-link" data-cmd="open-pdf" data-id="${esc(r.documentIds[0])}">Bill</button>`
       :'<span class="doc-none">—</span>';
     const kind=officeTypeKind(r.type);
-    return `<tr style="--i:${Math.min(i,12)}"><td>${esc(fmtDate(r.date)||'—')}</td><td><strong>${esc(r.particulars)}</strong>${r.notes?`<span class="muted-sub">${esc(r.notes)}</span>`:''}${isOfficeOpeningType(r.type)?'<span class="tag">Opening Balance</span>':''}</td><td>${esc(r.category||'—')}</td><td>${esc(r.account||'None')}${r.noAccountChange&&!isOfficeOpeningType(r.type)?'<span class="tag">no change</span>':''}</td><td class="num">${kind==='Inflow'?'—':`<strong class="amount expense">${formatMoney(r.amount)}</strong>`}</td><td class="num">${kind==='Inflow'?`<strong class="amount income">${formatMoney(r.amount)}</strong>`:'—'}</td><td class="num"><strong>${formatMoney(runMap.has(r.id)?runMap.get(r.id):opening)}</strong></td><td>${doc}</td><td class="actions-cell"><button type="button" class="action-link" data-cmd="view-office" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-office" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-office" data-id="${id}">Delete</button></td></tr>`;
+    return `<tr style="--i:${Math.min(i,12)}"><td>${esc(fmtDate(r.date)||'—')}</td><td><strong>${esc(r.particulars)}</strong>${r.notes?`<span class="muted-sub">${esc(r.notes)}</span>`:''}${isOfficeOpeningType(r.type)?'<span class="tag">Opening Balance</span>':''}</td><td>${catLabel(r.category,'Office')}</td><td>${esc(r.account||'None')}${r.noAccountChange&&!isOfficeOpeningType(r.type)?'<span class="tag">no change</span>':''}</td><td class="num">${kind==='Inflow'?'—':`<strong class="amount expense">${formatMoney(r.amount)}</strong>`}</td><td class="num">${kind==='Inflow'?`<strong class="amount income">${formatMoney(r.amount)}</strong>`:'—'}</td><td class="num"><strong>${formatMoney(runMap.has(r.id)?runMap.get(r.id):opening)}</strong></td><td>${doc}</td><td class="actions-cell"><button type="button" class="action-link" data-cmd="view-office" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-office" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-office" data-id="${id}">Delete</button></td></tr>`;
   }).join('');
   const totals=officeTotals(records);
   const totalRow=records.length
@@ -5629,6 +5835,12 @@ function openOfficeModal(id=null){
     hint.textContent=`${effect} ${label} · FY ${fy}`;
   };
   ['officeTypeSelect','officeAccount','officeDate','officeNoAccountChange'].forEach(elId=>{const el=document.getElementById(elId);if(el)el.onchange=updateHint});
+  const officeCategoryEl=document.getElementById('officeCategory');
+  if(officeCategoryEl){
+    const syncOfficeIcon=()=>setFieldIcon('officeCategory',officeCategoryEl.value,'Office');
+    officeCategoryEl.onchange=syncOfficeIcon;
+    syncOfficeIcon();
+  }
   updateHint();
   bindOfficeDocManager();
   renderOfficeDocManager();
@@ -5740,7 +5952,7 @@ function viewOfficeEntry(id){
       :record.noAccountChange
         ?'Account left unchanged'
         :`${officeTypeKind(record.type)==='Inflow'?'Adds':'Deducts'} ${formatMoney(record.amount)} ${officeTypeKind(record.type)==='Inflow'?'to':'from'} ${accountName}`;
-  document.getElementById('officeFormFields').innerHTML=`<div class="income-form-grid">${show('Type',record.type)}${show('Date',fmtDate(record.date))}${show('Particulars',record.particulars)}${show('Category',record.category)}${show('Cash & Bank Account',accountName||'Not linked')}${show('Amount',formatMoney(record.amount))}${show('Account effect',accountEffect)}${show('Financial Year',officeEntryYear(record))}${show('Reference / Notes',record.notes)}${docSection}</div>`;
+  document.getElementById('officeFormFields').innerHTML=`<div class="income-form-grid">${show('Type',record.type)}${show('Date',fmtDate(record.date))}${show('Particulars',record.particulars)}<label><span class="k">Category</span><strong class="view-field">${catLabel(record.category,'Office')}</strong></label>${show('Cash & Bank Account',accountName||'Not linked')}${show('Amount',formatMoney(record.amount))}${show('Account effect',accountEffect)}${show('Financial Year',officeEntryYear(record))}${show('Reference / Notes',record.notes)}${docSection}</div>`;
   const footer=document.querySelector('#officeForm .modal-foot');
   footer.innerHTML='<button type="button" class="btn" data-close-modal>Close</button><button type="button" class="btn btn-primary" id="officeViewEdit">Edit Entry</button>';
   footer.querySelector('[data-close-modal]').onclick=()=>document.getElementById('officeModal').close();
