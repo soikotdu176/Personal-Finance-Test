@@ -1238,6 +1238,49 @@ dialog.calc-popover:focus, dialog.calc-popover:focus-visible { outline: none; }
    the running-balance table and the per-account Cash & Bank effect cards.
    ========================================================================== */
 .office-filter-card .filter-row { align-items: flex-end; }
+/* The remaining filters are appended after the static Financial Year picker; `display: contents`
+   keeps them as direct flex items so the desktop filter row stays exactly as before. */
+.office-filter-controls { display: contents; }
+
+/* ---------- Financial Year multi-select (checkbox dropdown) ---------- */
+.multi-select { position: relative; display: flex; flex-direction: column; min-width: 168px; max-width: 100%; }
+.multi-select-trigger {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; min-width: 0; min-height: 40px; height: 40px; padding: 0 12px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--field-bg); color: var(--text); font-size: 13px; font-weight: 600;
+  text-align: left;
+  transition: border-color .2s ease, box-shadow .2s ease, background .2s ease;
+}
+.multi-select-trigger:hover { border-color: var(--primary-2); }
+.multi-select-trigger:focus-visible { outline: none; border-color: var(--primary-2); box-shadow: 0 0 0 4px rgba(99, 102, 241, .18); }
+.multi-select-trigger:disabled { opacity: .55; cursor: not-allowed; }
+.multi-select-trigger .ic { width: 14px; height: 14px; flex: none; opacity: .7; transition: transform .2s ease; }
+.multi-select.open .multi-select-trigger .ic { transform: rotate(180deg); }
+.multi-select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-select-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 46;
+  width: max-content; min-width: 100%; max-width: min(320px, calc(100vw - 32px));
+  max-height: 280px; overflow: auto; padding: 6px;
+  border: 1px solid var(--line-strong); border-radius: 12px;
+  background: var(--surface-solid); box-shadow: var(--shadow-lg);
+}
+.multi-select-option {
+  display: flex; align-items: center; gap: 9px; margin: 0; padding: 8px 10px;
+  border-radius: 9px; font-size: 12.5px; font-weight: 600; color: var(--text-2);
+  line-height: 1.25; cursor: pointer; white-space: normal; overflow-wrap: anywhere;
+}
+.multi-select-option:hover { background: var(--primary-soft); }
+.multi-select-option.all {
+  margin-bottom: 2px; color: var(--text); font-weight: 700;
+  border-bottom: 1px solid var(--line); border-radius: 9px 9px 0 0;
+}
+.multi-select-option input[type="checkbox"] {
+  flex: none; width: 16px; height: 16px; min-height: 0; margin: 0; padding: 0;
+  border-radius: 4px; accent-color: var(--primary); cursor: pointer;
+}
+.multi-select-option > span { min-width: 0; }
+.multi-select-empty { padding: 8px 10px; font-size: 11.5px; line-height: 1.35; color: var(--muted); }
 .office-opening-field {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   font-size: 11px; font-weight: 700; color: var(--muted);
@@ -1389,6 +1432,30 @@ dialog.modal.office-import-modal { width: min(520px, calc(100% - 28px)); }
   .office-filter-card .filter-row input { flex-basis: 100%; }
   #officeModal .office-check-row { font-size: 11.5px; }
 }
+/* Financial Year multi-select on mobile: full-width, 38px trigger, wrapping value text and an
+   in-flow menu so nothing is clipped, overlapped or pushed off-screen. */
+@media (max-width: 768px) {
+  .office-year-multi { flex: 1 1 100%; width: 100%; min-width: 0; max-width: 100%; }
+  #officePurchasesPage .office-filter-card .multi-select-trigger {
+    width: 100%; min-width: 0; max-width: 100%; height: auto; min-height: 38px;
+    padding: 7px 10px; gap: 8px; font-size: 12px; line-height: 1.25; border-radius: 10px;
+  }
+  #officePurchasesPage .office-filter-card .multi-select-trigger .ic { width: 13px; height: 13px; }
+  .office-year-multi .multi-select-value { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+  .office-year-multi .multi-select-menu {
+    position: static; width: 100%; min-width: 0; max-width: 100%;
+    margin-top: 6px; max-height: 240px; padding: 5px;
+  }
+  .office-year-multi .multi-select-option {
+    gap: 8px; min-height: 38px; padding: 8px 10px;
+    font-size: 12px; line-height: 1.3; white-space: normal; overflow-wrap: anywhere;
+  }
+  .office-filter-card .filter-row .multi-select-menu input[type="checkbox"] {
+    flex: none; width: 16px; height: 16px; min-height: 0; margin: 0; padding: 0;
+  }
+}
+
+
 
 /* ==========================================================================
    Compact mobile entry sheets — max-width: 768px only
@@ -1763,4 +1830,97 @@ td .cat-label, th .cat-label { white-space: normal; }
 html.is-printing .cat-icon, html.is-printing .field-icon-chip { display: none !important; }
 body.report-mode .cat-icon, body.report-mode .field-icon-chip { display: none !important; }
 
+
+
+/* ==========================================================================
+   Office Purchase & Bill — Financial Year dropdown layering
+   --------------------------------------------------------------------------
+   The filter bar is a glass `.card`, and `backdrop-filter` makes it its own
+   stacking context; the ledger card (`.office-table-card`) is a later sibling,
+   so the absolutely positioned Financial Year list used to be painted UNDER
+   the table and looked cut off. Every level of the picker now owns a
+   position + z-index of 1000 or higher, so the whole list always paints on
+   top of the summary cards, the ledger table and any card underneath.
+
+   On desktop the open list is additionally moved by app.js into
+   `.office-overlay-layer` (a body-level, fixed layer) and placed with
+   `position: fixed`, so no transform, backdrop-filter, overflow or sticky
+   ancestor can clip it. Mobile keeps the compact in-flow list declared in
+   the media query above — nothing here changes the compact mobile layout.
+   ========================================================================== */
+/* The ledger page is its own stacking context, so the elevated filter bar stays
+   confined to this page: content still scrolls *under* the sticky topbar (30),
+   the drawer (60) and the toast region (200), while inside the page the filter
+   bar sits above the summary cards and the ledger card. */
+#officePurchasesPage {
+  position: relative;
+  z-index: 1;
+}
+#officeFilterBar {
+  position: relative;
+  z-index: 1000;
+}
+#officeFilterBar .filter-row {
+  position: relative;
+  z-index: 1001;
+}
+#officeFilterBar .office-year-multi,
+#officeFilterBar .multi-select {
+  position: relative;
+  z-index: 1002;
+}
+#officeFilterBar .multi-select.open { z-index: 1003; }
+#officeFilterBar .multi-select-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 1004;
+}
+#officeFilterBar .multi-select.open .multi-select-menu { z-index: 1004; }
+
+/* `office-fy-open` is set on <body> by app.js while the list is open: the page
+   keeps its own stacking context so the picker's layers stay confined to it. */
+body.office-fy-open #officePurchasesPage { z-index: 1; }
+
+/* Body-level layer the open list is moved into: full-viewport, never clipped,
+   click-through except for the list itself. */
+.office-overlay-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1010;
+  pointer-events: none;
+}
+.office-overlay-layer .multi-select-menu.office-portal {
+  position: fixed;
+  z-index: 1;
+  margin: 0;
+  width: max-content;
+  min-width: 168px;
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: 320px;
+  overflow: auto;
+  pointer-events: auto;
+}
+
+/* Mobile: the list stays in flow inside the filter card (compact, no overlay).
+   The page keeps its own stacking context, so the picker's 1000+ z-index can
+   never rise above the sidebar drawer — no reset needed. */
+@media (max-width: 768px) {
+  #officeFilterBar .filter-row,
+  #officeFilterBar .office-year-multi,
+  #officeFilterBar .multi-select,
+  #officeFilterBar .multi-select.open { z-index: auto; }
+  #officeFilterBar .office-year-multi .multi-select-menu:not(.office-portal),
+  #officeFilterBar .multi-select.open .multi-select-menu:not(.office-portal) {
+    position: static;
+    top: auto;
+    left: auto;
+    z-index: auto;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    margin-top: 6px;
+    max-height: 240px;
+  }
+}
 

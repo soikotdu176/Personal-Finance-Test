@@ -32,7 +32,8 @@ let editingOfficeId = null;
 let savingOffice = false;
 let officePage = 1;
 let officeYearChosen = false;
-const officeFilters = { year: '', type: '', account: '', category: '', search: '' };
+const officeFilters = { years: null, type: '', account: '', category: '', search: '' };
+let officeYearMenuOpen = false;
 const officeDocDraft = { existing: [], removed: new Set(), added: [] };
 
 const defaultCategories = [
@@ -844,6 +845,8 @@ function toggleDrawer(){
 }
 function showPage(page){
   if(!PAGE_TITLES[page])return;
+  // The Financial Year list may live in the body-level overlay: never let it survive a page change.
+  if(page!=='officePurchases')closeOfficeYearMenu();
   currentPage=page;
   mobileCalendarOpen=false;
   document.getElementById('mobileCalendarPage').classList.add('hidden');
@@ -5155,6 +5158,71 @@ function officeEntryYear(entry){
 function officeYearList(){
   return officeIncomeYears();
 }
+/* --------------------------------------------------------------------------
+   Multi-year Financial Year selection (Office Purchase & Bill)
+   "All Financial Years" (or any combination of years) aggregates the ledger
+   into one continuous period: the opening balance is the earliest selected
+   year's opening, and the closing balance is recalculated from every entry in
+   that period, so carry-forwards are never counted twice.
+   -------------------------------------------------------------------------- */
+function ensureOfficeYearSelection(){
+  const years=officeYearList();
+  if(!officeYearChosen){
+    if(years.length){officeFilters.years=years.slice();officeYearChosen=true}
+    else if(!Array.isArray(officeFilters.years))officeFilters.years=[];
+    return;
+  }
+  if(!Array.isArray(officeFilters.years)){officeFilters.years=years.slice();return}
+  const valid=officeFilters.years.filter(y=>years.includes(y));
+  if(valid.length!==officeFilters.years.length)officeFilters.years=valid;
+}
+/** Selected years in the Settings order (newest first). Empty = nothing selected. */
+function officeSelectedYears(){
+  ensureOfficeYearSelection();
+  const years=officeYearList();
+  return years.filter(y=>(officeFilters.years||[]).includes(y));
+}
+function officeYearSelectionAll(){
+  const years=officeYearList();
+  if(!years.length)return true;
+  return officeSelectedYears().length===years.length;
+}
+/** Selected years oldest -> newest, which is the order a period is read in. */
+function officePeriodYears(){
+  return officeSelectedYears().slice().sort(officeYearSort);
+}
+/** Human label for the active period, e.g. "FY 2024-25 → 2025-26". */
+function officePeriodLabel(){
+  const years=officePeriodYears();
+  if(!years.length)return 'No Financial Year selected';
+  if(years.length===1)return `FY ${years[0]}`;
+  return `FY ${years[0]} → ${years[years.length-1]}`;
+}
+/** Opening balance carry-forward of the whole selected period: the oldest year's opening. */
+function officePeriodOpening(){
+  const years=officePeriodYears();
+  return years.length?officeOpeningBalance(years[0]):0;
+}
+/**
+ * Every entry inside the selected period. Opening-balance rows of later years are
+ * carry-forwards already represented by officePeriodOpening(), so they are skipped -
+ * that is what keeps a multi-year total from double counting the same money.
+ */
+function officePeriodEntries(){
+  const years=officePeriodYears();
+  if(!years.length)return [];
+  const first=years[0];
+  return (state.officePurchases||[]).filter(entry=>{
+    const year=officeEntryYear(entry);
+    if(!years.includes(year))return false;
+    if(isOfficeOpeningType(entry.type)&&year!==first)return false;
+    return true;
+  });
+}
+/** Closing balance of the selected period: oldest opening + every Outflow / Inflow in it. */
+function officePeriodClosing(){
+  return officePeriodOpening()+officeTotals(officePeriodEntries().filter(r=>!isOfficeOpeningType(r.type))).net;
+}
 /** Identity of a Cash & Bank account name: trimmed, single-spaced and case-insensitive, so
  *  " bKash ", "Bkash" and "bKASH" are one and the same account everywhere on this page. */
 const officeAccountKey=value=>String(value??'').replace(/\s+/g,' ').trim().toLowerCase();
@@ -5700,7 +5768,7 @@ async function importOfficeWorkbook(workbook,replaceId,fileName,options={}){
   await reconcileOfficeCarryForwards();
   // Show the newest imported FY straight away instead of an empty current-year ledger.
   const newestFy=[...years].sort((a,b)=>String(b).localeCompare(String(a)))[0];
-  if(newestFy){officeFilters.year=newestFy;officeYearChosen=true}
+  if(newestFy){officeFilters.years=[newestFy];officeYearChosen=true}
   renderAll();
   const bits=[`${rows.length} row${rows.length===1?'':'s'} imported`];
   if(duplicates)bits.push(`${duplicates} duplicate${duplicates===1?'':'s'} skipped`);
@@ -5816,13 +5884,12 @@ async function confirmOfficeImport(){
 /* --- Office Purchase & Bill page --- */
 function officeFilterText(){
   const f=officeFilters;
-  return ['FY',f.year||'All','Type',f.type||'All','Cash & Bank',f.account==='__none__'?'Not linked':(f.account||'All'),'Category',f.category||'All','Search',f.search||'All'].join('  |  ');
+  return ['FY',officePeriodLabel(),'Type',f.type||'All','Cash & Bank',f.account==='__none__'?'Not linked':(f.account||'All'),'Category',f.category||'All','Search',f.search||'All'].join('  |  ');
 }
 function getFilteredOfficeEntries(){
   const f=officeFilters;
   const search=String(f.search||'').toLowerCase();
-  return (state.officePurchases||[]).filter(r=>{
-    if(f.year&&officeEntryYear(r)!==normIncomeYear(f.year))return false;
+  return officePeriodEntries().filter(r=>{
     if(f.type&&r.type!==f.type)return false;
     if(f.account==='__none__'){if(r.account)return false}
     else if(f.account&&officeAccountKey(r.account)!==officeAccountKey(f.account))return false;
@@ -5834,36 +5901,199 @@ function getFilteredOfficeEntries(){
     return true;
   });
 }
-/** Entries of the selected fiscal year (ignores the type/account/search filters). */
+/** Entries inside the selected period (ignores the type/account/search filters). */
 function officeYearEntries(){
-  const year=normIncomeYear(officeFilters.year||officeCurrentYear());
-  return (state.officePurchases||[]).filter(r=>officeEntryYear(r)===year);
+  return officePeriodEntries();
 }
+function officeHasFilters(){
+  const f=officeFilters;
+  return !officeYearSelectionAll()||!!(f.type||f.account||f.category||f.search);
+}
+/* --- Financial Year multi-select (dropdown with checkboxes + "All Financial Years") --- */
+/* The list itself lives inside the filter card, which is a glass `.card`: `backdrop-filter`
+   plus the following ledger card used to paint it underneath the table. `styles.css` raises the
+   filter bar / picker z-index, and on desktop the open list is moved into a body-level fixed
+   layer so no transform, backdrop-filter, sticky topbar or overflow box can clip it. */
+const officeYearDesktopQuery=window.matchMedia?window.matchMedia('(min-width: 769px)'):{matches:true,addEventListener:null};
+/** Body-level, viewport-sized layer the open list is portaled into (declared in index.html). */
+function officeYearOverlay(){
+  let layer=document.getElementById('officeYearOverlay');
+  if(!layer){
+    layer=document.createElement('div');
+    layer.id='officeYearOverlay';
+    layer.className='office-overlay-layer';
+    document.body.appendChild(layer);
+  }
+  return layer;
+}
+/** Places the portaled list under its trigger (above it when there is no room) inside the viewport. */
+function placeOfficeYearMenu(){
+  const menu=document.getElementById('officeYearMenu');
+  const trigger=document.getElementById('officeYearFilter');
+  if(!menu||!trigger||!menu.classList.contains('office-portal'))return;
+  const rect=trigger.getBoundingClientRect();
+  const gap=6;
+  const margin=10;
+  const viewportW=window.innerWidth||document.documentElement.clientWidth;
+  const viewportH=window.innerHeight||document.documentElement.clientHeight;
+  const maxWidth=Math.max(168,Math.min(320,viewportW-margin*2));
+  menu.style.width='max-content';
+  menu.style.minWidth=`${Math.round(Math.min(Math.max(rect.width,168),maxWidth))}px`;
+  menu.style.maxWidth=`${Math.round(maxWidth)}px`;
+  const spaceBelow=viewportH-rect.bottom-gap-margin;
+  const spaceAbove=rect.top-gap-margin;
+  const openUp=spaceBelow<180&&spaceAbove>spaceBelow;
+  const available=Math.max(140,openUp?spaceAbove:spaceBelow);
+  menu.style.maxHeight=`${Math.round(Math.min(320,available))}px`;
+  const width=Math.min(maxWidth,Math.max(rect.width,menu.offsetWidth||0));
+  const left=Math.min(Math.max(margin,rect.left),Math.max(margin,viewportW-margin-width));
+  menu.style.left=`${Math.round(left)}px`;
+  const height=menu.offsetHeight||0;
+  const top=openUp?rect.top-gap-height:rect.bottom+gap;
+  menu.style.top=`${Math.round(Math.min(Math.max(margin,top),Math.max(margin,viewportH-margin-height)))}px`;
+}
+function closeOfficeYearMenu(){
+  if(!officeYearMenuOpen)return;
+  officeYearMenuOpen=false;
+  applyOfficeYearMenuState();
+}
+function applyOfficeYearMenuState(){
+  const multi=document.getElementById('officeYearMulti');
+  const menu=document.getElementById('officeYearMenu');
+  const trigger=document.getElementById('officeYearFilter');
+  const portal=!!(officeYearMenuOpen&&menu&&trigger&&officeYearDesktopQuery.matches);
+  if(multi)multi.classList.toggle('open',officeYearMenuOpen);
+  if(menu){
+    if(portal){
+      const overlay=officeYearOverlay();
+      if(menu.parentElement!==overlay)overlay.appendChild(menu);
+      menu.classList.add('office-portal');
+      menu.classList.remove('hidden');
+      document.body.classList.add('office-fy-open');
+      placeOfficeYearMenu();
+    }else{
+      menu.classList.remove('office-portal');
+      menu.style.cssText='';
+      if(multi&&menu.parentElement!==multi)multi.appendChild(menu);
+      menu.classList.toggle('hidden',!officeYearMenuOpen);
+      document.body.classList.remove('office-fy-open');
+    }
+  }else{
+    document.body.classList.remove('office-fy-open');
+  }
+  if(trigger)trigger.setAttribute('aria-expanded',officeYearMenuOpen?'true':'false');
+}
+if(officeYearDesktopQuery.addEventListener){
+  officeYearDesktopQuery.addEventListener('change',()=>{if(officeYearMenuOpen)applyOfficeYearMenuState()});
+}
+/* Keep the fixed list glued to its trigger while the page or an inner box scrolls. */
+window.addEventListener('scroll',()=>{if(officeYearMenuOpen)placeOfficeYearMenu()},{passive:true,capture:true});
+window.addEventListener('resize',()=>{if(officeYearMenuOpen)placeOfficeYearMenu()},{passive:true});
+
+function renderOfficeYearFilter(){
+  ensureOfficeYearSelection();
+  const trigger=document.getElementById('officeYearFilter');
+  const value=document.getElementById('officeYearValue');
+  const menu=document.getElementById('officeYearMenu');
+  const years=officeYearList();
+  const selected=officeSelectedYears();
+  const all=officeYearSelectionAll();
+  if(value){
+    value.textContent=!years.length
+      ?'No Financial Years configured'
+      :all
+        ?'All Financial Years'
+        :selected.length===1
+          ?`FY ${selected[0]}`
+          :selected.length
+            ?`${selected.length} Financial Years`
+            :'Select a Financial Year';
+    value.title=years.length?(selected.slice().sort(officeYearSort).map(y=>`FY ${y}`).join(', ')||'None selected'):'';
+  }
+  if(trigger)trigger.disabled=!years.length;
+  if(menu){
+    menu.innerHTML=years.length
+      ?[`<label class="multi-select-option all"><input type="checkbox" data-office-year="__all__" ${all?'checked':''}><span>All Financial Years</span></label>`]
+        .concat(years.map(y=>`<label class="multi-select-option"><input type="checkbox" data-office-year="${esc(y)}" ${selected.includes(y)?'checked':''}><span>FY ${esc(y)}</span></label>`))
+        .join('')
+      :'<div class="multi-select-empty">Add Financial Years in Settings to filter this ledger.</div>';
+    menu.onchange=event=>{
+      const input=event.target.closest('input[data-office-year]');
+      if(input)applyOfficeYearToggle(input);
+    };
+  }
+  if(trigger)trigger.onclick=()=>{officeYearMenuOpen=!officeYearMenuOpen;applyOfficeYearMenuState()};
+  applyOfficeYearMenuState();
+}
+/** Ticking "All Financial Years" selects every year; unticking it clears the selection. */
+function applyOfficeYearToggle(input){
+  const raw=input.getAttribute('data-office-year');
+  if(raw===null)return;
+  const years=officeYearList();
+  const selected=officeSelectedYears();
+  if(raw==='__all__'){
+    officeFilters.years=input.checked?years.slice():[];
+  }else{
+    const set=new Set(selected);
+    if(input.checked)set.add(raw);else set.delete(raw);
+    officeFilters.years=years.filter(y=>set.has(y));
+  }
+  officeYearChosen=true;
+  officePage=1;
+  renderOfficePage();
+}
+document.addEventListener('click',event=>{
+  if(!officeYearMenuOpen)return;
+  const multi=document.getElementById('officeYearMulti');
+  const menu=document.getElementById('officeYearMenu');
+  if(multi&&multi.contains(event.target))return;
+  // The open list can be portaled to the body-level overlay, so it is checked separately.
+  if(menu&&menu.contains(event.target))return;
+  officeYearMenuOpen=false;
+  applyOfficeYearMenuState();
+});
+document.addEventListener('keydown',event=>{
+  if(event.key!=='Escape'||!officeYearMenuOpen)return;
+  officeYearMenuOpen=false;
+  applyOfficeYearMenuState();
+});
+
 function renderOfficeFilters(){
-  if(!officeYearChosen){officeFilters.year=officeCurrentYear();officeYearChosen=true}
+  ensureOfficeYearSelection();
   const host=document.getElementById('officeFilters');
   if(!host)return;
-  const years=officeYearList();
-  if(officeFilters.year&&!years.includes(officeFilters.year))officeFilters.year=years[0]||'';
+  // Safety net for a stale cached index.html: rebuild the year picker shell if it is missing.
+  if(!document.getElementById('officeYearFilter')){
+    // A list portaled by a previous render would survive the rebuild as a visible duplicate.
+    const stale=document.getElementById('officeYearMenu');
+    if(stale&&stale.classList.contains('office-portal'))stale.remove();
+    const multi=document.createElement('div');
+    multi.className='multi-select office-year-multi';
+    multi.id='officeYearMulti';
+    multi.innerHTML='<button type="button" class="multi-select-trigger" id="officeYearFilter" aria-haspopup="true" aria-expanded="false" aria-controls="officeYearMenu" aria-label="Financial Year — choose one or more years"><span class="multi-select-value" id="officeYearValue">All Financial Years</span><svg class="ic" aria-hidden="true"><use href="#i-down"/></svg></button><div class="multi-select-menu hidden" id="officeYearMenu" role="group" aria-label="Financial Years"></div>';
+    host.insertBefore(multi,host.firstChild);
+  }
+  renderOfficeYearFilter();
+  let controls=host.querySelector('.office-filter-controls');
+  if(!controls){
+    controls=document.createElement('div');
+    controls.className='office-filter-controls';
+    host.appendChild(controls);
+  }
   const f=officeFilters;
-  const fy=f.year||officeCurrentYear();
-  const opening=officeOpeningBalance(fy);
   const option=(value,label,selected)=>`<option value="${esc(value)}" ${selected?'selected':''}>${esc(label)}</option>`;
   const accounts=officeAccountChoices();
   const categories=officeCategoryChoices();
-  const anyFilter=!!(f.type||f.account||f.category||f.search);
-  host.innerHTML=`<div class="filter-row">
-    <select id="officeYearFilter" aria-label="Financial year">${years.map(y=>option(y,y,f.year===y)).join('')}</select>
+  const anyFilter=officeHasFilters();
+  controls.innerHTML=`
     <select id="officeTypeFilter" aria-label="Entry type">${option('','All Types',!f.type)}${option('Office Purchase (Cash Outflow)','Office Purchase (Cash Outflow)',f.type==='Office Purchase (Cash Outflow)')}${option('Bill Received (Cash Inflow)','Bill Received (Cash Inflow)',f.type==='Bill Received (Cash Inflow)')}${option('Opening Balance (Outflow)','Opening Balance (Outflow)',f.type==='Opening Balance (Outflow)')}${option('Opening Balance (Inflow)','Opening Balance (Inflow)',f.type==='Opening Balance (Inflow)')}</select>
     <select id="officeAccountFilter" aria-label="Cash and bank account">${option('','All Cash & Bank Accounts',!f.account)}${option('__none__','Not linked to an account',f.account==='__none__')}${accounts.map(a=>option(a,a,f.account===a)).join('')}</select>
     <select id="officeCategoryFilter" aria-label="Category">${option('','All Categories',!f.category)}${categories.map(c=>option(c,c,f.category===c)).join('')}</select>
     <input class="search" id="officeSearch" placeholder="Search office entries…" aria-label="Search office entries" value="${esc(f.search)}">
-    <button type="button" class="btn filter-reset" id="officeClear" ${anyFilter?'':'disabled'}>Clear Filters</button>
-  </div>`;
-  host.querySelectorAll('select').forEach(el=>el.classList.toggle('is-active',!!el.value&&el.id!=='officeYearFilter'));
+    <button type="button" class="btn filter-reset" id="officeClear" ${anyFilter?'':'disabled'}>Clear Filters</button>`;
+  host.querySelectorAll('select').forEach(el=>el.classList.toggle('is-active',!!el.value));
   const rerender=()=>{officePage=1;renderOfficePage()};
   const bind=(id,key)=>{const el=document.getElementById(id);if(el)el.onchange=()=>{officeFilters[key]=el.value;rerender()}};
-  bind('officeYearFilter','year');
   bind('officeTypeFilter','type');
   bind('officeAccountFilter','account');
   bind('officeCategoryFilter','category');
@@ -5871,45 +6101,52 @@ function renderOfficeFilters(){
   if(searchEl){let timer=null;searchEl.oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>{
     officeFilters.search=searchEl.value;officePage=1;
     const clear=document.getElementById('officeClear');
-    if(clear)clear.disabled=!(officeFilters.type||officeFilters.account||officeFilters.category||officeFilters.search);
+    if(clear)clear.disabled=!officeHasFilters();
     renderOfficeSummary();renderOfficeTable();renderOfficeAccounts();
   },180)}}
   const clear=document.getElementById('officeClear');
-  if(clear)clear.onclick=()=>{officeFilters.type='';officeFilters.account='';officeFilters.category='';officeFilters.search='';rerender()};
+  if(clear)clear.onclick=()=>{
+    officeFilters.years=officeYearList();
+    officeYearChosen=true;
+    officeFilters.type='';officeFilters.account='';officeFilters.category='';officeFilters.search='';
+    officeYearMenuOpen=false;
+    rerender();
+  };
 }
 
 function renderOfficeSummary(){
-  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
-  const entries=officeYearEntries();
-  const opening=officeOpeningBalance(fy);
+  const period=officePeriodLabel();
+  const entries=officePeriodEntries();
+  const opening=officePeriodOpening();
   const totals=officeTotals(entries);
-  const balance=totals.net;
+  const closing=officePeriodClosing();
   const card=(i,iconName,label,value,kpi,kpiInk,cls,meta)=>`<div class="summary-card" style="--i:${i};--kpi:${kpi};--kpi-ink:${kpiInk}"><div class="summary-icon">${icon(iconName)}</div><div><p>${label}</p><strong class="kpi-value ${cls||''}">${formatMoney(value)}</strong><span class="office-card-meta">${meta}</span></div></div>`;
   const cashMeta=totals.cashOutflow||totals.cashInflow
     ?`Paid ${formatMoney(totals.cashOutflow)} · Received ${formatMoney(totals.cashInflow)}`
     :'No entries linked to an account';
   document.getElementById('officeSummaryCards').innerHTML=[
-    card(0,'down','Total Outflow',totals.outflow,'var(--rose-soft)','#e11d48','',`${entries.filter(r=>r.type!=='Inflow').length} payment(s) · FY ${fy}`),
-    card(1,'up','Total Inflow',totals.inflow,'var(--emerald-soft)','#059669','',`${entries.filter(r=>officeTypeKind(r.type)==='Inflow').length} receipt(s) · FY ${fy}`),
-    card(2,'scale','Net Balance',balance,'var(--primary-soft)','var(--primary-2)',balance>=0?'kpi-pos':'kpi-neg',`Opening ${formatMoney(opening)}`),
+    card(0,'down','Total Outflow',totals.outflow,'var(--rose-soft)','#e11d48','',`${entries.filter(r=>r.type!=='Inflow').length} payment(s) · ${period}`),
+    card(1,'up','Total Inflow',totals.inflow,'var(--emerald-soft)','#059669','',`${entries.filter(r=>officeTypeKind(r.type)==='Inflow').length} receipt(s) · ${period}`),
+    card(2,'scale','Closing Balance',closing,'var(--primary-soft)','var(--primary-2)',closing>=0?'kpi-pos':'kpi-neg',`Opening ${formatMoney(opening)} · Net ${formatMoney(totals.net)}`),
     card(3,'layers','Cash &amp; Bank Effect',totals.cashEffect,'rgba(245,158,11,.14)','#d97706',totals.cashEffect>=0?'kpi-pos':'kpi-neg',cashMeta)
   ].join('');
 }
 function renderOfficeTable(){
-  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
-  const yearEntries=officeYearEntries();
+  const period=officePeriodLabel();
+  const yearEntries=officePeriodEntries();
   const records=getFilteredOfficeEntries().sort(officeEntryOrder);
-  const opening=officeOpeningBalance(fy);
-  // The balance column always reflects the whole FY ledger, even when type/account filters hide rows.
+  const opening=officePeriodOpening();
+  const closing=officePeriodClosing();
+  // The balance column always reflects the whole selected period, even when type/account filters hide rows.
   const runMap=officeRunningMap(yearEntries.filter(r=>!isOfficeOpeningType(r.type)),opening);
   const pageSize=25,pages=Math.max(1,Math.ceil(records.length/pageSize));
   officePage=Math.min(Math.max(1,officePage),pages);
   const start=(officePage-1)*pageSize;
   const pageRows=records.slice(start,start+pageSize);
   const title=document.getElementById('officeTableTitle');
-  if(title)title.textContent=`Office Purchase & Bill · ${fy}`;
+  if(title)title.textContent=`Office Purchase & Bill · ${period}`;
   const count=document.getElementById('officeRecordCount');
-  if(count)count.textContent=`${records.length} entr${records.length===1?'y':'ies'} shown · ${yearEntries.length} in FY ${fy} · page ${officePage} of ${pages}`;
+  if(count)count.textContent=`${records.length} entr${records.length===1?'y':'ies'} shown · ${yearEntries.length} in ${period} · page ${officePage} of ${pages}`;
   const table=document.getElementById('officeTable');
   if(!table)return;
   const openingRow='';
@@ -5923,9 +6160,12 @@ function renderOfficeTable(){
   }).join('');
   const totals=officeTotals(records);
   const totalRow=records.length
-    ?`<tr class="office-total-row"><td colspan="4">Total (filtered)</td><td class="num">${formatMoney(totals.outflow)}</td><td class="num">${formatMoney(totals.inflow)}</td><td class="num">${formatMoney(totals.net)}</td><td colspan="2"></td></tr>`
+    ?`<tr class="office-total-row"><td colspan="4">Total · ${esc(period)}</td><td class="num">${formatMoney(totals.outflow)}</td><td class="num">${formatMoney(totals.inflow)}</td><td class="num" title="Closing balance of the selected period">${formatMoney(closing)}</td><td colspan="2"></td></tr>`
     :'';
-  table.innerHTML=`<thead><tr><th scope="col">Date</th><th scope="col">Particulars</th><th scope="col">Category</th><th scope="col">Cash &amp; Bank</th><th scope="col" class="num">Outflow</th><th scope="col" class="num">Inflow</th><th scope="col" class="num">Balance</th><th scope="col">Bill</th><th scope="col">Actions</th></tr></thead><tbody>${openingRow}${body||`<tr><td colspan="9"><div class="empty-state">No office entries match these filters. Add an entry or import the FY workbook from Settings.</div></td></tr>`}${totalRow}</tbody>`;
+  const emptyMessage=officePeriodYears().length
+    ?'No office entries match these filters. Add an entry or import the FY workbook from Settings.'
+    :'Select at least one Financial Year (or All Financial Years) to view this ledger.';
+  table.innerHTML=`<thead><tr><th scope="col">Date</th><th scope="col">Particulars</th><th scope="col">Category</th><th scope="col">Cash &amp; Bank</th><th scope="col" class="num">Outflow</th><th scope="col" class="num">Inflow</th><th scope="col" class="num">Balance</th><th scope="col">Bill</th><th scope="col">Actions</th></tr></thead><tbody>${openingRow}${body||`<tr><td colspan="9"><div class="empty-state">${emptyMessage}</div></td></tr>`}${totalRow}</tbody>`;
   const pager=document.getElementById('officePagination');
   if(pager)pager.innerHTML=pages>1?Array.from({length:pages},(_,i)=>`<button type="button" class="${i+1===officePage?'active':''}" data-cmd="office-page" data-id="${i+1}" aria-label="Page ${i+1}">${i+1}</button>`).join(''):'';
 }
@@ -5933,8 +6173,8 @@ function renderOfficeTable(){
 function renderOfficeAccounts(){
   const host=document.getElementById('officeAccountSummary');
   if(!host)return;
-  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
-  const entries=officeYearEntries();
+  const period=officePeriodLabel();
+  const entries=officePeriodEntries();
   if(!entries.length){host.innerHTML='';return}
   const index=officeAccountIndex();
   const groups=new Map();
@@ -5958,7 +6198,7 @@ function renderOfficeAccounts(){
     const meta=`${g.count} entr${g.count===1?'y':'ies'}${g.skipped?` · ${g.skipped} no change`:''}`;
     return `<div class="office-account-card"><div class="office-account-top"><strong>${esc(g.name)}</strong><span>${meta}</span></div><div class="office-account-figures"><span class="out">−${formatMoney(g.outflow)}</span><span class="in">+${formatMoney(g.inflow)}</span></div><div class="office-account-net ${effect>=0?'kpi-pos':'kpi-neg'}">Net effect ${effect>=0?'+':'−'}${formatMoney(Math.abs(effect))}</div></div>`;
   }).join('');
-  host.innerHTML=`<div class="office-account-head"><h3>Cash &amp; Bank Effect · ${esc(fy)}</h3><p>Each linked account moves by these amounts on the Dashboard and Balance Sheet — nothing is written twice.</p></div><div class="office-account-grid">${cards}</div>`;
+  host.innerHTML=`<div class="office-account-head"><h3>Cash &amp; Bank Effect · ${esc(period)}</h3><p>Each linked account moves by these amounts on the Dashboard and Balance Sheet — nothing is written twice.</p></div><div class="office-account-grid">${cards}</div>`;
 }
 function renderOfficePage(){
   renderOfficeFilters();
@@ -6238,15 +6478,17 @@ function officeExcelWorkbook(){
 }
 function exportOfficeExcel(){
   if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
-  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
+  const period=officePeriodLabel();
+  const periodSlug=officePeriodYears().length===1?officePeriodYears()[0]:'All-FY';
   const list=getFilteredOfficeEntries().sort(officeEntryOrder);
   if(!list.length){toast('No office entries match the current filters.',true);return}
-  const opening=officeOpeningBalance(fy);
+  const opening=officePeriodOpening();
+  const closing=officePeriodClosing();
   const totals=officeTotals(list);
-  // Balances stay on the whole FY ledger, so a filtered export still shows the true position.
+  // Balances stay on the whole selected period, so a filtered export still shows the true position.
   const runMap=officeRunningMap(officeYearEntries().filter(r=>!isOfficeOpeningType(r.type)),opening);
   const runBalance=r=>runMap.has(r.id)?runMap.get(r.id):opening;
-  const rows=[['Office Purchase & Bill'],[`Financial Year: ${fy}`],[`Generated ${generatedStamp()}`],[],
+  const rows=[['Office Purchase & Bill'],[`Financial Year: ${period}`],[`Generated ${generatedStamp()}`],[],
     ['Filter',officeFilterText()],['Opening Balance',opening],[],['Date','Particulars','Category','Cash & Bank Account','Outflow','Inflow','Balance','Bill Attached','Notes']];
   rows.push(['','Opening Balance'+(opening<0?' (Inflow)':' (Outflow)'),'','','','',opening,'','']);
   for(const r of list){
@@ -6255,6 +6497,7 @@ function exportOfficeExcel(){
       runBalance(r),(r.documentIds||[]).length?'Yes':'No',r.notes||'']);
   }
   rows.push(['Total (filtered)','','','',totals.outflow,totals.inflow,totals.net,'','']);
+  rows.push(['Closing Balance','','','','','',closing,'','']);
   rows.push([]);rows.push(['Cash & Bank Effect (derived from this ledger only)']);
   rows.push(['Account','Outflow','Inflow','Net Effect','Entries']);
   const byAccount=new Map();
@@ -6269,8 +6512,8 @@ function exportOfficeExcel(){
   const ws=XLSX.utils.aoa_to_sheet(rows);
   ws['!cols']=[{wch:12},{wch:38},{wch:18},{wch:22},{wch:14},{wch:14},{wch:14},{wch:12},{wch:28}];
   const workbook=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook,ws,`Office ${fy}`.slice(0,31));
-  XLSX.writeFile(workbook,`Office-Purchase-Bill-${fy}-${todayISO()}.xlsx`);
+  XLSX.utils.book_append_sheet(workbook,ws,`Office ${periodSlug}`.slice(0,31));
+  XLSX.writeFile(workbook,`Office-Purchase-Bill-${periodSlug}-${todayISO()}.xlsx`);
   toast('Office ledger exported to Excel');
 }
 function exportOfficeWorkbook(){
@@ -6374,7 +6617,8 @@ async function officeTemplateBytesWithValidations(bytes,specs){
 async function downloadOfficeTemplate(){
   if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
   const years=officeYearList();
-  const fy=normIncomeYear(officeFilters.year||officeCurrentYear())||years[0]||'';
+  const selected=officePeriodYears();
+  const fy=(selected.length===1?selected[0]:officeCurrentYear())||years[0]||'';
   const current=parseInt(String(fy).slice(0,4),10)||new Date().getFullYear();
   const targets=[`${current}-${String((current+1)%100).padStart(2,'0')}`,`${current+1}-${String((current+2)%100).padStart(2,'0')}`];
   const workbook=XLSX.utils.book_new();
@@ -6411,15 +6655,17 @@ async function downloadOfficeTemplate(){
 async function exportOfficePdf(){
   const JsPDF=window.jspdf&&window.jspdf.jsPDF;
   if(!JsPDF){toast('PDF library is unavailable. Check your internet connection.',true);return}
-  const fy=normIncomeYear(officeFilters.year||officeCurrentYear());
+  const period=officePeriodLabel();
+  const pdfPeriod=period.replace(/\s*→\s*/,' to ');
+  const periodSlug=officePeriodYears().length===1?officePeriodYears()[0]:'All-FY';
   const list=getFilteredOfficeEntries().sort(officeEntryOrder);
   if(!list.length){toast('No office entries match the current filters.',true);return}
-  const opening=officeOpeningBalance(fy);
+  const opening=officePeriodOpening();
   const totals=officeTotals(list);
   const runMap=officeRunningMap(officeYearEntries().filter(r=>!isOfficeOpeningType(r.type)),opening);
   const doc=new JsPDF({orientation:'landscape',unit:'pt',format:'a4',compress:true});
   if(typeof doc.autoTable!=='function'){toast('PDF table plugin is unavailable. Check your internet connection.',true);return}
-  doc.setProperties({title:`Office Purchase & Bill - FY ${fy}`,subject:officeFilterText(),creator:'SOIKOT RAIHAN'});
+  doc.setProperties({title:`Office Purchase & Bill - ${pdfPeriod}`,subject:officeFilterText().replace(/\s*→\s*/,' to '),creator:'SOIKOT RAIHAN'});
   const M=32,FOOT=30;
   const pageW=()=>doc.internal.pageSize.getWidth();
   const pageH=()=>doc.internal.pageSize.getHeight();
@@ -6429,10 +6675,10 @@ async function exportOfficePdf(){
     doc.setFont('helvetica','bold');doc.setFontSize(15);doc.setTextColor(255,255,255);
     doc.text('Office Purchase & Bill',M,32);
     doc.setFont('helvetica','normal');doc.setFontSize(8.5);doc.setTextColor(203,213,225);
-    doc.text(`Financial Year ${fy}  ·  Generated ${generatedStamp()}`,M,48);
-    doc.text(officeFilterText(),M,61);
+    doc.text(`${pdfPeriod}  ·  Generated ${generatedStamp()}`,M,48);
+    doc.text(officeFilterText().replace(/\s*→\s*/,' to '),M,61);
     doc.setFont('helvetica','bold');doc.setFontSize(11);doc.setTextColor(255,255,255);
-    doc.text(`Balance ${pdfMoney(officeClosingBalance(officeYearEntries(),opening))}`,W-M,40,{align:'right'});
+    doc.text(`Balance ${pdfMoney(officePeriodClosing())}`,W-M,40,{align:'right'});
   };
   drawHeader();
   const body=[];
@@ -6446,7 +6692,7 @@ async function exportOfficePdf(){
     startY:86,theme:'grid',margin:{left:M,right:M,top:86,bottom:FOOT},
     head:[['Date','Particulars','Category','Cash & Bank','Outflow','Inflow','Balance']],
     body,
-    foot:[[{content:'Total (filtered)',colSpan:4,styles:{halign:'right'}},{content:pdfMoney(totals.outflow),styles:{halign:'right'}},{content:pdfMoney(totals.inflow),styles:{halign:'right'}},{content:pdfMoney(totals.net),styles:{halign:'right'}}]],
+    foot:[[{content:`Total · ${pdfPeriod}`,colSpan:4,styles:{halign:'right'}},{content:pdfMoney(totals.outflow),styles:{halign:'right'}},{content:pdfMoney(totals.inflow),styles:{halign:'right'}},{content:pdfMoney(officePeriodClosing()),styles:{halign:'right'}}]],
     headStyles:{fillColor:[15,23,42],textColor:[255,255,255],fontStyle:'bold',fontSize:8.5},
     footStyles:{fillColor:[238,242,255],textColor:[49,46,129],fontStyle:'bold'},
     styles:{fontSize:8,cellPadding:5,overflow:'linebreak'},
@@ -6482,7 +6728,7 @@ async function exportOfficePdf(){
     doc.text('Personal Finance  ·  SOIKOT RAIHAN  ·  Office Purchase & Bill',M,H-13);
     doc.text(`Page ${i} of ${total}`,W-M,H-13,{align:'right'});
   }
-  doc.save(`Office-Purchase-Bill-${fy}-${todayISO()}.pdf`);
+  doc.save(`Office-Purchase-Bill-${periodSlug}-${todayISO()}.pdf`);
   toast(`Office ledger PDF generated (${total} page${total===1?'':'s'})`);
 }
 
