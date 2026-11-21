@@ -8,7 +8,7 @@
 
 const DB_NAME = 'AssetBookDB';
 const DB_VERSION = 5;                       // v5: standalone Office Purchase & Bill ledger (records + PDF links)
-const APP_VERSION = '2026-11-21-v10';
+const APP_VERSION = '2026-11-21-v11';
 const DATA_VERSION_KEY = 'assetbook-data-version';
 let db;
 let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [], officePurchases: [] };
@@ -1020,8 +1020,16 @@ function bindGlobalActions(){
   $el('addYear').onclick=addIncomeYear;
   $el('manageCategories').onclick=()=>openCategoryModal();
   $el('categoryForm').onsubmit=addCategory;
-  $el('importExcel').onclick=()=>$el('excelImport').click();
-  $el('excelImport').onchange=importExcel;
+  /* Excel & Budge CSV Migration card: popup-based import, template + export */
+  $el('excelImportBtn').onclick=()=>openExcelImportModal();
+  $el('excelImportChoose').onclick=()=>$el('excelImport').click();
+  $el('excelImport').onchange=excelImportFileChosen;
+  $el('excelImportClear').onclick=clearExcelImportFile;
+  $el('excelImportConfirm').onclick=confirmExcelImport;
+  $el('excelImportNoAccount').onchange=updateExcelImportAccountHint;
+  $el('excelImportModal').addEventListener('close',resetExcelImportDraft);
+  $el('excelTemplateBtn').onclick=e=>runWithLoading(e.currentTarget,downloadMigrationTemplate);
+  $el('excelExportBtn').onclick=e=>runWithLoading(e.currentTarget,exportMigrationWorkbook);
   $el('migrationChooseFile').onclick=()=>$el('migrationReplaceFile').click();
   $el('migrationReplaceFile').onchange=replaceMigrationFile;
   $el('migrationEditModal').addEventListener('close',()=>{replaceMigrationId=null});
@@ -1032,9 +1040,14 @@ function bindGlobalActions(){
   $el('officeForm').onsubmit=saveOfficeEntry;
   $el('officeExportExcel').onclick=e=>runWithLoading(e.currentTarget,exportOfficeExcel);
   $el('officeExportPdf').onclick=e=>runWithLoading(e.currentTarget,exportOfficePdf);
-  $el('officeImportBtn').onclick=()=>$el('officeImport').click();
-  $el('officeImport').onchange=importOfficeExcel;
-  $el('officeTemplateBtn').onclick=downloadOfficeTemplate;
+  $el('officeImportBtn').onclick=()=>openOfficeImportModal();
+  $el('officeImportChoose').onclick=()=>$el('officeImport').click();
+  $el('officeImport').onchange=officeImportFileChosen;
+  $el('officeImportClear').onclick=clearOfficeImportFile;
+  $el('officeImportConfirm').onclick=confirmOfficeImport;
+  $el('officeImportNoAccount').onchange=updateOfficeImportAccountHint;
+  $el('officeImportModal').addEventListener('close',resetOfficeImportDraft);
+  $el('officeTemplateBtn').onclick=e=>runWithLoading(e.currentTarget,downloadOfficeTemplate);
   $el('officeExportBtn').onclick=e=>runWithLoading(e.currentTarget,exportOfficeWorkbook);
   bindPdfViewer();
   bindCalculator();
@@ -3914,7 +3927,7 @@ const MAX_IMPORT_ROWS=20000;
 let replaceMigrationId=null;              // set while replacing a migration batch (Edit action)
 
 /** Shared import pipeline: route a file to the right worker. `replaceId` re-imports into an existing batch. */
-async function runImport(file,replaceId){
+async function runImport(file,replaceId,options={}){
   if(!file)return;
   if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
   if(file.size>MAX_IMPORT_BYTES){toast('That file is larger than 30 MB. Split it and import the parts.',true);return}
@@ -3924,15 +3937,20 @@ async function runImport(file,replaceId){
       const workbook=XLSX.read(await file.arrayBuffer(),{type:'array'});
       const first=workbook.SheetNames[0];
       const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[first],{header:1,defval:'',raw:true});
+      // A filled migration template / export is a flat two-sheet workbook, so it is routed first.
+      if(isMigrationTemplateWorkbook(workbook)){
+        await importMigrationTemplateWorkbook(workbook,replaceId,file.name,options);
       // The dedicated office ledger has its own FY-sheet shape, so route it before the asset/income readers.
-      if(isOfficeWorkbook(workbook)){
-        await importOfficeWorkbook(workbook,replaceId,file.name);
+      }else if(isOfficeWorkbook(workbook)){
+        // Never move Cash & Bank balances without asking: the popup carries the "I Do not want to
+        // change Account" confirmation for this file (and keeps the replace batch id).
+        openOfficeImportModal({file,workbook,replaceId,noAccountChange:!!options.noAccountChange});
       }else if(detectBudgeHeader(aoa)>=0){
-        await importBudgeFile(aoa,file.name,replaceId);
+        await importBudgeFile(aoa,file.name,replaceId,options);
       }else if(isIncomeExpensesWorkbook(workbook)){
-        await importIncomeExpensesWorkbook(workbook,replaceId,file.name);
+        await importIncomeExpensesWorkbook(workbook,replaceId,file.name,options);
       }else{
-        await importAssetsLiabilitiesWorkbook(workbook,replaceId,file.name);
+        await importAssetsLiabilitiesWorkbook(workbook,replaceId,file.name,options);
       }
     }else{
       const text=(await file.text()).replace(/^\uFEFF/,'');
@@ -3941,7 +3959,12 @@ async function runImport(file,replaceId){
       if(detectBudgeHeader(aoa)>=0){
         await importBudgeFile(aoa,file.name,replaceId);
       }else{
-        toast('That CSV file is not a recognised Budge export.',true);
+        const officeBook=officeWorkbookFromCsv(text,file.name);
+        if(officeBook&&isOfficeWorkbook(officeBook)){
+          openOfficeImportModal({file,workbook:officeBook,replaceId});
+        }else{
+          toast('That CSV file is not a recognised Budge export.',true);
+        }
       }
     }
   }catch(error){
@@ -5096,9 +5119,12 @@ const OFFICE_CATEGORIES=['Office Purchase','Bill Received','Personal Print','Off
 function isOfficeOpeningType(type){
   return /^(Opening Balance)/i.test(String(type||''));
 }
+/** Any type that says "Inflow" (or the legacy bare 'Inflow') credits the account; everything else
+ *  is a payment. This keeps the four template Entry Type * labels — e.g. "Bill Received (Cash
+ *  Inflow)" — classified correctly while plain Outflow/Inflow imports keep working. */
 function officeTypeKind(type){
   const value=String(type||'');
-  if(/Opening Balance.*Inflow/i.test(value)||value==='Inflow')return 'Inflow';
+  if(/inflow/i.test(value))return 'Inflow';
   return 'Outflow';
 }
 function normalizeOfficeType(type){
@@ -5364,7 +5390,7 @@ function guessOfficeAccount(particulars){
 /** Import classification: inflows become office funds / print income, outflows are purchases. */
 function guessOfficeCategory(type,particulars){
   const text=String(particulars||'');
-  if(type==='Inflow'){
+  if(officeTypeKind(type)==='Inflow'){
     if(/print/i.test(text))return 'Personal Print';
     if(/bill/i.test(text))return 'Bill Received';
     return 'Office Fund';
@@ -5373,21 +5399,114 @@ function guessOfficeCategory(type,particulars){
 }
 
 /**
+ * Header map for the column-per-field template / CSV layout:
+ * Date * | Entry Type * | Particulars * | Category * | Cash & Bank | Amount (Taka) * | Notes.
+ * Returns null when the row is not that layout (e.g. the legacy side-by-side export).
+ */
+function officeFlatColumns(headerRow){
+  const keys=(Array.isArray(headerRow)?headerRow:[]).map(cell=>nrm(cell).replace(/\*/g,'').trim());
+  const find=test=>keys.findIndex(key=>test(key));
+  const type=find(key=>key==='entry type'||key==='type');
+  const amount=find(key=>/^amount\b/.test(key));
+  if(type<0||amount<0)return null;
+  return {
+    date:find(key=>/^date\b/.test(key)),
+    type,
+    particulars:find(key=>/^(particulars|detail|description)\b/.test(key)),
+    category:find(key=>/^category\b/.test(key)),
+    account:find(key=>/^(cash\s*&\s*bank|account|cash and bank)\b/.test(key)),
+    amount,
+    notes:find(key=>/^(notes|reference)\b/.test(key))
+  };
+}
+/** Finds the flat header anywhere in the first 10 rows (the template uses row 3). */
+function officeFlatLayout(rows){
+  for(let r=0;r<Math.min(rows.length,10);r++){
+    const cols=officeFlatColumns(rows[r]);
+    if(cols)return {headerIndex:r,cols};
+  }
+  return null;
+}
+/** Exact Entry Type * label chosen from the template dropdown; empty cells fall back to a guess. */
+function officeFlatType(value,detail){
+  const text=String(value??'').replace(/\s+/g,' ').trim();
+  if(!text)return /bill|fund|top-?up|reimburs/i.test(String(detail||''))
+    ? 'Bill Received (Cash Inflow)':'Office Purchase (Cash Outflow)';
+  if(/^opening balance\b/i.test(text))return /inflow/i.test(text)?'Opening Balance (Inflow)':'Opening Balance (Outflow)';
+  if(/bill received|inflow/i.test(text))return 'Bill Received (Cash Inflow)';
+  if(/office purchase|outflow/i.test(text))return 'Office Purchase (Cash Outflow)';
+  return text;
+}
+/** A configured account keeps its Settings spelling; any other name is preserved verbatim. */
+function officeFlatAccount(value){
+  const text=String(value??'').replace(/\s+/g,' ').trim();
+  if(!text||!/[a-z]/i.test(text)||normalizeExcelDate(value))return '';
+  const configured=officeAccountOption(text);
+  return configured?configured.label:text;
+}
+/** Column-per-field sheet reader (the downloadable template and its CSV export). */
+function parseOfficeFlatSheet(rows,sheetName,fy,layout){
+  const {headerIndex,cols}=layout;
+  const fallbackDate=(fiscalRange(fy)||{}).from||'';
+  const cell=(row,index)=>index>=0?row[index]:'';
+  const mapped=[cols.date,cols.type,cols.particulars,cols.category,cols.account,cols.amount,cols.notes].filter(index=>index>=0);
+  const entries=[];
+  const occurrences=new Map();
+  let skipped=0,unnamed=0,undated=0,untyped=0;
+  for(let r=headerIndex+1;r<rows.length;r++){
+    const row=rows[r]||[];
+    // The hidden dropdown lists live in columns J/K; only mapped columns make a row meaningful.
+    if(!mapped.some(index=>String(row[index]??'').trim()))continue;
+    const lead=nrm(cell(row,cols.date)||cell(row,cols.particulars));
+    if(/^(total|grand total|closing balance|carried forward)\b/.test(lead))break;
+    const detail=String(cell(row,cols.particulars)??'').replace(/\s+/g,' ').trim();
+    const amount=Math.abs(parseExcelNumber(cell(row,cols.amount)));
+    if(!amount){
+      // A detail line without a readable amount is a memo/note row — reported, never imported.
+      if(detail)skipped++;
+      continue;
+    }
+    const rawType=String(cell(row,cols.type)??'').trim();
+    if(!rawType)untyped++;
+    const type=officeFlatType(rawType,detail);
+    let date=normalizeExcelDate(cell(row,cols.date));
+    if(date&&(Number(date.slice(0,4))<1990||Number(date.slice(0,4))>2100))date='';
+    if(!date)undated++;
+    const iso=date||fallbackDate;
+    const particulars=detail||(officeTypeKind(type)==='Inflow'?'Cash Inflow':'Cash Outflow');
+    if(!detail)unnamed++;
+    const category=String(cell(row,cols.category)??'').replace(/\s+/g,' ').trim()||guessOfficeCategory(type,particulars);
+    const account=officeFlatAccount(cell(row,cols.account));
+    const base=[sheetName,type,iso,particulars,amount.toFixed(2)].join('|');
+    const seen=(occurrences.get(base)||0)+1;
+    occurrences.set(base,seen);
+    entries.push({type,date:iso,particulars,amount,category,account,
+      sourceSheet:sheetName,sourceRow:r+1,
+      importHash:hashString(['office',base,seen].join('|'))});
+  }
+  return {fy,entries,openingBalance:null,skipped,unnamed,undated,untyped,detected:true};
+}
+
+/**
  * Reads one FY sheet of "Office Purchase & Bill.xlsx".
  * Layout: left block A-C = Date / Detail / Amount (cash outflow), right block E-G =
  * Date / Detail / Amount (cash inflow), row 4 holds the brought-forward "Balance".
+ * The downloadable template (and a CSV of it) uses the flat Date / Entry Type / Particulars /
+ * Category / Cash & Bank / Amount layout instead and is read by parseOfficeFlatSheet().
  * Parsing stops at the "Total" row; blank rows and the Print footer are ignored.
  * @returns {{fy:string,entries:Array,openingBalance:number|null,skipped:number,detected:boolean}}
  */
 function parseOfficeSheet(aoa,sheetName){
   const fy=normIncomeYear(sheetName);
   const rows=Array.isArray(aoa)?aoa:[];
+  const flat=officeFlatLayout(rows);
+  if(flat)return parseOfficeFlatSheet(rows,sheetName,fy,flat);
   const headerIndex=rows.slice(0,8).findIndex(row=>{
     const cells=(row||[]).map(cell=>nrm(cell));
     return cells.includes('cash outflow')||cells.includes('cash inflow')
       ||(cells.includes('date')&&cells.some(cell=>cell.includes('amount')));
   });
-  if(headerIndex<0)return {fy,entries:[],openingBalance:null,skipped:0,detected:false};
+  if(headerIndex<0)return {fy,entries:[],openingBalance:null,skipped:0,unnamed:0,undated:0,untyped:0,detected:false};
   const fallbackDate=(fiscalRange(fy)||{}).from||'';
   const entries=[];
   const occurrences=new Map();
@@ -5461,14 +5580,44 @@ function parseOfficeSheet(aoa,sheetName){
       unnamed++;
     }
   }
-  return {fy,entries,openingBalance,skipped,unnamed,undated,detected:true};
+  return {fy,entries,openingBalance,skipped,unnamed,undated,untyped:0,detected:true};
 }
-/** A sheet belongs to an office ledger only when it carries the Cash Outflow / Cash Inflow caption. */
+/** A sheet belongs to an office ledger only when it carries the Cash Outflow / Cash Inflow caption
+ *  or the template's Entry Type * / Amount * header. */
 function officeSheetSignature(aoa){
-  return (Array.isArray(aoa)?aoa:[]).slice(0,8).some(row=>{
+  const rows=(Array.isArray(aoa)?aoa:[]).slice(0,10);
+  return rows.some(row=>{
     const cells=(row||[]).map(cell=>nrm(cell));
     return cells.some(cell=>/^cash (outflow|inflow)\b/.test(cell));
-  });
+  })||!!officeFlatLayout(rows);
+}
+/** A CSV saved from the template has no FY sheet name, so the title row (then the filename) is
+ *  used; anything that is not a real data range falls back to the current fiscal year. */
+function officeCsvFiscalYear(aoa,fileName){
+  const candidates=[...(Array.isArray(aoa)?aoa:[]).slice(0,6).flat().map(value=>String(value??'')),String(fileName||'')];
+  for(const text of candidates){
+    const match=text.match(/(\d{4})\s*[-–]\s*(\d{2,4})/);
+    if(!match)continue;
+    const fy=normIncomeYear(match[0]);
+    if(!/^\d{4}-\d{2}$/.test(fy))continue;
+    // Reject date fragments such as a filename's "2026-11" — a FY ends in start+1.
+    if(Number(fy.slice(5))===(Number(fy.slice(0,4))+1)%100)return fy;
+  }
+  return fiscalYearFromDate(todayISO())||officeCurrentYear()||'';
+}
+/** Wraps a CSV export of the template into a one-sheet workbook keyed by its fiscal year, so the
+ *  normal office import (and its duplicate protection) can read it. */
+function officeWorkbookFromCsv(text,fileName){
+  if(!window.XLSX)return null;
+  const workbook=XLSX.read(String(text||'').replace(/^\uFEFF/,''),{type:'string',raw:true});
+  const first=workbook.SheetNames[0];
+  if(!first)return null;
+  const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[first],{header:1,defval:'',raw:true});
+  const fy=officeCsvFiscalYear(aoa,fileName);
+  if(!fy)return null;
+  workbook.Sheets={[fy]:workbook.Sheets[first]};
+  workbook.SheetNames=[fy];
+  return workbook;
 }
 /** A workbook is treated as an office ledger when it has fiscal-year sheets with the outflow/inflow header. */
 function isOfficeWorkbook(workbook){
@@ -5484,14 +5633,18 @@ function isOfficeWorkbook(workbook){
  * Imports every FY sheet of an office workbook. Rows already stored (same sheet/type/row) are
  * skipped, so importing the same file twice never duplicates the ledger. When the import replaces
  * an existing office batch, that batch's rows and PDFs are removed first.
+ * @param {{noAccountChange?:boolean}} [options] Choosing "I Do not want to change Account" in the
+ *   import popup stamps every imported entry with noAccountChange, so no Cash & Bank balance moves
+ *   (the flag can be cleared later on any row to restore the effect).
  */
-async function importOfficeWorkbook(workbook,replaceId,fileName){
+async function importOfficeWorkbook(workbook,replaceId,fileName,options={}){
+  const keepAccounts=!!options.noAccountChange;
   const target=replaceId?state.migrationHistory.find(m=>m.id===replaceId):null;
   const replacing=!!target&&target.migrationType==='Office Purchase & Bill';
   const migrationId=replacing?target.id:uid('mig');
   const seen=new Set(replacing?[]:state.officePurchases.map(r=>r.importHash).filter(Boolean));
   const rows=[],years=new Set(),openings=Object.assign({},officeOpeningBalances());
-  let skipped=0,unnamed=0,undated=0,openingCount=0,duplicates=0;
+  let skipped=0,unnamed=0,undated=0,untyped=0,openingCount=0,duplicates=0;
   for(const sheetName of workbook.SheetNames){
     if(!/^\d{4}\s*[-–]\s*\d{2,4}$/.test(String(sheetName).trim()))continue;
     const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[sheetName],{header:1,defval:'',raw:true});
@@ -5514,13 +5667,18 @@ async function importOfficeWorkbook(workbook,replaceId,fileName){
     for(const entry of parsed.entries){
       if(seen.has(entry.importHash)){duplicates++;continue}
       seen.add(entry.importHash);
-      rows.push(Object.assign({id:uid('office'),migrationId,incomeYear:parsed.fy,
-        createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()},entry));
+      const record=Object.assign({id:uid('office'),migrationId,incomeYear:parsed.fy,
+        createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()},entry);
+      // "I Do not want to change Account": keep the account name for reference but stop the entry
+      // from moving that Cash & Bank balance. Openings never touch an account anyway.
+      if(keepAccounts&&!isOfficeOpeningType(record.type))record.noAccountChange=true;
+      rows.push(record);
       years.add(parsed.fy);
     }
     skipped+=parsed.skipped;
     unnamed+=parsed.unnamed||0;
     undated+=parsed.undated||0;
+    untyped+=parsed.untyped||0;
   }
   if(!rows.length&&!openingCount){
     toast(duplicates?'These office rows are already imported — nothing new to add.':'No Office Purchase & Bill rows were found in that workbook.',!duplicates);
@@ -5549,27 +5707,109 @@ async function importOfficeWorkbook(workbook,replaceId,fileName){
   if(unnamed)bits.push(`${unnamed} row${unnamed===1?'':'s'} had no detail (imported as Cash Inflow/Outflow)`);
   if(skipped)bits.push(`${skipped} row${skipped===1?'':'s'} skipped (no readable amount)`);
   if(undated)bits.push(`${undated} row${undated===1?'':'s'} had no date (dated to the FY start)`);
+  if(untyped)bits.push(`${untyped} row${untyped===1?'':'s'} had no Entry Type (defaulted)`);
   if(openingCount)bits.push(`${openingCount} opening balance${openingCount===1?'':'s'} recorded`);
+  if(keepAccounts)bits.push('Cash & Bank left unchanged');
   toast(`Office Purchase & Bill: ${bits.join(', ')}.`);
   return rows.length;
 }
-/** Settings -> Import Office Workbook. */
-async function importOfficeExcel(event){
-  const file=event.target.files&&event.target.files[0];
-  event.target.value='';
-  if(!file)return;
+
+/* --- Import Office Workbook popup: pick a file, confirm the account behaviour, then import --- */
+const OFFICE_IMPORT_HINT_UNCHECKED='Unticked: every row linked to a Cash & Bank account moves that balance.';
+const OFFICE_IMPORT_HINT_CHECKED='Ticked: rows are recorded in this ledger only — no Cash & Bank balance changes.';
+let officeImportDraft=null;
+
+function setOfficeImportFileLabel(file){
+  const label=$el('officeImportFileName');
+  const clear=$el('officeImportClear');
+  const confirm=$el('officeImportConfirm');
+  if(label){
+    if(file){
+      label.textContent=`${file.name} · ${formatFileSize(file.size)}`;
+      label.title=file.name;
+      label.classList.add('has-file');
+    }else{
+      label.textContent='No file chosen';
+      label.removeAttribute('title');
+      label.classList.remove('has-file');
+    }
+  }
+  if(clear)clear.classList.toggle('hidden',!file);
+  if(confirm)confirm.disabled=!file;
+}
+function updateOfficeImportAccountHint(){
+  const box=$el('officeImportNoAccount');
+  const hint=$el('officeImportAccountHint');
+  if(hint)hint.textContent=box&&box.checked?OFFICE_IMPORT_HINT_CHECKED:OFFICE_IMPORT_HINT_UNCHECKED;
+}
+function resetOfficeImportDraft(){
+  officeImportDraft=null;
+  const input=$el('officeImport');
+  if(input)input.value='';
+  const box=$el('officeImportNoAccount');
+  if(box)box.checked=false;
+  updateOfficeImportAccountHint();
+  setOfficeImportFileLabel(null);
+}
+/** Opens the confirmation popup. A file can arrive already picked (Settings button or drag/drop). */
+function openOfficeImportModal(options={}){
   if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
-  if(file.size>MAX_IMPORT_BYTES){toast('That file is larger than 30 MB. Split it and import the parts.',true);return}
+  const file=options.file||null;
+  officeImportDraft=file
+    ?{file,workbook:options.workbook||null,replaceId:options.replaceId||null}
+    :{file:null,workbook:null,replaceId:options.replaceId||null};
+  const box=$el('officeImportNoAccount');
+  if(box)box.checked=!!options.noAccountChange;
+  const input=$el('officeImport');
+  if(input)input.value='';
+  updateOfficeImportAccountHint();
+  setOfficeImportFileLabel(file);
+  $el('officeImportModal').showModal();
+}
+function officeImportFileChosen(event){
+  const input=event.target;
+  const file=input.files&&input.files[0];
+  input.value='';
+  if(!file)return;
+  officeImportDraft={file,workbook:null,replaceId:(officeImportDraft&&officeImportDraft.replaceId)||null};
+  setOfficeImportFileLabel(file);
+  updateOfficeImportAccountHint();
+}
+function clearOfficeImportFile(){
+  const replaceId=officeImportDraft?officeImportDraft.replaceId||null:null;
+  officeImportDraft={file:null,workbook:null,replaceId};
+  setOfficeImportFileLabel(null);
+}
+async function readOfficeImportWorkbook(draft){
+  if(draft.workbook)return draft.workbook;
+  if(/\.csv$/i.test(draft.file.name||''))return officeWorkbookFromCsv(await draft.file.text(),draft.file.name);
+  return XLSX.read(await draft.file.arrayBuffer(),{type:'array'});
+}
+async function confirmOfficeImport(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const draft=officeImportDraft;
+  if(!draft||!draft.file){toast('Choose an .xlsx, .xls or .csv workbook first.',true);return}
+  if(draft.file.size>MAX_IMPORT_BYTES){toast('That file is larger than 30 MB. Split it and import the parts.',true);return}
+  const button=$el('officeImportConfirm');
+  if(button){button.disabled=true;button.classList.add('loading')}
   try{
-    const workbook=XLSX.read(await file.arrayBuffer(),{type:'array'});
-    if(!isOfficeWorkbook(workbook)){
-      toast('No office ledger was found. Use FY sheets (e.g. 2025-26) with the Cash Outflow / Cash Inflow columns.',true);
+    const workbook=await readOfficeImportWorkbook(draft);
+    if(!workbook||!isOfficeWorkbook(workbook)){
+      toast('No office ledger was found. Use FY sheets (e.g. 2025-26) with the Cash Outflow / Cash Inflow columns, or the downloaded template.',true);
       return;
     }
-    await importOfficeWorkbook(workbook,replaceMigrationId,file.name);
+    const noAccountChange=!!($el('officeImportNoAccount')&&$el('officeImportNoAccount').checked);
+    const imported=await importOfficeWorkbook(workbook,draft.replaceId,draft.file.name,{noAccountChange});
+    // Keep the popup open when nothing was imported so the message stays next to the chosen file.
+    if(imported>0)$el('officeImportModal').close();
   }catch(error){
     console.error(error);
     toast('Could not read that workbook'+(error.message?` — ${error.message}`:''),true);
+  }finally{
+    if(button){
+      button.classList.remove('loading');
+      button.disabled=!(officeImportDraft&&officeImportDraft.file);
+    }
   }
 }
 
@@ -6039,21 +6279,133 @@ function exportOfficeWorkbook(){
   XLSX.writeFile(officeExcelWorkbook(),`Office-Purchase-Bill-Workbook-${todayISO()}.xlsx`);
   toast('Office workbook exported');
 }
-function downloadOfficeTemplate(){
+const OFFICE_TEMPLATE_ROWS=200;
+/** The four Entry Type * labels the page already understands (officeTypeKind reads the Inflow part). */
+const OFFICE_TEMPLATE_TYPES=['Office Purchase (Cash Outflow)','Bill Received (Cash Inflow)','Opening Balance (Outflow)','Opening Balance (Inflow)'];
+/** Category dropdown: the built-in office categories plus every non-cash category from Settings. */
+function officeTemplateCategories(){
+  const configured=(state.categories||[])
+    .filter(category=>!isCashCategoryName(category.name))
+    .map(category=>String(category.name||'').replace(/\s+/g,' ').trim());
+  return [...new Set([...OFFICE_CATEGORIES,...configured].filter(Boolean))];
+}
+/**
+ * One FY sheet in the column-per-field layout read by parseOfficeFlatSheet(). The dropdown lists
+ * live in the hidden helper columns J/K (Entry Types / Categories) and the validations point at
+ * that range, so the lists stay valid even though SheetJS cannot write <dataValidation> itself.
+ */
+function officeTemplateSheet(fy){
+  const categories=officeTemplateCategories();
+  const rows=[
+    [`Office Purchase & Bill - FY ${fy}`],
+    ['Fill one row per entry. Entry Type * and Category * are dropdowns. Leave Cash & Bank blank when the entry must not move an account. Re-importing skips rows with the same Date, Entry Type, Particulars and Amount.'],
+    ['Date *','Entry Type *','Particulars *','Category *','Cash & Bank','Amount (Taka) *','Notes','','','Entry Types','Categories']
+  ];
+  for(let i=0;i<OFFICE_TEMPLATE_ROWS;i++){
+    const row=new Array(11).fill('');
+    if(i<OFFICE_TEMPLATE_TYPES.length)row[9]=OFFICE_TEMPLATE_TYPES[i];
+    if(i<categories.length)row[10]=categories[i];
+    rows.push(row);
+  }
+  const ws=XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols']=[{wch:12},{wch:26},{wch:40},{wch:24},{wch:18},{wch:16},{wch:30},{wch:2,hidden:true},{wch:2,hidden:true},{wch:28,hidden:true},{wch:30,hidden:true}];
+  return {ws,categories};
+}
+function officeXmlEscape(value){
+  return String(value??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+/** <dataValidations> for one sheet: a stop-error dropdown on Entry Type * (B) and Category * (D). */
+function officeTemplateValidationsXml(spec){
+  const rule=(range,listRef,title,prompt)=>`<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" errorStyle="stop" errorTitle="${officeXmlEscape(title)}" error="Please pick a value from the dropdown list." promptTitle="${officeXmlEscape(title)}" prompt="${officeXmlEscape(prompt)}" sqref="${range}"><formula1>${officeXmlEscape(listRef)}</formula1></dataValidation>`;
+  return `<dataValidations count="2">${rule(spec.typeRange,spec.typeList,spec.typeTitle||'Entry Type',spec.typePrompt||'Pick how this entry affects the office ledger.')}${rule(spec.categoryRange,spec.categoryList,spec.categoryTitle||'Category',spec.categoryPrompt||'Pick an office category or one from Settings.')}</dataValidations>`;
+}
+/** Injects the block in schema order: dataValidations must precede hyperlinks/ignoredErrors/drawing. */
+function officeInjectValidations(xml,block){
+  if(!xml||!block||xml.includes('<dataValidations'))return xml;
+  const anchors=['<hyperlinks','<printOptions','<pageMargins','<pageSetup','<headerFooter',
+    '<rowBreaks','<colBreaks','<customProperties','<cellWatches','<ignoredErrors','<smartTags',
+    '<drawing','<legacyDrawing','<legacyDrawingHF','<picture','<oleObjects','<controls',
+    '<webPublishItems','<tableParts','<extLst'];
+  let at=-1;
+  for(const anchor of anchors){
+    const index=xml.indexOf(anchor);
+    if(index>=0&&(at<0||index<at))at=index;
+  }
+  if(at<0)at=xml.lastIndexOf('</worksheet>');
+  if(at<0)return xml;
+  return xml.slice(0,at)+block+xml.slice(at);
+}
+/** SheetJS writes no data validations, so the generated .xlsx is reopened and each FY sheet XML is
+ *  patched with its dropdowns. Any failure keeps a working (just plain) template. */
+async function officeTemplateBytesWithValidations(bytes,specs){
+  if(!window.JSZip||!specs.length)return bytes;
+  const zip=await JSZip.loadAsync(bytes);
+  const workbookFile=zip.file('xl/workbook.xml');
+  const relsFile=zip.file('xl/_rels/workbook.xml.rels');
+  if(!workbookFile||!relsFile)return bytes;
+  const workbookXml=await workbookFile.async('string');
+  const relsXml=await relsFile.async('string');
+  const targets=new Map();
+  for(const tag of relsXml.match(/<Relationship\b[^>]*>/g)||[]){
+    const id=(tag.match(/\bId="([^"]+)"/)||[])[1];
+    const target=(tag.match(/\bTarget="([^"]+)"/)||[])[1];
+    if(id&&target)targets.set(id,target);
+  }
+  const byName=new Map(specs.map(spec=>[spec.name,spec]));
+  const patched=new Set();
+  for(const tag of workbookXml.match(/<sheet\b[^>]*>/g)||[]){
+    const rawName=(tag.match(/\bname="([^"]*)"/)||[])[1];
+    // Sheet names are XML-escaped in workbook.xml, so "Assets & Liabilities" arrives as
+    // "Assets &amp; Liabilities" and would never match spec.name without decoding.
+    const name=rawName?rawName.replace(/&amp;/g,'&').replace(/&apos;/g,"'").replace(/&quot;/g,'"').replace(/&lt;/g,'<').replace(/&gt;/g,'>'):rawName;
+    const rid=(tag.match(/\br:id="([^"]+)"/)||[])[1];
+    const spec=name?byName.get(name):null;
+    if(!spec||!rid)continue;
+    let target=targets.get(rid);
+    if(!target)continue;
+    target=target.startsWith('/')?target.slice(1):(target.startsWith('xl/')?target:`xl/${target}`);
+    const file=zip.file(target);
+    if(!file||patched.has(target))continue;
+    patched.add(target);
+    zip.file(target,officeInjectValidations(await file.async('string'),officeTemplateValidationsXml(spec)));
+  }
+  return patched.size?zip.generateAsync({type:'arraybuffer'}):bytes;
+}
+async function downloadOfficeTemplate(){
   if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
   const years=officeYearList();
   const fy=normIncomeYear(officeFilters.year||officeCurrentYear())||years[0]||'';
   const current=parseInt(String(fy).slice(0,4),10)||new Date().getFullYear();
   const targets=[`${current}-${String((current+1)%100).padStart(2,'0')}`,`${current+1}-${String((current+2)%100).padStart(2,'0')}`];
   const workbook=XLSX.utils.book_new();
+  const specs=[];
   for(const year of targets){
-    const {aoa}=officeSheetAoa(year,[],0);
-    const ws=XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols']=[{wch:12},{wch:38},{wch:14},{wch:18},{wch:12},{wch:38},{wch:14},{wch:18}];
+    const {ws,categories}=officeTemplateSheet(year);
     XLSX.utils.book_append_sheet(workbook,ws,year);
+    specs.push({
+      name:year,
+      typeRange:`B4:B${3+OFFICE_TEMPLATE_ROWS}`,
+      categoryRange:`D4:D${3+OFFICE_TEMPLATE_ROWS}`,
+      typeList:`$J$4:$J$${3+OFFICE_TEMPLATE_TYPES.length}`,
+      categoryList:`$K$4:$K$${3+categories.length}`
+    });
   }
-  XLSX.writeFile(workbook,`Office-Purchase-Bill-Template-${todayISO()}.xlsx`);
-  toast('Template downloaded — fill each FY sheet, then import it from Settings');
+  let bytes=XLSX.write(workbook,{bookType:'xlsx',type:'array'});
+  let dropdowns=false;
+  if(window.JSZip){
+    try{
+      bytes=await officeTemplateBytesWithValidations(bytes,specs);
+      dropdowns=true;
+    }catch(error){
+      console.warn('Office template dropdowns could not be added',error);
+    }
+  }
+  downloadBlob(new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`Office-Purchase-Bill-Template-${todayISO()}.xlsx`);
+  if(dropdowns){
+    toast('Template downloaded — Entry Type * and Category * are dropdowns in every FY sheet');
+  }else{
+    toast('Template downloaded, but the dropdown lists need the ZIP library — reload while online to add them',true);
+  }
 }
 
 async function exportOfficePdf(){
@@ -6283,7 +6635,8 @@ async function importAssetsLiabilitiesWorkbook(workbook,replaceId,fileName){
   toast(`${replaceId?'Replaced':'Import complete'}: ${toSave.length} imported, ${skippedDuplicates} duplicate(s) skipped, ${manual} sheet(s) need manual review.${truncatedNote}`,manual>0&&!toSave.length);
   console.info('Excel import summary',summary);
 }
-async function importIncomeExpensesWorkbook(workbook,replaceId,fileName){
+async function importIncomeExpensesWorkbook(workbook,replaceId,fileName,options={}){
+  const keepAccounts=!!options.noAccountChange;
   const migrationId=replaceId||uid('mig');
   const fiscalStart=findFiscalStart(workbook);
   const months=['july','august','september','october','november','december','january','february','march','april','may','june'];
@@ -6301,6 +6654,8 @@ async function importIncomeExpensesWorkbook(workbook,replaceId,fileName){
     const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[ms.name],{header:1,defval:'',raw:true});
     if(aoa.length>MAX_IMPORT_ROWS)aoa.length=MAX_IMPORT_ROWS;
     const rows=parseIncomeExpensesSheet(aoa,ms.num,ms.name,fiscalStart);
+    // "I Do not want to change Account": the row keeps its account label but never moves a balance.
+    if(keepAccounts)rows.forEach(rec=>{rec.noAccountChange=true});
     for(const rec of rows){
       const key=`${ms.name}|${rec.sourceRow}`;
       if(seen.has(key)){skipped++;continue}
@@ -6323,7 +6678,8 @@ async function importIncomeExpensesWorkbook(workbook,replaceId,fileName){
   await loadState();renderAll();
   toast(`${replaceId?'Replaced':'Imported'} ${toSave.length} income/expense entries from Income & Expenses.xlsx (Skipped ${skipped} duplicates)`);
 }
-async function importBudgeFile(aoa,sourceName,replaceId){
+async function importBudgeFile(aoa,sourceName,replaceId,options={}){
+  const keepAccounts=!!options.noAccountChange;
   const migrationId=replaceId||uid('mig');
   const headerRow=detectBudgeHeader(aoa);
   if(headerRow<0){toast('No Budge header row found in this file.',true);return}
@@ -6359,7 +6715,7 @@ async function importBudgeFile(aoa,sourceName,replaceId){
     const hash=hashString(`${sourceName||'budge'}|${i+1}`);
     if(existingHashes.has(hash)){skipped++;continue}
     existingHashes.add(hash);
-    toSave.push({id:uid('ie'),type,date,incomeYear:fiscalYearFromDate(date),majorHead:cls.majorHead,category:cls.category,subcategory:cls.subcategory,amount,account,description,documentIds:[],importHash:hash,migrationId,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});
+    toSave.push({id:uid('ie'),type,date,incomeYear:fiscalYearFromDate(date),majorHead:cls.majorHead,category:cls.category,subcategory:cls.subcategory,amount,account,description,...(keepAccounts?{noAccountChange:true}:{}),documentIds:[],importHash:hash,migrationId,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});
   }
   if(replaceId&&!toSave.length){toast('The replacement file produced no valid rows — the existing batch was left unchanged.',true);return}
   if(replaceId)await removeMigrationRows(replaceId);
@@ -6374,6 +6730,330 @@ async function importBudgeFile(aoa,sourceName,replaceId){
   await saveMigrationMeta(migrationId,replaceId,'Budge CSV',sourceName,toSave.length,skipped);
   await loadState();renderAll();
   toast(`${replaceId?'Replaced':'Imported'} ${toSave.length} transactions (Skipped ${skipped} already imported)`);
+}
+
+/* ==========================================================================
+   Excel & Budge CSV Migration: template, export and flat template import
+   The Settings migration card mirrors the Office card: Import (with the
+   "I Do not want to change Account" confirmation), a downloadable template
+   whose Type / Entry Type * and Category * cells are dropdowns sourced from
+   Manage Categories, and an export that keeps the template layout so the file
+   can be re-imported without duplicates.
+   ========================================================================== */
+const MIGRATION_TEMPLATE_ROWS=200;
+const MIGRATION_TEMPLATE_SHEETS={assets:'Assets & Liabilities',income:'Income & Expenses'};
+const MIGRATION_TEMPLATE_HEADERS={
+  assets:['Date','Type','Category *','Subcategory','Particulars *','Amount / Balance *','Currency','Status','Income Year','Details'],
+  income:['Date','Entry Type *','Major Head','Category *','Subcategory','Amount (Taka) *','Account / Method','Description']
+};
+const MIGRATION_TEMPLATE_TYPES={assets:['Asset','Liability'],income:['Income','Expense']};
+
+/** Dropdown values, straight from Manage Categories. */
+function migrationCategoryNames(kind){
+  const names=kind==='assets'
+    ?(state.categories||[]).map(c=>c.name)
+    :(state.incomeGroups||[]).reduce((all,group)=>all.concat((group.categories||[]).map(c=>c.name)),[]);
+  return [...new Set(names.map(name=>normClass(name)).filter(Boolean))];
+}
+
+/**
+ * One flat sheet in the exact layout read by importMigrationTemplateWorkbook().
+ * The dropdown lists live in hidden helper columns, because SheetJS cannot write
+ * <dataValidation> itself (its XML is injected by officeTemplateBytesWithValidations).
+ */
+function migrationTemplateSheet(kind,dataRows=[]){
+  const isIncome=kind==='income';
+  const headers=MIGRATION_TEMPLATE_HEADERS[kind];
+  const types=MIGRATION_TEMPLATE_TYPES[kind];
+  const categories=migrationCategoryNames(kind);
+  const typeCol=headers.length+2;
+  const categoryCol=headers.length+3;
+  const total=Math.max(MIGRATION_TEMPLATE_ROWS,(dataRows||[]).length);
+  const rows=[
+    [`${MIGRATION_TEMPLATE_SHEETS[kind]} - Migration Template`],
+    [isIncome
+      ?'One row per income or expense. Entry Type * is Income/Expense and Category * lists every category from Manage Categories. Re-importing skips rows that are already imported.'
+      :'One row per asset or liability. Type is Asset/Liability and Category * lists every category from Manage Categories. Re-importing skips rows that are already imported.'],
+    headers
+  ];
+  for(let i=0;i<total;i++){
+    const row=new Array(categoryCol+1).fill('');
+    const data=(dataRows||[])[i];
+    if(data)data.forEach((value,c)=>{if(c<headers.length)row[c]=value??''});
+    if(i<types.length)row[typeCol]=types[i];
+    if(i<categories.length)row[categoryCol]=categories[i];
+    rows.push(row);
+  }
+  const ws=XLSX.utils.aoa_to_sheet(rows);
+  const widths={assets:[12,14,26,30,40,18,10,12,14,34],income:[12,18,30,26,30,16,20,34]}[kind];
+  ws['!cols']=[...widths.map(wch=>({wch})),{wch:2,hidden:true},{wch:2,hidden:true},{wch:18,hidden:true},{wch:30,hidden:true}];
+  return {
+    ws,
+    spec:{
+      name:MIGRATION_TEMPLATE_SHEETS[kind],
+      typeRange:`B4:B${3+total}`,
+      categoryRange:`${isIncome?'D':'C'}4:${isIncome?'D':'C'}${3+total}`,
+      typeList:`$${XLSX.utils.encode_col(typeCol)}$4:$${XLSX.utils.encode_col(typeCol)}$${3+types.length}`,
+      categoryList:`$${XLSX.utils.encode_col(categoryCol)}$4:$${XLSX.utils.encode_col(categoryCol)}$${3+categories.length}`,
+      typeTitle:isIncome?'Entry Type':'Type',
+      typePrompt:isIncome?'Pick Income or Expense.':'Pick Asset or Liability.',
+      categoryPrompt:'Pick a category from Manage Categories.'
+    }
+  };
+}
+
+/** Locates the template header row (Date + Type/Entry Type + Category) in the first rows. */
+function migrationTemplateHeader(aoa){
+  for(let i=0;i<Math.min(aoa.length,8);i++){
+    const cells=(aoa[i]||[]).map(c=>nrm(String(c??'')).replace(/\*/g,' ').replace(/\s+/g,' ').trim());
+    const typeAt=cells.findIndex(c=>c==='type'||c==='entry type');
+    const categoryAt=cells.findIndex(c=>c==='category');
+    if(typeAt<0||categoryAt<0)continue;
+    const dateAt=cells.findIndex(c=>c==='date');
+    const amountAt=cells.findIndex(c=>/^(amount|balance)\b/.test(c));
+    if(dateAt<0||amountAt<0)continue;
+    return {headerRow:i,cells,typeAt,categoryAt,dateAt,amountAt};
+  }
+  return null;
+}
+function migrationTemplateSheetName(workbook,kind){
+  const wanted=nrm(MIGRATION_TEMPLATE_SHEETS[kind]);
+  return workbook.SheetNames.find(name=>nrm(name)===wanted)||'';
+}
+function isMigrationTemplateWorkbook(workbook){
+  return ['assets','income'].some(kind=>{
+    const name=migrationTemplateSheetName(workbook,kind);
+    if(!name)return false;
+    const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[name],{header:1,defval:'',raw:true});
+    return !!migrationTemplateHeader(aoa);
+  });
+}
+
+/**
+ * Imports the flat migration template / export (one Assets & Liabilities sheet and one
+ * Income & Expenses sheet). A row-signature hash is stored on every imported row, so the
+ * same file - or an exported workbook - can be re-imported without creating duplicates.
+ * @param {{noAccountChange?:boolean}} [options] "I Do not want to change Account".
+ */
+async function importMigrationTemplateWorkbook(workbook,replaceId,fileName,options={}){
+  const keepAccounts=!!options.noAccountChange;
+  const target=replaceId?state.migrationHistory.find(m=>m.id===replaceId):null;
+  const replacing=!!target;
+  const migrationId=replacing?target.id:uid('mig');
+  const seen=new Set(replacing?[]:[...state.records,...state.incomeExpenses].map(r=>r.importHash).filter(Boolean));
+  const recordRows=[],incomeRows=[],newCategories=[],years=new Set();
+  let duplicates=0,invalid=0;
+  for(const kind of ['assets','income']){
+    const sheetName=migrationTemplateSheetName(workbook,kind);
+    if(!sheetName)continue;
+    const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[sheetName],{header:1,defval:'',raw:true});
+    if(aoa.length>MAX_IMPORT_ROWS)aoa.length=MAX_IMPORT_ROWS;
+    const header=migrationTemplateHeader(aoa);
+    if(!header)continue;
+    const col=aliases=>{for(const alias of aliases){const index=header.cells.indexOf(alias);if(index>=0)return index}return -1};
+    const cols={
+      majorHead:col(['major head']),
+      subcategory:col(['subcategory']),
+      particulars:col(['particulars','particular','details','description']),
+      account:col(['account','account / method','account method','account/method','method']),
+      description:col(['description','notes','details']),
+      currency:col(['currency']),
+      status:col(['status']),
+      incomeYear:col(['income year'])
+    };
+    const cell=(row,index)=>index>=0&&index<row.length?row[index]:'';
+    for(let r=header.headerRow+1;r<aoa.length;r++){
+      const row=aoa[r]||[];
+      if(![header.dateAt,header.typeAt,header.categoryAt,header.amountAt,cols.majorHead,cols.subcategory,cols.particulars,cols.description,cols.account].map(index=>String(cell(row,index)??'').trim()).some(Boolean))continue;
+      const typeRaw=nrm(String(cell(row,header.typeAt)??''));
+      const kindType=kind==='assets'
+        ?(typeRaw==='asset'?'Asset':typeRaw==='liability'?'Liability':'')
+        :(typeRaw==='income'?'Income':typeRaw==='expense'?'Expense':'');
+      const category=normClass(cell(row,header.categoryAt));
+      const amount=Math.abs(parseExcelNumber(cell(row,header.amountAt)));
+      const date=normalizeExcelDate(cell(row,header.dateAt));
+      const subcategory=normClass(cell(row,cols.subcategory));
+      const particulars=normClass(cell(row,cols.particulars));
+      if(!kindType||!category||!amount){invalid++;continue}
+      const description=normClass(cell(row,cols.description));
+      const hash=hashString([kind,kindType,date,category,subcategory,kind==='assets'?particulars:description,amount.toFixed(2)].join('|'));
+      if(seen.has(hash)){duplicates++;continue}
+      seen.add(hash);
+      if(kind==='assets'){
+        const record={
+          id:uid('record'),type:kindType,category,subcategory:subcategory||category,
+          particulars:particulars||category,date,details:description,
+          currency:normClass(cell(row,cols.currency)).toUpperCase(),
+          status:normClass(cell(row,cols.status))||'Active',
+          amount,balance:amount,
+          incomeYear:normClass(cell(row,cols.incomeYear))||fiscalYearFromDate(date),
+          documentIds:[],sourceSheet:sheetName,sourceRow:r+1,importHash:hash,migrationId,
+          updatedAt:new Date().toISOString()
+        };
+        recordRows.push(record);
+        if(record.incomeYear)years.add(record.incomeYear);
+        let definition=newCategories.find(c=>c.type===kindType&&c.name===category)||state.categories.find(c=>c.type===kindType&&c.name===category);
+        if(!definition){definition={id:uid('category'),type:kindType,name:category,subcategories:[]};newCategories.push(definition)}
+        if(!Array.isArray(definition.subcategories))definition.subcategories=[];
+        if(record.subcategory&&!definition.subcategories.includes(record.subcategory))definition.subcategories.push(record.subcategory);
+      }else{
+        const cls=ensureIncomeClass(kindType,normClass(cell(row,cols.majorHead)),category,subcategory);
+        const record={
+          id:uid('ie'),type:kindType,date,
+          incomeYear:normClass(cell(row,cols.incomeYear))||fiscalYearFromDate(date),
+          majorHead:cls.majorHead,category:cls.category,subcategory:cls.subcategory,
+          amount,account:normClass(cell(row,cols.account))||'Other',description,
+          documentIds:[],sourceSheet:sheetName,sourceRow:r+1,importHash:hash,migrationId,
+          createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()
+        };
+        if(keepAccounts)record.noAccountChange=true;
+        incomeRows.push(record);
+        if(record.incomeYear)years.add(record.incomeYear);
+      }
+    }
+  }
+  if(replaceId&&!recordRows.length&&!incomeRows.length){toast('The replacement file produced no valid rows — the existing batch was left unchanged.',true);return}
+  if(newCategories.length)await putMany('categories',newCategories);
+  if(replaceId)await removeMigrationRows(migrationId);
+  if(recordRows.length)await putMany('records',recordRows);
+  if(incomeRows.length)await putMany('incomeExpenses',incomeRows);
+  if(incomeRows.length)await putMany('incomeGroups',state.incomeGroups);
+  if(years.size){
+    const list=[...new Set([...(state.settings.incomeYears||[]),...years])].sort((a,b)=>String(b).localeCompare(String(a)));
+    state.settings.incomeYears=list;
+    await put('settings',{key:'incomeYears',value:list});
+  }
+  const imported=recordRows.length+incomeRows.length;
+  if(!imported){toast(duplicates?'These rows are already imported — nothing new to add.':'No importable rows were found in that file.',!duplicates);return 0}
+  await saveMigrationMeta(migrationId,replacing?target.id:null,'Excel & Budge CSV',fileName,imported,duplicates+invalid);
+  await loadState();renderAll();
+  const bits=[`${recordRows.length} asset/liability row${recordRows.length===1?'':'s'}`,`${incomeRows.length} income/expense row${incomeRows.length===1?'':'s'}`];
+  if(duplicates)bits.push(`${duplicates} duplicate${duplicates===1?'':'s'} skipped`);
+  if(invalid)bits.push(`${invalid} incomplete row${invalid===1?'':'s'} skipped`);
+  if(keepAccounts)bits.push('Cash & Bank left unchanged');
+  toast(`Import complete: ${bits.join(', ')}.`);
+  return imported;
+}
+
+/* --- Import Workbook / CSV popup (Settings migration card) --- */
+const EXCEL_IMPORT_HINT_UNCHECKED='Unticked: rows linked to a Cash & Bank account also move that balance.';
+const EXCEL_IMPORT_HINT_CHECKED='Ticked: rows are recorded in this ledger only — no Cash & Bank balance changes.';
+let excelImportDraft=null;
+
+function setExcelImportFileLabel(file){
+  const label=$el('excelImportFileName');
+  const clear=$el('excelImportClear');
+  const confirm=$el('excelImportConfirm');
+  if(label){
+    if(file){
+      label.textContent=`${file.name} · ${formatFileSize(file.size)}`;
+      label.title=file.name;
+      label.classList.add('has-file');
+    }else{
+      label.textContent='No file chosen';
+      label.removeAttribute('title');
+      label.classList.remove('has-file');
+    }
+  }
+  if(clear)clear.classList.toggle('hidden',!file);
+  if(confirm)confirm.disabled=!file;
+}
+function updateExcelImportAccountHint(){
+  const box=$el('excelImportNoAccount');
+  const hint=$el('excelImportAccountHint');
+  if(hint)hint.textContent=box&&box.checked?EXCEL_IMPORT_HINT_CHECKED:EXCEL_IMPORT_HINT_UNCHECKED;
+}
+function resetExcelImportDraft(){
+  excelImportDraft=null;
+  const input=$el('excelImport');
+  if(input)input.value='';
+  const box=$el('excelImportNoAccount');
+  if(box)box.checked=false;
+  updateExcelImportAccountHint();
+  setExcelImportFileLabel(null);
+}
+function openExcelImportModal(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const input=$el('excelImport');
+  if(input)input.value='';
+  excelImportDraft=null;
+  const box=$el('excelImportNoAccount');
+  if(box)box.checked=false;
+  updateExcelImportAccountHint();
+  setExcelImportFileLabel(null);
+  $el('excelImportModal').showModal();
+}
+function excelImportFileChosen(event){
+  const input=event.target;
+  const file=input.files&&input.files[0];
+  input.value='';
+  if(!file)return;
+  excelImportDraft={file};
+  setExcelImportFileLabel(file);
+}
+function clearExcelImportFile(){
+  excelImportDraft=null;
+  setExcelImportFileLabel(null);
+}
+async function confirmExcelImport(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const draft=excelImportDraft;
+  if(!draft||!draft.file){toast('Choose an .xlsx, .xls or .csv file first.',true);return}
+  if(draft.file.size>MAX_IMPORT_BYTES){toast('That file is larger than 30 MB. Split it and import the parts.',true);return}
+  const noAccountChange=!!($el('excelImportNoAccount')&&$el('excelImportNoAccount').checked);
+  const file=draft.file;
+  const button=$el('excelImportConfirm');
+  if(button){button.disabled=true;button.classList.add('loading')}
+  try{
+    $el('excelImportModal').close();
+    await runImport(file,null,{noAccountChange});
+  }finally{
+    if(button){
+      button.classList.remove('loading');
+      button.disabled=!(excelImportDraft&&excelImportDraft.file);
+    }
+  }
+}
+
+/** Downloadable .xlsx template: Type / Entry Type * and Category * are real dropdowns. */
+async function downloadMigrationTemplate(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const workbook=XLSX.utils.book_new();
+  const specs=[];
+  for(const kind of ['assets','income']){
+    const {ws,spec}=migrationTemplateSheet(kind);
+    XLSX.utils.book_append_sheet(workbook,ws,spec.name);
+    specs.push(spec);
+  }
+  let bytes=XLSX.write(workbook,{bookType:'xlsx',type:'array'});
+  let dropdowns=false;
+  if(window.JSZip){
+    try{
+      bytes=await officeTemplateBytesWithValidations(bytes,specs);
+      dropdowns=true;
+    }catch(error){
+      console.warn('Migration template dropdowns could not be added',error);
+    }
+  }
+  downloadBlob(new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`Finance-Migration-Template-${todayISO()}.xlsx`);
+  toast(dropdowns?'Template downloaded — Type / Entry Type * and Category * are dropdowns':'Template downloaded, but the dropdown lists need the ZIP library — reload while online to add them',!dropdowns);
+}
+
+/** Export in the exact template layout, so the workbook can be re-imported without duplicates. */
+function exportMigrationWorkbook(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const records=(state.records||[]).slice().sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')));
+  const income=(state.incomeExpenses||[]).slice().sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')));
+  if(!records.length&&!income.length){toast('There is nothing to export yet.',true);return}
+  const assetRows=records.map(r=>[r.date||'',r.type||'',r.category||'',r.subcategory||'',r.particulars||r.name||'',recordAmount(r),r.currency||'',r.status||'Active',r.incomeYear||'',r.details||r.description||'']);
+  const incomeRows=income.map(r=>[r.date||'',r.type||'',r.majorHead||'',r.category||'',r.subcategory||'',Number(r.amount)||0,r.account||'',r.description||'']);
+  const workbook=XLSX.utils.book_new();
+  const assets=migrationTemplateSheet('assets',assetRows);
+  const incomes=migrationTemplateSheet('income',incomeRows);
+  XLSX.utils.book_append_sheet(workbook,assets.ws,assets.spec.name);
+  XLSX.utils.book_append_sheet(workbook,incomes.ws,incomes.spec.name);
+  XLSX.writeFile(workbook,`Finance-Migration-Workbook-${todayISO()}.xlsx`);
+  toast(`Exported ${records.length} asset/liability and ${income.length} income/expense row(s)`);
 }
 
 /* --- Migration batch tracking (Settings → Excel & Budge CSV Migration history) --- */

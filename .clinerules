@@ -1,0 +1,16 @@
+# Token & Credit Conservation Rules
+
+## Output & Communication
+- Be strictly concise and direct. Never write intros, outros, summaries, or post-edit explanations unless explicitly asked.
+- Output code edits directly without conversational filler.
+
+## File & Context Discipline
+- Read ONLY files explicitly mentioned with `@` or directly required for the exact edit.
+- Do NOT run `list_files`, `search_files`, or broad directory scans unless no target file is given.
+- Never read or modify lock files (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`), build outputs (`dist/`, `build/`, `.next/`), logs, or environment/secret files.
+- Edit only the specific lines/functions needed; do not refactor unrelated code or rewrite entire files unnecessarily.
+
+## Command & Tool Restraint
+- Do NOT run terminal commands, builds, tests, or dev servers unless explicitly requested.
+- Do NOT call MCP tools or external lookups unless explicitly requested in the prompt.
+- If a task is ambiguous or missing a target file, ask a one-line question instead of guessing and scanning multiple files.

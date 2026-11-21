@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=25">
+  <link rel="stylesheet" href="styles.css?v=27">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -351,11 +351,15 @@
           <p>Manage the classification structure used by financial records.</p>
           <button class="btn" id="manageCategories">Manage Categories</button>
         </div>
-        <div class="card settings-card">
+        <div class="card settings-card" id="excelMigrationCard">
           <h3>Excel &amp; Budge CSV Migration</h3>
-          <p>Import worksheets from Assets &amp; Liabilities.xlsx, Income &amp; Expenses.xlsx, or a Budge app export (budge-*.csv / .xlsx). Header rows are detected automatically and re-imports skip duplicates. The original files are never modified.</p>
-          <input type="file" id="excelImport" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden>
-          <button class="btn" id="importExcel">Import Excel / CSV</button>
+          <p>Import an Assets &amp; Liabilities, Income &amp; Expenses or Budge export (<b>.xlsx</b>, <b>.xls</b>, <b>.csv</b>). Header rows are detected automatically, re-imports skip duplicates and the original files are never modified.</p>
+          <div class="inline-form migration-actions">
+            <button class="btn" id="excelImportBtn">Import Workbook / CSV</button>
+            <button class="btn" id="excelTemplateBtn">Download Template</button>
+            <button class="btn" id="excelExportBtn">Export Workbook / CSV</button>
+          </div>
+          <p class="hint">The template has <b>Type</b> / <b>Entry Type *</b> and <b>Category *</b> dropdowns sourced from Manage Categories; Export produces the same layout, so it can be re-imported without duplicates.</p>
           <div class="migration-history">
             <h4>Migration History</h4>
             <p class="hint">Each import is tracked as a batch. Deleting a batch also removes the records it imported.</p>
@@ -364,14 +368,13 @@
         </div>
         <div class="card settings-card" id="officeMigrationCard">
           <h3>Office Purchase &amp; Bill</h3>
-          <p>Import the FY-wise <b>Office Purchase &amp; Bill.xlsx</b> workbook (sheets such as <b>2025-26</b>, left cash outflow / right cash inflow). Rows are deduplicated and each import is tracked as a migration batch. Imported entries appear on the Office Purchase &amp; Bill page, and any entry linked to a Cash &amp; Bank account from <b>Manage Categories</b> also moves that account's balance.</p>
-          <input type="file" id="officeImport" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
-          <div class="inline-form office-migration-actions">
+          <p>Import the FY-wise <b>Office Purchase &amp; Bill.xlsx</b> workbook (sheets such as <b>2025-26</b>, left cash outflow / right cash inflow). Import opens a confirmation popup: tick <b>I Do not want to change Account</b> to add the rows to this ledger only, or leave it unticked to also move the linked Cash &amp; Bank account balances. Rows are deduplicated and each import is tracked as a migration batch.</p>
+          <div class="inline-form migration-actions office-migration-actions">
             <button class="btn" id="officeImportBtn">Import Office Workbook</button>
             <button class="btn" id="officeTemplateBtn">Download Template</button>
             <button class="btn" id="officeExportBtn">Export Office Workbook</button>
           </div>
-          <p class="hint">Export produces the same side-by-side layout, so the file can be re-imported without duplicates.</p>
+          <p class="hint">The template has <b>Entry Type *</b> and <b>Category *</b> dropdowns in every FY sheet; Export produces the same side-by-side layout, so the file can be re-imported without duplicates.</p>
         </div>
         <div class="card settings-card" id="installCard">
           <h3>Mobile App</h3>
@@ -514,6 +517,48 @@
     </form>
   </dialog>
 
+  <dialog id="officeImportModal" class="modal office-import-modal" aria-labelledby="officeImportTitle" aria-describedby="officeImportIntro">
+    <form method="dialog" id="officeImportForm" novalidate>
+      <div class="modal-head"><div><h2 id="officeImportTitle">Import Office Workbook</h2><p>Office Purchase &amp; Bill</p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
+      <div class="modal-body">
+        <p class="hint office-import-intro" id="officeImportIntro">Choose the workbook, then confirm how its linked Cash &amp; Bank accounts should behave. Already imported rows are skipped, so the same file can be re-imported safely.</p>
+        <label class="office-account-check office-import-check" for="officeImportNoAccount">
+          <span class="office-check-row"><input type="checkbox" id="officeImportNoAccount"><span>I Do not want to change Account</span></span>
+          <span class="hint" id="officeImportAccountHint">Unticked: every row linked to a Cash &amp; Bank account moves that balance.</span>
+        </label>
+        <input type="file" id="officeImport" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden>
+        <div class="office-import-picker">
+          <button type="button" class="btn" id="officeImportChoose">Choose File…</button>
+          <span class="office-import-file" id="officeImportFileName">No file chosen</span>
+          <button type="button" class="btn hidden" id="officeImportClear">Remove</button>
+        </div>
+        <p class="hint office-import-note">Accepted: <b>.xlsx</b>, <b>.xls</b> or <b>.csv</b> — a filled template, an exported workbook, or the Office Purchase &amp; Bill file.</p>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="button" class="btn btn-primary" id="officeImportConfirm" disabled>Import Workbook</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="excelImportModal" class="modal office-import-modal" aria-labelledby="excelImportTitle" aria-describedby="excelImportIntro">
+    <form method="dialog" id="excelImportForm" novalidate>
+      <div class="modal-head"><div><h2 id="excelImportTitle">Import Workbook / CSV</h2><p>Excel &amp; Budge CSV Migration</p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
+      <div class="modal-body">
+        <p class="hint office-import-intro" id="excelImportIntro">Choose the workbook or CSV, then confirm how its linked Cash &amp; Bank account should behave. Already imported rows are skipped, so the same file can be re-imported safely.</p>
+        <label class="office-account-check office-import-check" for="excelImportNoAccount">
+          <span class="office-check-row"><input type="checkbox" id="excelImportNoAccount"><span>I Do not want to change Account</span></span>
+          <span class="hint" id="excelImportAccountHint">Unticked: rows linked to a Cash &amp; Bank account also move that balance.</span>
+        </label>
+        <input type="file" id="excelImport" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden>
+        <div class="office-import-picker">
+          <button type="button" class="btn" id="excelImportChoose">Choose File…</button>
+          <span class="office-import-file" id="excelImportFileName">No file chosen</span>
+          <button type="button" class="btn hidden" id="excelImportClear">Remove</button>
+        </div>
+        <p class="hint office-import-note">Accepted: <b>.xlsx</b>, <b>.xls</b> or <b>.csv</b> — a filled template, an exported workbook, or an Assets &amp; Liabilities / Income &amp; Expenses / Budge export.</p>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="button" class="btn btn-primary" id="excelImportConfirm" disabled>Import Workbook / CSV</button></div>
+    </form>
+  </dialog>
+
   <dialog id="migrationEditModal" class="modal" aria-labelledby="migrationEditTitle">
     <form method="dialog">
       <div class="modal-head"><div><h2 id="migrationEditTitle">Edit Migration</h2><p id="migrationEditSubtitle"></p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
@@ -624,6 +669,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=25"></script>
+  <script src="app.js?v=27"></script>
 </body>
 </html>
