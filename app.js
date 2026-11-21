@@ -7,11 +7,11 @@
    ========================================================================== */
 
 const DB_NAME = 'AssetBookDB';
-const DB_VERSION = 5;                       // v5: standalone Office Purchase & Bill ledger (records + PDF links)
-const APP_VERSION = '2026-11-21-v11';
+const DB_VERSION = 6;                       // v6: protected settingsStore keeps the Major Head / Category / Subcategory tree
+const APP_VERSION = '2026-11-21-v13';
 const DATA_VERSION_KEY = 'assetbook-data-version';
 let db;
-let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [], officePurchases: [] };
+let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [], officePurchases: [], categoryStructureMeta: {} };
 let charts = {};
 let editingRecordId = null;
 let savingRecord = false;
@@ -37,27 +37,18 @@ let officeYearMenuOpen = false;
 const officeDocDraft = { existing: [], removed: new Set(), added: [] };
 
 const defaultCategories = [
-  {id:'c-cash',type:'Asset',name:'Cash',subcategories:['Savings Accounts','Cash in Hand']},
-  {id:'c-investments',type:'Asset',name:'Investments',subcategories:['CPF','Group Insurance & Welfare Fund (GI&WF)','Other Investment / Co-operation']},
-  {id:'c-property',type:'Asset',name:'Property',subcategories:['Land & Primary Residence','Vehicles','Jewelry','Other Property']},
-  {id:'c-retirement',type:'Asset',name:'Retirement',subcategories:['Gratuity']},
-  {id:'c-other-assets',type:'Asset',name:'Other Assets',subcategories:['Furniture, Electronics & Equipments','Accounts Receivable']},
-  {id:'c-payable',type:'Liability',name:'Accounts Payable',subcategories:['Accounts Payable']},
-  {id:'c-bank-loan',type:'Liability',name:'Bank Loan',subcategories:['Bank Loan']},
-  {id:'c-other-liabilities',type:'Liability',name:'Other Liabilities',subcategories:['Other Liabilities']}
+  {id:'c-bank-loan',type:'Liability',name:'Bank Loan',subcategories:['Bank Loan'],order:0},
+  {id:'c-cash',type:'Asset',name:'Cash & Bank Account',subcategories:['Cash In Hand','Basic Bank PLC','DBBL','Bkash','Rocket','Nagad','Redotpay'],order:1},
+  {id:'c-investments',type:'Asset',name:'Investments',subcategories:['CPF (Own)','CPF (Company)','Group Insurance','Welfare Fund','Other Investment / Co-operation'],order:2},
+  {id:'c-property',type:'Asset',name:'Property',subcategories:['Land & Primary Residence','Vehicles','Jewelry','Other Property'],order:3},
+  {id:'c-other-liabilities',type:'Liability',name:'Other Liabilities',subcategories:['Other Liabilities'],order:4},
+  {id:'c-payable',type:'Liability',name:'Accounts Payable',subcategories:['Accounts Payable'],order:5},
+  {id:'c-retirement',type:'Asset',name:'Retirement',subcategories:['Gratuity'],order:6},
+  {id:'c-other-assets',type:'Asset',name:'Other Assets',subcategories:['Furniture, Electronics & Equipments','Accounts Receivable'],order:7}
 ];
 
 /* Master Income / Expense classification tree (mapped to "Income & Expenses.xlsx"). */
 const defaultIncomeGroups = [
-  {id:'ig-salary',type:'Income',majorHead:'Income From Salary (PGCL)',categories:[
-    {name:'Salary & Bonuses',subcategories:['Basic and Allowances','Incentive Bonus','Profit Bonus','LFA','Festival Bonus','Ex-gratia']}
-  ]},
-  {id:'ig-other-receive',type:'Income',majorHead:'Income From Other Receive (PGCL)',categories:[
-    {name:'Allowances & Other Receives',subcategories:['Lunch Subsidy','Leverage','TA+DA','Training Allowance','Honorarium','Previous Year Profit Bonus']}
-  ]},
-  {id:'ig-other-income',type:'Income',majorHead:'Other Income',categories:[
-    {name:'General Income',subcategories:['Bank Interest / Profit','Gift / Refund','Other Income']}
-  ]},
   {id:'ig-food',type:'Expense',majorHead:'Expenses for Food, Clothing and Other Essentials',categories:[
     {name:'Food',subcategories:['Grocery items','Snacks items','Dining/Eating Out','Mess']},
     {name:'Clothing',subcategories:['Own','Spouse','Family','Offspring','Laundry']},
@@ -65,37 +56,58 @@ const defaultIncomeGroups = [
     {name:'Medicine & Doctor',subcategories:['Own','Spouse','Offspring','Family']},
     {name:'Pocket Money',subcategories:['Spouse','Offspring','Family']},
     {name:'Contribution For Family',subcategories:['Regular']}
-  ]},
+  ],order:0},
   {id:'ig-accommodation',type:'Expense',majorHead:'Accommodation Expense',categories:[
     {name:'Accommodation',subcategories:['Household Rent']}
-  ]},
+  ],order:1},
   {id:'ig-auto',type:'Expense',majorHead:'Auto and Transportation Expenses',categories:[
     {name:'Fuel and Maintenance',subcategories:['Fuel and Maintenance']},
     {name:'Other Transportation',subcategories:['Auto','Bus','Train','Others']}
-  ]},
+  ],order:2},
   {id:'ig-utility',type:'Expense',majorHead:'Household and Utility Expenses',categories:[
-    {name:'Utilities & Home Support',subcategories:['Electricity','Gas, Water, Sewer and Garbage','Phone, Internet, TV channels and Subscription','Home-Support Staff and Other Expenses']}
-  ]},
+    {name:'Electricity',subcategories:['Rent House','Own House']},
+    {name:'Gas, Water, Sewer & Garbage',subcategories:['Gas','Water','Sewer','Garbage']},
+    {name:'Phone, Internet, TV channels and Subscription',subcategories:['Mobile Internet','Mobile Recharge','Wifi Bill']},
+    {name:'Home-Support Staff and Other Expenses',subcategories:['Maid','Small Kitchen Appliances','Small Home Appliances','Toiletries','Others']}
+  ],order:3},
   {id:'ig-education',type:'Expense',majorHead:'Education Expenses',categories:[
-    {name:'Education',subcategories:['Education Expenses']}
-  ]},
+    {name:'Education',subcategories:['Books & Others','School Fees','Tution Fees','Islamic Books','Online Courses']}
+  ],order:4},
   {id:'ig-festival',type:'Expense',majorHead:'Festival And Other Special Expenses',categories:[
-    {name:'Special & Events',subcategories:['Festival, Party, Events','Domestic and Overseas Tour, Holiday, Etc.','Philanthropy, Etc','Other Special Expenses']}
-  ]},
+    {name:'Festival, Party, Events',subcategories:['Eid Festivals','Events','Party']},
+    {name:'Domestic and Overseas Tour, Holiday, Etc.',subcategories:['Transportation Cost','Hotel Cost','Shopping']},
+    {name:'Philanthropy, Etc',subcategories:['Zakat','Sadka','Other Donation']},
+    {name:'Other Special Expenses',subcategories:['Own','Spouse','Offspring','Family']}
+  ],order:5},
   {id:'ig-misc',type:'Expense',majorHead:'Any Other Expenses',categories:[
-    {name:'Miscellaneous',subcategories:['Any Other Expenses']}
-  ]},
+    {name:'Miscellaneous',subcategories:['Any Other Expenses']},
+    {name:'Bank/ATM Charge',subcategories:['Bank Charge','ATM Charge']},
+    {name:'Mobile Banking Charge',subcategories:['Bkash','Rocket','Nagad','Others']}
+  ],order:6},
+  {id:'ig-salary',type:'Income',majorHead:'Income From Employment',categories:[
+    {name:'Salary',subcategories:['Basic Salary']},
+    {name:'Allowances',subcategories:['House Rent Allowance','Conveyance Allowance','Medical Allowance','Gas Subsidy','Tiffin Allowance','Dearness Allowance','Education Allowance','Noboborso Allowance','Recreation Leave','Enterainment allowance','Washing Allowance','Shifting Allowance','Domestic Aid Allowance','Subsistence Allowance','Staff Over Allance','Honorarium']},
+    {name:'Bonus',subcategories:['Incentive/other Bonus','Festival Bonus']}
+  ],order:7},
+  {id:'ig-fcf29151-3744-4dbe-ba17-31c20c63532b',type:'Income',majorHead:'Income from Other Sources',categories:[
+    {name:'WPPF',subcategories:['Payment from WPPF']}
+  ],order:8},
   {id:'ig-tax',type:'Expense',majorHead:'Tax, Charges, Etc. Paid',categories:[
     {name:'Tax & Surcharge',subcategories:['Payment of Tax at Source & Advance Tax','Payment of Tax, Surcharge or Other Amounts']}
-  ]},
-  {id:'ig-loss',type:'Expense',majorHead:'Loss, Deduction, Other Expense',categories:[
-    {name:'Special Contribution For Family',subcategories:['Small Amount','Big Amount','Spouse','Offspring']},
-    {name:'Office Purchase & Bill',subcategories:['Office Purchase','Bill Received','Personal Print']}
-  ]}
+  ],order:9},
+  {id:'ig-73e7dce6-fe71-41ae-8ea4-20c06f05e559',type:'Income',majorHead:'Income With CPF',categories:[
+    {name:'CPF (Company)',subcategories:['CPF (Company)']}
+  ],order:10},
+  {id:'ig-5618cd06-4c98-44cf-b57d-9ae43e112bba',type:'Income',majorHead:'Income From Financial Assets',categories:[
+    {name:'Interest',subcategories:['Basic Bank PLC','DBBL','Bkash']}
+  ],order:11},
+  {id:'ig-other-receive',type:'Income',majorHead:'Income From Other Receive (PGCL)',categories:[
+    {name:'Allowances & Other Receives',subcategories:['Lunch Subsidy','Leverage','TA+DA','Training Allowance','Previous Year Profit Bonus']}
+  ],order:12}
 ];
 
 /* Payment methods offered by the Add / Edit form and recognised by imports. */
-const ACCOUNTS = ['Cash in Hand','bKash','Basic Bank Limited','Card','Other'];
+const ACCOUNTS = ['Cash In Hand','Basic Bank PLC','DBBL','Bkash','Rocket','Nagad','Redotpay','Card','Other'];
 
 /* Workbooks kept in the local Project/ folder. They are loaded once into an empty
    database (same pipeline as Settings -> Import) so the Dashboard shows the complete
@@ -129,6 +141,9 @@ function openDB() {
       if(!database.objectStoreNames.contains('incomeGroups')) database.createObjectStore('incomeGroups',{keyPath:'id'});
       // v4: migration batch metadata (Settings → Excel & Budge CSV Migration history).
       if(!database.objectStoreNames.contains('migrationHistory')) database.createObjectStore('migrationHistory',{keyPath:'id'});
+      // v6: protected settings store. Holds the full Major Head / Category / Subcategory tree;
+      // it is seeded once and is never cleared by an import or a backup restore.
+      if(!database.objectStoreNames.contains('settingsStore')) database.createObjectStore('settingsStore',{keyPath:'key'});
       // v5: Office Purchase & Bill ledger - completely separate from the Dashboard records.
       if(!database.objectStoreNames.contains('officePurchases')){
         const op=database.createObjectStore('officePurchases',{keyPath:'id'});
@@ -230,6 +245,251 @@ function replaceStore(store,items){
     transaction.onabort=()=>reject(transaction.error||new Error('The database rejected the write (is the disk full?).'));
   });
 }
+
+/* ==========================================================================
+   Protected category structure (settingsStore)
+   The whole Major Head -> Category -> Subcategory tree is mirrored into one record
+   in the dedicated "settingsStore" object store. Rules:
+     - it is seeded exactly once per browser, guarded by the settingsStore record
+       'masterCategoryListExists' (written together with the tree in one transaction)
+     - imports / migrations and backup restores may only ADD to it (never clear,
+       overwrite or re-seed it), so a reload can never lose the user's structure
+     - every Manage Categories save / edit / delete writes it immediately
+   ========================================================================== */
+const SETTINGS_STORE = 'settingsStore';
+const CATEGORY_STRUCTURE_KEY = 'categoryStructure';
+const CATEGORY_INIT_KEY = 'masterCategoryListExists';   // one-time guard: structure already seeded
+const CATEGORY_STRUCTURE_VERSION = 2;       // revision 2: definitive Major Head / Category / Subcategory tree
+const cloneStructure = value => JSON.parse(JSON.stringify(value));
+const structureName = value => String(value ?? '').trim().toLowerCase();
+
+function defaultCategoryStructure(){
+  return {categories:cloneStructure(defaultCategories),incomeGroups:cloneStructure(defaultIncomeGroups)};
+}
+
+/** Reads the protected record; null means "not initialized yet". */
+async function readCategoryStructure(){
+  try{
+    const stored = await getOne(SETTINGS_STORE, CATEGORY_STRUCTURE_KEY);
+    if(stored && Array.isArray(stored.categories) && Array.isArray(stored.incomeGroups)) return stored;
+  }catch(error){console.warn('Category structure could not be read', error)}
+  return null;
+}
+
+/** Writes the supplied tree to settingsStore and refreshes the "System/Custom Data" badge. */
+async function writeCategoryStructure(categories, incomeGroups, source){
+  const record = {
+    key: CATEGORY_STRUCTURE_KEY,
+    version: CATEGORY_STRUCTURE_VERSION,
+    source: source === 'default' ? 'default' : 'user',
+    updatedAt: new Date().toISOString(),
+    categories: cloneStructure(categories || []),
+    incomeGroups: cloneStructure(incomeGroups || [])
+  };
+  await put(SETTINGS_STORE, record);
+  state.categoryStructureMeta = {source: record.source, updatedAt: record.updatedAt};
+  updateCategoryStructureBadge();
+  return record;
+}
+
+/** Called by every Manage Categories handler so the UI change is durable immediately.
+ *  Writes the `categories` and `incomeGroups` arrays of the protected settingsStore record. */
+async function persistCategoryStructure(source = 'user'){
+  return writeCategoryStructure(state.categories, state.incomeGroups, source);
+}
+
+/** Public surface of the category module (Manage Categories UI + backup/restore hooks). */
+const CategoryManager = {
+  read: readCategoryStructure,
+  persist: persistCategoryStructure,
+  merge: mergeCategoryStructure,
+  refreshBadge: updateCategoryStructureBadge
+};
+
+/** Union merge: adds anything missing from `source`, never removes or renames existing rows. */
+function mergeStructureInto(target, source){
+  let changed = false;
+  if(!Array.isArray(target.categories)) target.categories = [];
+  if(!Array.isArray(target.incomeGroups)) target.incomeGroups = [];
+  const addSubs = (holder, list) => {
+    if(!Array.isArray(holder.subcategories)) holder.subcategories = [];
+    (list || []).forEach(name => {
+      const value = String(name ?? '').trim();
+      if(!value) return;
+      if(!holder.subcategories.some(existing => structureName(existing) === structureName(value))){
+        holder.subcategories.push(value);
+        changed = true;
+      }
+    });
+  };
+  ((source && source.categories) || []).forEach(incoming => {
+    if(!incoming) return;
+    const match = target.categories.find(item => (incoming.id && item.id === incoming.id) ||
+      (item.type === incoming.type && structureName(item.name) === structureName(incoming.name)));
+    if(!match){
+      target.categories.push(cloneStructure(incoming));
+      changed = true;
+      return;
+    }
+    addSubs(match, incoming.subcategories);
+  });
+  ((source && source.incomeGroups) || []).forEach(incoming => {
+    if(!incoming) return;
+    const group = target.incomeGroups.find(item => (incoming.id && item.id === incoming.id) ||
+      (item.type === incoming.type && structureName(item.majorHead) === structureName(incoming.majorHead)));
+    if(!group){
+      target.incomeGroups.push(cloneStructure(incoming));
+      changed = true;
+      return;
+    }
+    if(!Array.isArray(group.categories)) group.categories = [];
+    (incoming.categories || []).forEach(cat => {
+      if(!cat) return;
+      const match = group.categories.find(item => structureName(item.name) === structureName(cat.name));
+      if(!match){
+        const copy = {name: cat.name, subcategories: []};
+        if(Array.isArray(cat.subcategories)) copy.subcategories = cloneStructure(cat.subcategories);
+        group.categories.push(copy);
+        changed = true;
+        return;
+      }
+      addSubs(match, cat.subcategories);
+    });
+  });
+  return changed;
+}
+
+/**
+ * Writes the definitive tree as the base system state. The legacy stores are re-written from the
+ * same tree, so the loadState() merge cannot put removed rows back into the protected record.
+ */
+async function seedCategoryStructure(source = 'default'){
+  const structure = defaultCategoryStructure();
+  await replaceStore('categories', structure.categories).catch(error => console.warn('Legacy category store could not be synced', error));
+  await replaceStore('incomeGroups', structure.incomeGroups).catch(error => console.warn('Legacy income group store could not be synced', error));
+  return writeCategoryStructure(structure.categories, structure.incomeGroups, source);
+}
+
+/**
+ * Initializes the persistent category structure ONCE, inside a single settingsStore transaction:
+ * the guard record ('masterCategoryListExists') and the record that holds the `categories` /
+ * `incomeGroups` arrays from the definitive JSON are written together. Because the guard is
+ * checked first, a reload, an Excel / Budge import or a backup restore can never re-seed or
+ * overwrite the saved tree. A record that is already at the current revision is left untouched
+ * (only the guard is added), so the user's Manage Categories edits always survive an upgrade.
+ * @returns {Promise<boolean>} true when this call wrote the definitive tree.
+ */
+function initializePersistentCategories(){
+  return new Promise((resolve,reject)=>{
+    const structure = defaultCategoryStructure();
+    const updatedAt = new Date().toISOString();
+    let seeded = false;
+    const transaction = db.transaction(SETTINGS_STORE,'readwrite');
+    const store = transaction.objectStore(SETTINGS_STORE);
+    const guard = store.get(CATEGORY_INIT_KEY);
+    guard.onsuccess = () => {
+      if(guard.result) return;                                   // already initialized once
+      const existing = store.get(CATEGORY_STRUCTURE_KEY);
+      existing.onsuccess = () => {
+        const stored = existing.result;
+        const current = !!stored && Number(stored.version || 1) >= CATEGORY_STRUCTURE_VERSION;
+        store.put({key: CATEGORY_INIT_KEY, value: true, version: CATEGORY_STRUCTURE_VERSION, createdAt: updatedAt});
+        if(current) return;                                      // keep the saved (Custom Data) tree
+        store.put({
+          key: CATEGORY_STRUCTURE_KEY,
+          version: CATEGORY_STRUCTURE_VERSION,
+          source: 'default',
+          updatedAt,
+          categories: structure.categories,
+          incomeGroups: structure.incomeGroups
+        });
+        seeded = true;
+      };
+      existing.onerror = () => reject(existing.error);
+    };
+    guard.onerror = () => reject(guard.error);
+    transaction.oncomplete = () => resolve(seeded);
+    transaction.onerror = () => reject(transaction.error || new Error('Could not initialize the category store.'));
+    transaction.onabort = () => reject(transaction.error || new Error('The database rejected the category initialization.'));
+  });
+}
+
+/**
+ * One-time companion of the revision upgrade: records saved under the old "Cash" / "Cash & Bank"
+ * labels are renamed to "Cash & Bank Account" (and "Cash in Hand" -> "Cash In Hand"), so their
+ * amounts stay inside the definitive category. Ids, amounts and documents are never touched.
+ */
+async function migrateLegacyCashRecords(){
+  const records = await getAll('records').catch(() => []);
+  const updates = [];
+  for(const record of records){
+    if(!record || record.type !== 'Asset' || !isCashCategoryName(record.category)) continue;
+    const category = 'Cash & Bank Account';
+    const subcategory = /^cash in hand$/i.test(String(record.subcategory || '').trim()) ? 'Cash In Hand' : record.subcategory;
+    if(String(record.category || '').trim() === category && String(record.subcategory || '').trim() === String(subcategory || '').trim()) continue;
+    updates.push(Object.assign({}, record, {category, subcategory}));
+  }
+  if(updates.length) await putMany('records', updates);
+  return updates.length;
+}
+
+/** Runs once at start-up: seeds the protected record only when the store has never been initialized. */
+async function ensureCategoryStructure(){
+  const seeded = await initializePersistentCategories();
+  if(seeded){
+    // Mirror the definitive tree into the legacy stores, so the loadState() merge cannot put
+    // rows from an older build back into the protected record.
+    const structure = defaultCategoryStructure();
+    await replaceStore('categories', structure.categories).catch(error => console.warn('Legacy category store could not be synced', error));
+    await replaceStore('incomeGroups', structure.incomeGroups).catch(error => console.warn('Legacy income group store could not be synced', error));
+    const renamed = await migrateLegacyCashRecords();
+    if(renamed) console.info(`Renamed ${renamed} Cash record(s) to "Cash & Bank Account"`);
+  }
+  const stored = await readCategoryStructure();
+  if(stored){
+    if(Number(stored.version || 1) < CATEGORY_STRUCTURE_VERSION){
+      // Safety net for a record written by a build that predates the definitive tree.
+      const renamed = await migrateLegacyCashRecords();
+      if(renamed) console.info(`Renamed ${renamed} Cash record(s) to "Cash & Bank Account"`);
+      return seedCategoryStructure('default');
+    }
+    state.categoryStructureMeta = {source: stored.source === 'default' ? 'default' : 'user', updatedAt: stored.updatedAt || ''};
+    updateCategoryStructureBadge();
+    return stored;
+  }
+  // The guard exists but the tree is missing (older build or a manual clear): write it once.
+  const renamed = await migrateLegacyCashRecords();
+  if(renamed) console.info(`Renamed ${renamed} Cash record(s) to "Cash & Bank Account"`);
+  return seedCategoryStructure('default');
+}
+
+/** Merge-only restore/import hook: the protected record absorbs new rows and keeps the old ones. */
+async function mergeCategoryStructure(structure){
+  const stored = await readCategoryStructure();
+  if(!stored) return ensureCategoryStructure();
+  const merged = {categories: cloneStructure(stored.categories || []), incomeGroups: cloneStructure(stored.incomeGroups || [])};
+  const changed = mergeStructureInto(merged, structure || {});
+  if(!changed) return stored;
+  return writeCategoryStructure(merged.categories, merged.incomeGroups, 'user');
+}
+
+/** Visual cue in Settings > Manage Categories: System Data vs Custom Data. */
+function updateCategoryStructureBadge(){
+  const badge = document.getElementById('categoryStructureBadge');
+  const hint = document.getElementById('categoryStructureHint');
+  if(!badge) return;
+  const custom = (state.categoryStructureMeta || {}).source !== 'default';
+  badge.textContent = custom ? 'Custom Data' : 'System Data';
+  badge.classList.toggle('category-data-badge-custom', custom);
+  badge.title = 'Stored in the protected settings store — never cleared by an import, reload or backup restore.';
+  if(hint){
+    hint.textContent = custom
+      ? 'Saved as Custom Data in the protected settings store — preserved across reloads, imports and backup restores.'
+      : 'System Data — your first edit is saved to the protected settings store and preserved across reloads, imports and backup restores.';
+  }
+}
+
+
 /** PDF bytes are loaded on demand only - they are never part of the in-memory state. */
 async function getDocBlob(id){
   const stored=await getOne('documentBlobs',id).catch(()=>null);
@@ -481,11 +741,11 @@ function makeSchema(category,subcategory,sheet,fields,opts={}){
 }
 
 const SCHEMAS=[
-  makeSchema('Cash','Cash in Hand','Cash-CIH',[
+  makeSchema('Cash & Bank Account','Cash In Hand','Cash-CIH',[
     field('particulars','Cash Asset Name','text',['cash asset name'],{required:true,placeholder:'e.g. Cash In Hand, Bkash'})
   ],{amountExcel:['balance'],amountHint:'Excel: Balance',detailsHint:'Optional note (not a separate column in this sheet)'}),
 
-  makeSchema('Cash','Savings Accounts','Cash-Savings Accounts',[
+  makeSchema('Cash & Bank Account','Savings Accounts','Cash-Savings Accounts',[
     field('particulars','Bank Name','text',['bank name'],{required:true,placeholder:'e.g. BASIC Bank Limited'}),
     field('accountDetail','Account Detail','text',['account detail'],{placeholder:'Account number / branch'})
   ],{amountExcel:['balance'],amountHint:'Excel: Balance',detailsHint:'Optional note (not a separate column in this sheet)'}),
@@ -713,14 +973,8 @@ async function init(){
   setupPWA();
   db=await openDB();
   await checkDataVersion();
-  const existingCategories=await getAll('categories');
-  if(!existingCategories.length){
-    for(const category of defaultCategories) await put('categories',category);
-  }
-  const existingGroups=await getAll('incomeGroups');
-  if(!existingGroups.length){
-    for(const group of defaultIncomeGroups) await put('incomeGroups',group);
-  }
+  // Seed / read the protected Major Head -> Category -> Subcategory record before any render.
+  await ensureCategoryStructure();
   await loadState();
   const settings=await getAll('settings');
   state.settings=settings.reduce((out,item)=>(out[item.key]=item.value,out),{});
@@ -742,16 +996,46 @@ async function init(){
   requestPersistentStorage();
 }
 
+/** Serial order saved by the Manage Categories drag & drop ("order" lives on the record).
+ *  getAll() returns rows in key order, so the explicit index is what keeps the user's order. */
+function sortBySavedOrder(items){
+  return items.slice().sort((a,b)=>{
+    const ao=a&&Number.isFinite(a.order)?a.order:Infinity;
+    const bo=b&&Number.isFinite(b.order)?b.order:Infinity;
+    if(ao===bo)return 0;
+    return ao<bo?-1:1;
+  });
+}
 async function loadState(){
   state.records=await getAll('records');
-  state.categories=await getAll('categories');
   state.documents=await getAll('documents');
   state.backupHistory=await getAll('backupHistory');
   state.incomeExpenses=await getAll('incomeExpenses');
-  state.incomeGroups=await getAll('incomeGroups');
   state.migrationHistory=await getAll('migrationHistory');
   state.officePurchases=await getAll('officePurchases');
-  if(!state.incomeGroups.length){for(const group of defaultIncomeGroups) state.incomeGroups.push(group)}
+  // settingsStore owns the Major Head / Category / Subcategory tree. Legacy stores and
+  // imports are merged IN only, so a reload, import or restore can never shrink it.
+  const storedStructure=await readCategoryStructure();
+  if(storedStructure){
+    const merged={categories:sortBySavedOrder(storedStructure.categories),incomeGroups:sortBySavedOrder(storedStructure.incomeGroups)};
+    const changed=mergeStructureInto(merged,{
+      categories:await getAll('categories'),
+      incomeGroups:sortBySavedOrder(await getAll('incomeGroups'))
+    });
+    state.categories=merged.categories;
+    state.incomeGroups=merged.incomeGroups;
+    state.categoryStructureMeta={source:storedStructure.source==='default'?'default':'user',updatedAt:storedStructure.updatedAt||''};
+    if(changed){
+      state.categories.forEach((entry,index)=>{entry.order=index});
+      state.incomeGroups.forEach((entry,index)=>{entry.order=index});
+      await writeCategoryStructure(state.categories,state.incomeGroups,state.categoryStructureMeta.source);
+    }
+    updateCategoryStructureBadge();
+  }else{
+    state.categories=sortBySavedOrder(await getAll('categories'));
+    state.incomeGroups=sortBySavedOrder(await getAll('incomeGroups'));
+    if(!state.incomeGroups.length){for(const group of defaultIncomeGroups) state.incomeGroups.push(group)}
+  }
 }
 
 function toast(message,error=false){
@@ -1159,9 +1443,10 @@ function recordAmount(record){
      selected Income Year's end (so a newer balance outside that year is ignored),
      then the latest balances of different items are added together.
    ========================================================================== */
-/** Cash & Bank = an Asset whose category is "Cash" (Savings Accounts / Cash in Hand). The label is
- *  also recognised as "Cash & Bank" / "Cash and Bank" so a renamed category keeps snapshot semantics. */
-const isCashCategoryName=name=>/^(cash|cash\s*&\s*bank|cash\s+and\s+bank)$/i.test(String(name||'').trim());
+/** Cash & Bank = an Asset whose category is "Cash" or "Cash & Bank Account" (Cash In Hand / bank
+ *  accounts / mobile wallets). Also recognised as "Cash & Bank" / "Cash and Bank", so a renamed
+ *  category keeps snapshot semantics. */
+const isCashCategoryName=name=>/^(cash|cash\s*(?:&|\band\b)\s*bank(?:\s*account)?)$/i.test(String(name||'').trim());
 /** "Cash & Bank" exactly (also spelled "Cash and Bank"). The built-in Cash category keeps its own
  *  schemas (Cash Asset Name / Bank Name), so auto-naming Particulars only applies to this label. */
 const isCashBankCategoryName=name=>/^cash\s*(?:&|\band\b)\s*bank$/i.test(String(name||'').trim());
@@ -1396,7 +1681,7 @@ function effectiveRecordsForBalance(records,year){
   const carried=base.filter(r=>!isCashRecord(r)&&carriesIntoYear(r,year));
   const withTransfers=applyTransferLegs([...carried,...cash],(state.records||[]).filter(isTransferRecord),year);
   const withFunding=applyFundingLegs(withTransfers,carried,year);
-  return applyOfficeAccountLegs(withFunding,year);
+  return applyIncomeAccountLegs(applyOfficeAccountLegs(withFunding,year),year);
 }
 
 const sumAmount=records=>records.reduce((s,r)=>s+recordAmount(r),0);
@@ -3468,6 +3753,7 @@ function renderBalance(){
 
 function openCategoryModal(){
   document.getElementById('categoryModal').showModal();
+  updateCategoryStructureBadge();
   renderCategoryMajorHeads();
   renderCategoryFormFields();
   renderCategoryNameOptions();
@@ -3487,6 +3773,8 @@ function renderCategoryNameOptions(){
   select.innerHTML=`<option value="">All Categories</option>${unique.map(name=>`<option value="${esc(name)}">${esc(name)}</option>`).join('')}`;
   select.value=unique.includes(selected)?selected:'';
 }
+/** Drag handle markup shared by every reorderable row (Major Head, Category, Subcategory). */
+const CATEGORY_DRAG_HANDLE='<span class="drag-handle" aria-hidden="true" title="Drag to reorder">⋮⋮</span>';
 function renderCategoryTree(){
   renderCategoryNameOptions();
   const type=document.getElementById('categoryType').value;
@@ -3494,22 +3782,197 @@ function renderCategoryTree(){
   const majorHead=document.getElementById('categoryMajorHead').value;
   const tree=state.categories.filter(c=>(!type||c.type===type)&&(!selectedCategory||c.name===selectedCategory)).map(c=>{
     const id=esc(c.id);
-    const subs=c.subcategories.map(s=>`<span>${catIcon(s,c.type)}${esc(s)} <button type="button" class="action-link" data-cmd="rename-subcategory" data-id="${id}" data-name="${esc(s)}">Edit</button> <button type="button" class="action-link danger" data-cmd="delete-subcategory" data-id="${id}" data-name="${esc(s)}" aria-label="Delete subcategory ${esc(s)}">×</button></span>`).join('');
-    return `<div class="category-group"><strong>${catIcon(c.name,c.type)}${esc(c.type)} · ${esc(c.name)} <button type="button" class="action-link" data-cmd="rename-category" data-id="${id}">Edit</button></strong>${subs}<button type="button" class="action-link danger" data-cmd="delete-category" data-id="${id}">Delete Category</button></div>`;
+    const subs=c.subcategories.map(s=>`<span class="cat-sub" draggable="true" data-drag="subcategory" data-id="${id}" data-name="${esc(s)}">${CATEGORY_DRAG_HANDLE}${catIcon(s,c.type)}${esc(s)} <button type="button" class="action-link" data-cmd="rename-subcategory" data-id="${id}" data-name="${esc(s)}">Edit</button> <button type="button" class="action-link danger" data-cmd="delete-subcategory" data-id="${id}" data-name="${esc(s)}" aria-label="Delete subcategory ${esc(s)}">×</button></span>`).join('');
+    return `<div class="category-group cat-drag" draggable="true" data-drag="category" data-id="${id}"><div class="cat-drag-head">${CATEGORY_DRAG_HANDLE}<strong>${catIcon(c.name,c.type)}${esc(c.type)} · ${esc(c.name)}</strong><button type="button" class="action-link" data-cmd="rename-category" data-id="${id}">Edit</button></div><div class="category-subs">${subs}</div><button type="button" class="action-link danger" data-cmd="delete-category" data-id="${id}">Delete Category</button></div>`;
   }).join('');
   const incomeTree=state.incomeGroups.filter(g=>(!type||g.type===type)&&
     (!(type==='Income'||type==='Expense')||majorHead==='__new__'||!majorHead||g.majorHead===majorHead)).map(g=>{
     const gid=esc(g.id);
     const cats=(g.categories||[]).filter(cat=>!selectedCategory||cat.name===selectedCategory).map(cat=>{
       const cname=esc(cat.name);
-      const subs=(cat.subcategories||[]).map(s=>`<span>${catIcon(s,g.type)}${esc(s)} <button type="button" class="action-link" data-cmd="rename-income-subcategory" data-id="${gid}" data-cat="${cname}" data-name="${esc(s)}">Edit</button> <button type="button" class="action-link danger" data-cmd="delete-income-subcategory" data-id="${gid}" data-cat="${cname}" data-name="${esc(s)}" aria-label="Delete subcategory ${esc(s)}">×</button></span>`).join('');
-      return `<div class="category-group"><strong>${catIcon(cat.name,g.type)}${esc(cat.name)} <button type="button" class="action-link" data-cmd="rename-income-category" data-id="${gid}" data-name="${cname}">Edit</button></strong>${subs}<button type="button" class="action-link danger" data-cmd="delete-income-category" data-id="${gid}" data-name="${cname}">Delete Category</button></div>`;
+      const subs=(cat.subcategories||[]).map(s=>`<span class="cat-sub" draggable="true" data-drag="income-subcategory" data-id="${gid}" data-cat="${cname}" data-name="${esc(s)}">${CATEGORY_DRAG_HANDLE}${catIcon(s,g.type)}${esc(s)} <button type="button" class="action-link" data-cmd="rename-income-subcategory" data-id="${gid}" data-cat="${cname}" data-name="${esc(s)}">Edit</button> <button type="button" class="action-link danger" data-cmd="delete-income-subcategory" data-id="${gid}" data-cat="${cname}" data-name="${esc(s)}" aria-label="Delete subcategory ${esc(s)}">×</button></span>`).join('');
+      return `<div class="category-group income-cat cat-drag" draggable="true" data-drag="income-category" data-id="${gid}" data-cat="${cname}"><div class="cat-drag-head">${CATEGORY_DRAG_HANDLE}<strong>${catIcon(cat.name,g.type)}${esc(cat.name)}</strong><button type="button" class="action-link" data-cmd="rename-income-category" data-id="${gid}" data-name="${cname}">Edit</button></div><div class="category-subs">${subs}</div><button type="button" class="action-link danger" data-cmd="delete-income-category" data-id="${gid}" data-name="${cname}">Delete Category</button></div>`;
     }).join('');
     if(!cats)return '';
-    return `<div class="category-group income-group"><strong>${catIcon(g.majorHead,g.type)}${esc(g.type)} · ${esc(g.majorHead)} <button type="button" class="action-link" data-cmd="rename-income-group" data-id="${gid}">Edit</button></strong>${cats}<button type="button" class="action-link danger" data-cmd="delete-income-group" data-id="${gid}">Delete Major Head</button></div>`;
+    return `<div class="category-group income-group cat-drag" draggable="true" data-drag="group" data-id="${gid}"><div class="cat-drag-head">${CATEGORY_DRAG_HANDLE}<strong>${catIcon(g.majorHead,g.type)}${esc(g.type)} · ${esc(g.majorHead)}</strong><button type="button" class="action-link" data-cmd="rename-income-group" data-id="${gid}">Edit</button></div><div class="category-children">${cats}</div><button type="button" class="action-link danger" data-cmd="delete-income-group" data-id="${gid}">Delete Major Head</button></div>`;
   }).join('');
-  document.getElementById('categoryTree').innerHTML=tree+(incomeTree?`<div class="cat-section-title">Income &amp; Expenses</div>`+incomeTree:'')||'<p class="hint">No categories match these filters.</p>';
+  const assetBlock=tree?`<div class="category-groups" data-drag-list="category">${tree}</div>`:'';
+  const incomeBlock=incomeTree?`<div class="cat-section-title">Income &amp; Expenses</div><div class="category-groups" data-drag-list="group">${incomeTree}</div>`:'';
+  document.getElementById('categoryTree').innerHTML=assetBlock+incomeBlock||'<p class="hint">No categories match these filters.</p>';
+  initCategoryDragAndDrop();
 }
+/* ==========================================================================
+   Manage Categories - drag & drop ordering
+   Every Major Head, Category and Subcategory row is draggable ("draggable=true")
+   and shows a "⋮⋮" handle. On drop the rows are re-ordered in the DOM first, then
+   the new serial order is written to IndexedDB (AssetBookDB):
+     - Asset / Liability categories -> categories[i].order
+     - Income / Expense major heads -> incomeGroups[i].order
+     - categories inside a head     -> incomeGroups[i].categories array order
+     - subcategories                -> categories[i].subcategories array order
+   Touch / pen screens use the pointer fallback below, because HTML5 drag events
+   never fire on touch.
+   ========================================================================== */
+const CATEGORY_DRAG_KEY={category:'id',group:'id','income-category':'cat',subcategory:'name','income-subcategory':'name'};
+let categoryDragItem=null;
+let categoryTouchDragId=null;
+
+/** Rows may only trade places with the same kind of row in the same list. */
+function categoryDropAllowed(item,target){
+  if(!item||!target||item===target)return false;
+  if(item.dataset.drag!==target.dataset.drag)return false;
+  if(item.parentElement!==target.parentElement)return false;
+  return !item.contains(target);
+}
+function clearCategoryDropCues(host){
+  host.querySelectorAll('.drop-before,.drop-after').forEach(el=>el.classList.remove('drop-before','drop-after'));
+}
+/** Puts the visible rows into `keys` order; rows hidden by the filters keep their slot. */
+function applyDomSequence(items,keys,keyOf){
+  if(!Array.isArray(items)||!keys.length)return false;
+  const ordered=keys.map(key=>items.find(item=>keyOf(item)===key)).filter(Boolean);
+  if(ordered.length!==keys.length)return false;
+  const slots=[];
+  items.forEach((item,index)=>{if(keys.includes(keyOf(item)))slots.push(index)});
+  if(slots.length!==ordered.length)return false;
+  slots.forEach((slot,index)=>{items[slot]=ordered[index]});
+  return true;
+}
+/** Reads the new DOM order of one list and persists it to IndexedDB. */
+async function persistCategoryOrder(item){
+  const kind=item.dataset.drag;
+  const keyAttr=CATEGORY_DRAG_KEY[kind];
+  const list=item.parentElement;
+  if(!keyAttr||!list)return;
+  const keys=[...list.children].filter(el=>el.dataset&&el.dataset.drag===kind).map(el=>el.dataset[keyAttr]).filter(Boolean);
+  let changed=false;
+  if(kind==='category'){
+    changed=applyDomSequence(state.categories,keys,entry=>entry.id);
+    if(changed){
+      state.categories.forEach((entry,index)=>{entry.order=index});
+      await putMany('categories',state.categories);
+    }
+  }else if(kind==='group'){
+    changed=applyDomSequence(state.incomeGroups,keys,entry=>entry.id);
+    if(changed){
+      state.incomeGroups.forEach((entry,index)=>{entry.order=index});
+      await putMany('incomeGroups',state.incomeGroups);
+    }
+  }else if(kind==='income-category'){
+    const group=state.incomeGroups.find(entry=>entry.id===item.dataset.id);
+    if(group){
+      changed=applyDomSequence(group.categories||[],keys,entry=>entry.name);
+      if(changed)await put('incomeGroups',group);
+    }
+  }else if(kind==='subcategory'){
+    const category=state.categories.find(entry=>entry.id===item.dataset.id);
+    if(category){
+      changed=applyDomSequence(category.subcategories||[],keys,name=>name);
+      if(changed)await put('categories',category);
+    }
+  }else if(kind==='income-subcategory'){
+    const group=state.incomeGroups.find(entry=>entry.id===item.dataset.id);
+    const category=group&&(group.categories||[]).find(entry=>entry.name===item.dataset.cat);
+    if(category){
+      changed=applyDomSequence(category.subcategories||[],keys,name=>name);
+      if(changed)await put('incomeGroups',group);
+    }
+  }
+  if(changed){
+    await persistCategoryStructure();
+    renderCategoryNameOptions();
+    toast('Category order saved');
+  }
+}
+
+function initCategoryDragAndDrop(){
+  const host=document.getElementById('categoryTree');
+  if(!host||host.dataset.dragReady==='1')return;
+  host.dataset.dragReady='1';
+  const startDrag=item=>{
+    categoryDragItem=item;
+    item.classList.add('dragging');
+    host.classList.add('drag-active');
+  };
+  const endDrag=()=>{
+    const item=categoryDragItem;
+    categoryDragItem=null;
+    categoryTouchDragId=null;
+    host.classList.remove('drag-active');
+    clearCategoryDropCues(host);
+    if(item)item.classList.remove('dragging','touch-dragging');
+    return item;
+  };
+  const saveOrder=async item=>{
+    if(!item)return;
+    try{await persistCategoryOrder(item)}catch(error){console.error(error);toast('Could not save the new order.',true)}
+  };
+
+  host.addEventListener('dragstart',event=>{
+    const item=event.target.closest('[data-drag]');
+    if(!item||!host.contains(item))return;
+    // Buttons inside a row must stay clickable instead of starting a drag.
+    if(event.target.closest('button,input,select,textarea,a')){event.preventDefault();return}
+    startDrag(item);
+    if(event.dataTransfer){
+      event.dataTransfer.effectAllowed='move';
+      try{event.dataTransfer.setData('text/plain',item.dataset.drag||'item')}catch(error){}
+    }
+  });
+  host.addEventListener('dragover',event=>{
+    if(!categoryDragItem)return;
+    clearCategoryDropCues(host);
+    const target=event.target.closest('[data-drag]');
+    if(!categoryDropAllowed(categoryDragItem,target))return;
+    event.preventDefault();
+    if(event.dataTransfer)event.dataTransfer.dropEffect='move';
+    const rect=target.getBoundingClientRect();
+    target.classList.add(event.clientY>rect.top+rect.height/2?'drop-after':'drop-before');
+  });
+  host.addEventListener('drop',event=>{
+    const item=categoryDragItem;
+    const target=event.target.closest('[data-drag]');
+    if(!item||!categoryDropAllowed(item,target))return;
+    event.preventDefault();
+    const rect=target.getBoundingClientRect();
+    target.parentElement.insertBefore(item,event.clientY>rect.top+rect.height/2?target.nextSibling:target);
+    saveOrder(endDrag());
+  });
+  host.addEventListener('dragend',()=>{endDrag()});
+
+  /* Touch / pen fallback: the handle drives a pointer drag (no drag events on touch). */
+  host.addEventListener('pointerdown',event=>{
+    if(event.pointerType==='mouse')return;
+    const handle=event.target.closest('.drag-handle');
+    if(!handle)return;
+    const item=handle.closest('[data-drag]');
+    if(!item||!host.contains(item))return;
+    event.preventDefault();
+    categoryTouchDragId=event.pointerId;
+    startDrag(item);
+    // The dragged row must not sit under the finger, or elementFromPoint() only ever finds itself.
+    item.classList.add('touch-dragging');
+  });
+  document.addEventListener('pointermove',event=>{
+    if(!categoryDragItem||categoryTouchDragId===null||categoryTouchDragId!==event.pointerId)return;
+    event.preventDefault();
+    const under=document.elementFromPoint(event.clientX,event.clientY);
+    const target=under&&under.closest?under.closest('[data-drag]'):null;
+    if(!categoryDropAllowed(categoryDragItem,target))return;
+    const rect=target.getBoundingClientRect();
+    target.parentElement.insertBefore(categoryDragItem,event.clientY>rect.top+rect.height/2?target.nextSibling:target);
+  },{passive:false});
+  document.addEventListener('pointerup',event=>{
+    if(categoryTouchDragId===null||categoryTouchDragId!==event.pointerId)return;
+    saveOrder(endDrag());
+  });
+  document.addEventListener('pointercancel',event=>{
+    if(categoryTouchDragId===null||categoryTouchDragId!==event.pointerId)return;
+    endDrag();
+  });
+}
+
+
 async function addCategory(event){
   event.preventDefault();
   const type=document.getElementById('categoryType').value;
@@ -3528,6 +3991,7 @@ async function addCategory(event){
   }
   if(category)await put('categories',category);
   else{toast('Create the category first using + Add.',true);return}
+  await persistCategoryStructure();
   await loadState();
   document.getElementById('subcategoryName').value='';
   renderCategoryNameOptions();renderCategoryTree();renderDashboardFilters();renderAll();toast('Category structure updated');
@@ -3552,9 +4016,10 @@ async function saveNewCategory(){
     await putMany('incomeGroups',state.incomeGroups);
   }else{
     let category=state.categories.find(c=>c.type===type&&c.name.toLowerCase()===name.toLowerCase());
-    if(!category){category={id:uid('category'),type,name,subcategories:[]};await put('categories',category)}
+    if(!category){category={id:uid('category'),type,name,subcategories:[]};await put('categories',category);state.categories.push(category)}
     else selectedName=category.name;
   }
+  await persistCategoryStructure();
   await loadState();
   document.getElementById('newCategoryRow').classList.add('hidden');
   document.getElementById('newCategoryName').value='';
@@ -3573,7 +4038,8 @@ async function deleteCategory(id){
   const linked=state.records.some(r=>r.type===category.type&&r.category===category.name);
   if(linked){toast('This category has linked records and cannot be deleted.',true);return}
   if(await confirm(`Delete category "${category.name}" and all of its subcategories?`,`Delete Category`)){
-    await remove('categories',id);await loadState();renderCategoryTree();renderAll();toast('Category deleted');
+    state.categories=state.categories.filter(c=>c.id!==id);
+    await remove('categories',id);await persistCategoryStructure();await loadState();renderCategoryTree();renderAll();toast('Category deleted');
   }
 }
 
@@ -3587,6 +4053,7 @@ async function renameCategory(id){
   for(const record of state.records.filter(r=>r.type===category.type&&r.category===oldName)){record.category=newName;await put('records',record)}
   // keep the PDF metadata in step, or a backup would file the document under the old category
   for(const doc of state.documents.filter(d=>d.financialType===category.type&&d.category===oldName)){doc.category=newName;await put('documents',doc)}
+  await persistCategoryStructure();
   await loadState();renderCategoryTree();renderAll();toast('Category renamed');
 }
 async function renameSubcategory(categoryId,oldName){
@@ -3598,6 +4065,7 @@ async function renameSubcategory(categoryId,oldName){
   await put('categories',category);
   for(const record of state.records.filter(r=>r.type===category.type&&r.category===category.name&&r.subcategory===oldName)){record.subcategory=newName;await put('records',record)}
   for(const doc of state.documents.filter(d=>d.financialType===category.type&&d.category===category.name&&d.subcategory===oldName)){doc.subcategory=newName;await put('documents',doc)}
+  await persistCategoryStructure();
   await loadState();renderCategoryTree();renderAll();toast('Subcategory renamed');
 }
 async function deleteSubcategory(categoryId,name){
@@ -3607,7 +4075,7 @@ async function deleteSubcategory(categoryId,name){
   if(linked){toast('This subcategory has linked records and cannot be deleted.',true);return}
   if(await confirm(`Delete subcategory "${name}"?`,`Delete Subcategory`)){
     category.subcategories=category.subcategories.filter(s=>s!==name);
-    await put('categories',category);await loadState();renderCategoryTree();renderAll();toast('Subcategory deleted');
+    await put('categories',category);await persistCategoryStructure();await loadState();renderCategoryTree();renderAll();toast('Subcategory deleted');
   }
 }
 
@@ -3691,6 +4159,7 @@ async function createBackup(){
       incomeExpenses:state.incomeExpenses,
       officePurchases:state.officePurchases,
       incomeGroups:state.incomeGroups,
+      categoryStructure:await readCategoryStructure(),
       migrationHistory:state.migrationHistory,
       documents:state.documents.map(({blob,...doc})=>doc),
       settings:settings.reduce((out,s)=>(out[s.key]=s.value,out),{}),
@@ -3769,6 +4238,10 @@ async function performRestore(){
       for(const document of documents){if(!await getOne('documents',document.id))await put('documents',document)}
       for(const blob of blobs){if(!await getOne('documentBlobs',blob.id))await put('documentBlobs',blob)}
     }
+    // Protected structure: the backup may only ADD rows, never replace or clear the saved tree.
+    await mergeCategoryStructure(backup.categoryStructure||{categories:backup.categories||[],incomeGroups});
+    // Old backups still use the "Cash" labels: align them with the definitive Cash & Bank Account.
+    await migrateLegacyCashRecords();
     for(const [key,value] of Object.entries(backup.settings||{}))await put('settings',{key,value});
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,s)=>(out[s.key]=s.value,out),state.settings||{});
@@ -4888,13 +5361,27 @@ function openIncomeModal(id=null,defaults={}){
   document.getElementById('incomeModalSubtitle').textContent=record?`${record.type} · ${record.majorHead}`:'Fields adapt to the selected type and classification';
   const startType=record?.type||defaults.type||'Expense';
   const dateValue=record?record.date||todayISO():todayISO();
+  // Account / Payment Method is sourced strictly from Manage Categories -> Asset · Cash & Bank
+  // subcategories (deduplicated case-insensitively, so "bKash" / "bkash" is one option).
+  const savedAccount=record?String(record.account||'').replace(/\s+/g,' ').trim():'';
+  const configuredAccount=officeAccountOption(savedAccount);
+  const accountLabel=configuredAccount?configuredAccount.label:savedAccount;
+  const accountChoices=officeAccountChoices();
+  const defaultAccount=accountLabel||accountChoices.find(name=>name.toLowerCase()==='cash in hand')||accountChoices[0]||'';
+  const extraAccount=accountLabel&&!accountChoices.some(name=>name.toLowerCase()===accountLabel.toLowerCase())?accountLabel:'';
+  const incomeAccountOptions=[
+    ...(accountChoices.length
+      ?accountChoices.map(a=>`<option value="${esc(a)}" ${a===defaultAccount?'selected':''}>${esc(a)}</option>`)
+      :['<option value="">No Cash &amp; Bank account in Settings</option>']),
+    ...(extraAccount?[`<option value="${esc(extraAccount)}" selected>${esc(extraAccount)} (not in Cash &amp; Bank)</option>`]:[])
+  ].join('');
   document.getElementById('incomeFormFields').innerHTML=`<div class="income-form-grid">
     <label><span class="lbl">Transaction Type *</span><select id="incomeTypeSelect" required><option value="Income" ${startType==='Income'?'selected':''}>Income</option><option value="Expense" ${startType==='Expense'?'selected':''}>Expense</option></select></label>
     <label><span class="lbl">Date *</span><input id="incomeDate" type="date" required value="${esc(dateValue)}"></label>
     <label><span class="lbl">Major Head *</span><select id="incomeMajorHeadSelect" required></select></label>
     <label><span class="lbl">Category *</span><select id="incomeCategorySelect" required></select></label>
     <label><span class="lbl">Subcategory *</span><select id="incomeSubcategorySelect" required></select></label>
-    <label><span class="lbl">Account / Payment Method</span><select id="incomeAccount">${ACCOUNTS.map(a=>`<option value="${esc(a)}" ${a===(record?.account||'Cash in Hand')?'selected':''}>${esc(a)}</option>`).join('')}</select></label>
+    <div class="income-account-field"><label><span class="lbl">Account / Payment Method</span><select id="incomeAccount">${incomeAccountOptions}</select></label><label class="office-account-check income-account-check"><span class="office-check-row"><input type="checkbox" id="incomeNoAccountChange" ${record?.noAccountChange?'checked':''}><span>I Do not want to change Account</span></span></label></div>
     <label><span class="lbl">Amount (BDT) *</span><span class="calc-field"><input id="incomeAmount" type="number" step="0.01" min="0" inputmode="decimal" required value="${esc(record?record.amount:'')}" placeholder="0.00"><button type="button" class="calc-trigger" data-calc-target="incomeAmount" aria-label="Open calculator for Amount (BDT)" aria-haspopup="dialog" aria-controls="calcPopover" aria-expanded="false" title="Calculator"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg></button></span></label>
     <label class="full">Description / Notes<textarea id="incomeDescription" rows="2">${esc(record?.description||'')}</textarea></label>
     <label class="full">Receipt / Voucher (PDF)<input id="incomeDocument" type="file" accept=".pdf,application/pdf"><span class="hint">Optional receipt or voucher PDF.</span></label>
@@ -4947,11 +5434,16 @@ async function saveIncomeRecord(event){
     const subcategory=document.getElementById('incomeSubcategorySelect').value;
     const date=document.getElementById('incomeDate').value;
     const amount=Math.abs(Number(document.getElementById('incomeAmount').value||0));
-    const account=document.getElementById('incomeAccount').value;
+    const accountPick=document.getElementById('incomeAccount').value;
+    // Store the Manage Categories spelling, so "bkash" saved earlier merges with "bKash".
+    const configuredAccount=officeAccountOption(accountPick);
+    const account=configuredAccount?configuredAccount.label:String(accountPick||'').replace(/\s+/g,' ').trim();
+    const noAccountChange=!!(document.getElementById('incomeNoAccountChange')?.checked);
     const description=document.getElementById('incomeDescription').value.trim();
     const old=editingIncomeId?state.incomeExpenses.find(r=>r.id===editingIncomeId):null;
     const record=Object.assign({},old||{});
     Object.assign(record,{id:old?old.id:uid('ie'),type,date,incomeYear:fiscalYearFromDate(date),majorHead,category,subcategory,amount,account,description});
+    if(noAccountChange)record.noAccountChange=true;else delete record.noAccountChange;
     if(!record.createdAt)record.createdAt=new Date().toISOString();
     record.updatedAt=new Date().toISOString();
 
@@ -4976,7 +5468,8 @@ async function saveIncomeRecord(event){
     await loadState();
     document.getElementById('incomeModal').close();
     editingIncomeId=null;
-    renderIncomePage();renderDashboard();
+    // A form save can move a Cash & Bank balance, so every page that shows a balance refreshes.
+    renderAll();
     toast(old?'Transaction saved':'Transaction created');
   }catch(error){
     console.error(error);
@@ -4992,7 +5485,7 @@ async function deleteIncomeRecord(id){
     const linked=new Set([...(record?.documentIds||[]),...state.documents.filter(d=>d.recordId===id).map(d=>d.id)]);
     for(const docId of linked){await remove('documents',docId);await remove('documentBlobs',docId)}
     await remove('incomeExpenses',id);
-    await loadState();renderIncomePage();renderDashboard();toast('Transaction deleted');
+    await loadState();renderAll();toast('Transaction deleted');
   }
 }
 function viewIncomeRecord(id){
@@ -5364,6 +5857,62 @@ function applyOfficeAccountLegs(balanceRecords,year){
       id:`${entry.id}::office`,syntheticTransferLeg:true,officeEntryId:entry.id,
       // Reuse the spelling the ledger already uses, so a leg merges into its account row instead
       // of creating a second row that differs only by capitalisation.
+      type:'Asset',category:account.category,subcategory:spelling.get(key)||account.label,
+      particulars:'',accountDetail:'',date,incomeYear:entry.incomeYear||fiscalYearFromDate(date)||'',
+      amount,balance:amount,details:'',documentIds:[]
+    });
+  }
+  return legs.length?[...balanceRecords,...legs]:balanceRecords;
+}
+
+/**
+ * Cash & Bank movements of the Income & Expenses ledger - derived on the fly, the same way as the
+ * transfer, funding and office legs. An Expense deducts its amount from the selected Cash & Bank
+ * account and an Income adds it; ticking "I Do not want to change Account" (noAccountChange) skips
+ * the movement. Nothing extra is written into state.records, so editing the amount, switching the
+ * account or deleting the transaction always leaves every account with the right balance.
+ * The snapshot rule matches funding: a movement older than the account's newest snapshot is already
+ * baked into that snapshot, and a movement in a later Income Year is ignored for the reported year.
+ */
+function incomeAccountDelta(entry){
+  const amount=Math.abs(Number(entry&&entry.amount)||0);
+  return String(entry&&entry.type||'').toLowerCase()==='income'?amount:-amount;
+}
+function applyIncomeAccountLegs(balanceRecords,year){
+  const entries=(state.incomeExpenses||[]).filter(entry=>!entry.noAccountChange&&entry.account);
+  if(!entries.length)return balanceRecords;
+  const index=officeAccountIndex();
+  if(!index.size)return balanceRecords;
+  const range=year?fiscalRange(year):null;
+  const cutoff=range?range.to:'';
+  const snapshots=new Map();
+  const spelling=new Map();
+  (balanceRecords||[]).forEach(record=>{
+    // Only user-entered snapshots gate a movement - transfer / funding / office / income legs must not.
+    if(!isCashRecord(record)||record.syntheticTransferLeg)return;
+    const key=cashSubcategoryKey(record.subcategory);
+    if(!spelling.has(key))spelling.set(key,String(record.subcategory||'').trim());
+    const effective=cashEffectiveDate(record);
+    const snapshot=snapshots.get(key);
+    if(!snapshot||effective>snapshot.date)snapshots.set(key,{date:effective,savedAt:String(record.updatedAt||record.createdAt||'')});
+  });
+  const legs=[];
+  for(const entry of entries){
+    const account=index.get(officeAccountKey(entry.account));
+    if(!account)continue;                                        // account no longer in Settings
+    const amount=incomeAccountDelta(entry);
+    if(!amount)continue;
+    const date=normalizeExcelDate(entry.date)||String(entry.date||'').slice(0,10);
+    if(cutoff&&date&&date>cutoff)continue;                       // booked in a later Income Year
+    const key=cashSubcategoryKey(account.label);
+    const snapshot=snapshots.get(key);
+    if(snapshot&&snapshot.date&&date){
+      if(date<snapshot.date)continue;                            // the snapshot is newer
+      if(date===snapshot.date&&snapshot.savedAt>=String(entry.updatedAt||entry.createdAt||''))continue;
+    }
+    legs.push({
+      id:`${entry.id}::income`,syntheticTransferLeg:true,incomeExpenseId:entry.id,
+      // Reuse the spelling the ledger already uses, so a leg merges into its account row.
       type:'Asset',category:account.category,subcategory:spelling.get(key)||account.label,
       particulars:'',accountDetail:'',date,incomeYear:entry.incomeYear||fiscalYearFromDate(date)||'',
       amount,balance:amount,details:'',documentIds:[]
@@ -6782,6 +7331,7 @@ async function addIncomeGroupCategory(type,name,subcategory){
   majorHead=normClass(majorHead);
   const cls=ensureIncomeClass(type,majorHead,name,subcategory);
   await putMany('incomeGroups',state.incomeGroups);
+  await persistCategoryStructure();
   await loadState();
   document.getElementById('subcategoryName').value='';
   renderCategoryMajorHeads();
@@ -6799,6 +7349,7 @@ async function renameIncomeGroup(id){
   g.majorHead=newName;
   for(const r of state.incomeExpenses.filter(r=>r.type===g.type&&r.majorHead===old)){r.majorHead=newName;await put('incomeExpenses',r)}
   await putMany('incomeGroups',state.incomeGroups);
+  await persistCategoryStructure();
   await loadState();renderCategoryTree();renderIncomePage();toast('Major head renamed');
 }
 async function deleteIncomeGroup(id){
@@ -6806,7 +7357,9 @@ async function deleteIncomeGroup(id){
   const linked=state.incomeExpenses.some(r=>r.type===g.type&&r.majorHead===g.majorHead);
   if(linked){toast('This major head has linked transactions and cannot be deleted.',true);return}
   if(await confirm(`Delete major head "${g.majorHead}" and all of its categories?`,'Delete Major Head')){
+    state.incomeGroups=state.incomeGroups.filter(entry=>entry.id!==id);
     await remove('incomeGroups',id);
+    await persistCategoryStructure();
     await loadState();renderCategoryTree();renderIncomePage();toast('Major head deleted');
   }
 }
@@ -6818,6 +7371,7 @@ async function renameIncomeCategory(id,name){
   const old=cat.name;cat.name=newName;
   for(const r of state.incomeExpenses.filter(r=>r.type===g.type&&r.majorHead===g.majorHead&&r.category===old)){r.category=newName;await put('incomeExpenses',r)}
   await putMany('incomeGroups',state.incomeGroups);
+  await persistCategoryStructure();
   await loadState();renderCategoryTree();renderIncomePage();toast('Category renamed');
 }
 async function deleteIncomeCategory(id,name){
@@ -6828,6 +7382,7 @@ async function deleteIncomeCategory(id,name){
   if(await confirm(`Delete category "${name}" and all of its subcategories?`,'Delete Category')){
     g.categories=g.categories.filter(c=>c.name!==name);
     await putMany('incomeGroups',state.incomeGroups);
+    await persistCategoryStructure();
     await loadState();renderCategoryTree();renderIncomePage();toast('Category deleted');
   }
 }
@@ -6839,6 +7394,7 @@ async function renameIncomeSubcategory(id,catName,name){
   cat.subcategories=cat.subcategories.map(s=>s===name?newName:s);
   for(const r of state.incomeExpenses.filter(r=>r.type===g.type&&r.majorHead===g.majorHead&&r.category===catName&&r.subcategory===name)){r.subcategory=newName;await put('incomeExpenses',r)}
   await putMany('incomeGroups',state.incomeGroups);
+  await persistCategoryStructure();
   await loadState();renderCategoryTree();renderIncomePage();toast('Subcategory renamed');
 }
 async function deleteIncomeSubcategory(id,catName,name){
@@ -6849,6 +7405,7 @@ async function deleteIncomeSubcategory(id,catName,name){
   if(await confirm(`Delete subcategory "${name}"?`,'Delete Subcategory')){
     cat.subcategories=cat.subcategories.filter(s=>s!==name);
     await putMany('incomeGroups',state.incomeGroups);
+    await persistCategoryStructure();
     await loadState();renderCategoryTree();renderIncomePage();toast('Subcategory deleted');
   }
 }
