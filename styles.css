@@ -1924,3 +1924,137 @@ body.office-fy-open #officePurchasesPage { z-index: 1; }
   }
 }
 
+
+/* ==========================================================================
+   Settings page — compact mobile container (max-width: 768px only)
+   --------------------------------------------------------------------------
+   Desktop keeps the two-column .settings-grid exactly as it is. On phones the
+   whole page turns into one full-width column (.settings-mobile-wrap) with
+   12px gutters, 10px card gaps and 100%-wide fields, so the General Settings,
+   Income Years, Categories, Excel & Budge CSV Migration and Office Purchase
+   cards never push sideways. The migration history table is capped to the
+   container width instead of its desktop 620px minimum.
+   ========================================================================== */
+@media (max-width: 768px) {
+  /* Page shell: full width, clipped horizontal overflow, tight padding */
+  #settingsPage,
+  #settingsPage.settings-page-mobile {
+    width: 100%;
+    max-width: 100%;
+    padding: 12px 12px calc(var(--bottom-h) + 24px + env(safe-area-inset-bottom, 0px));
+    overflow-x: hidden;
+  }
+
+  /* Card stack: one vertical column, compact 10px rhythm */
+  #settingsPage .settings-mobile-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    width: 100%;
+    max-width: 100%;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+  }
+  #settingsPage .settings-mobile-wrap > .settings-card,
+  #settingsPage .settings-mobile-wrap > .card {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    padding: 14px;
+    border-radius: 14px;
+  }
+  #settingsPage .settings-card h3 { font-size: 15px; margin-bottom: 6px; }
+  #settingsPage .settings-card p { font-size: 12px; line-height: 1.45; }
+
+  /* Fields and dropdowns: always the full card width */
+  #settingsPage .settings-card label { margin-bottom: 10px; font-size: 11.5px; }
+  #settingsPage :is(input, select, textarea):where(:not([type="checkbox"]):not([type="radio"]):not([type="file"])) {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    padding: 7px 10px;
+    font-size: 13px;
+    border-radius: 10px;
+  }
+
+  /* Button rows: Import / Template / Export and every single action wrap to 100% */
+  #settingsPage .settings-card .inline-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+    max-width: 100%;
+  }
+  #settingsPage .settings-card .inline-form input {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+  }
+  #settingsPage .settings-card .migration-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+    max-width: 100%;
+    margin: 0 0 2px;
+  }
+  #settingsPage .settings-card .migration-actions .btn,
+  #settingsPage .settings-card .inline-form .btn,
+  #settingsPage .settings-card > .btn {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    height: auto;
+    margin-top: 0;
+    padding: 8px 12px;
+    font-size: 12px;
+    line-height: 1.25;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  /* Income Year chips stay inside the card */
+  #settingsPage .chip-list { gap: 6px; margin-top: 10px; }
+  #settingsPage .chip { max-width: 100%; }
+  #settingsPage .chip-list .chip > span,
+  #settingsPage .chip-list .chip { overflow-wrap: anywhere; }
+
+  /* Migration history: small, responsive table instead of side-scrolling */
+  #settingsPage .migration-history { margin-top: 14px; padding-top: 12px; }
+  #settingsPage .migration-history h4 { font-size: 12.5px; }
+  #settingsPage .migration-history-wrap {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  #settingsPage .migration-history-table {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    table-layout: fixed;
+    font-size: 11px;
+  }
+  #settingsPage .migration-history-table th,
+  #settingsPage .migration-history-table td {
+    padding: 7px 5px;
+    font-size: 10.5px;
+    line-height: 1.3;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  #settingsPage .migration-history-table th { letter-spacing: .02em; }
+  #settingsPage .migration-history-table .num { white-space: nowrap; }
+  #settingsPage .migration-history-table .action-link {
+    min-height: 26px;
+    padding: 2px 4px;
+    font-size: 10.5px;
+  }
+  #settingsPage .storage-meter { max-width: 100%; }
+}
+

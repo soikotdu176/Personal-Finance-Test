@@ -3617,6 +3617,26 @@ function renderSettings(){
   renderYearList();
   renderMigrationHistory();
   renderStorageInfo();
+  applySettingsMobileLayout();
+}
+/* Settings is the only page that uses two desktop cards per row. On phones the markup is
+   switched to the compact .settings-mobile-wrap column, so every field, dropdown and the
+   import / template / export rows stay 100% wide. Desktop keeps its grid untouched. */
+let settingsLayoutBound=false;
+function applySettingsMobileLayout(){
+  const page=document.getElementById('settingsPage');
+  if(!page)return;
+  const wrap=page.querySelector('.settings-mobile-wrap')||page.firstElementChild;
+  const mobile=!!(window.matchMedia&&window.matchMedia('(max-width: 768px)').matches);
+  page.classList.toggle('settings-page-mobile',mobile);
+  if(wrap)wrap.classList.toggle('settings-mobile-wrap',mobile);
+  if(!settingsLayoutBound&&window.matchMedia){
+    settingsLayoutBound=true;
+    const query=window.matchMedia('(max-width: 768px)');
+    const sync=()=>applySettingsMobileLayout();
+    if(query.addEventListener)query.addEventListener('change',sync);
+    else if(query.addListener)query.addListener(sync);
+  }
 }
 function renderYearList(){
   document.getElementById('yearList').innerHTML=(state.settings.incomeYears||[]).map(y=>`<span class="chip">${esc(y)} <button type="button" class="action-link danger" data-cmd="delete-year" data-id="${esc(y)}" aria-label="Delete income year ${esc(y)}">×</button></span>`).join('');
@@ -7331,7 +7351,7 @@ function renderMigrationHistory(){
   if(!host)return;
   const history=state.migrationHistory.slice().sort((a,b)=>String(b.timestamp).localeCompare(String(a.timestamp)));
   host.innerHTML=history.length
-    ? `<div class="table-wrap"><table class="migration-history-table"><thead><tr><th scope="col">Date &amp; Time</th><th scope="col">File Name</th><th scope="col">Migration Type</th><th scope="col" class="num">Records Imported</th><th scope="col">Actions</th></tr></thead><tbody>${history.map(m=>`<tr><td>${esc(new Date(m.timestamp).toLocaleString())}</td><td>${esc(m.fileName||'—')}</td><td><span class="badge migration-badge">${esc(m.migrationType||'—')}</span></td><td class="num">${Number(m.importedCount)||0}</td><td class="actions-cell"><button type="button" class="action-link" data-cmd="edit-migration" data-id="${esc(m.id)}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-migration" data-id="${esc(m.id)}">Delete</button></td></tr>`).join('')}</tbody></table></div>`
+    ? `<div class="table-wrap migration-history-wrap"><table class="migration-history-table"><thead><tr><th scope="col">Date &amp; Time</th><th scope="col">File Name</th><th scope="col">Migration Type</th><th scope="col" class="num">Records Imported</th><th scope="col">Actions</th></tr></thead><tbody>${history.map(m=>`<tr><td>${esc(new Date(m.timestamp).toLocaleString())}</td><td>${esc(m.fileName||'—')}</td><td><span class="badge migration-badge">${esc(m.migrationType||'—')}</span></td><td class="num">${Number(m.importedCount)||0}</td><td class="actions-cell"><button type="button" class="action-link" data-cmd="edit-migration" data-id="${esc(m.id)}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-migration" data-id="${esc(m.id)}">Delete</button></td></tr>`).join('')}</tbody></table></div>`
     : '<div class="empty-state">No migrations recorded in this browser yet.</div>';
 }
 function migrationRowSummary(r,store){
