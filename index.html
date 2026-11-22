@@ -42,6 +42,8 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js" integrity="sha384-en/ztfPSRkGfME4KIm05joYXynqzUgbsG5nMrj/xEFAHXkeZfO3yMK8QQ+mP7p1/" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js" integrity="sha384-Xl/CUCfJbzsngMp0CFxkmF0VW/8C160IsGujqeQlIhaGxKz2+JsIGORFqtCPeldF" crossorigin="anonymous"></script>
+  <!-- Google Identity Services: OAuth token client used by the Google Drive sync feature -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
   <!-- SVG icon sprite -->
@@ -370,7 +372,7 @@
             <button class="btn" id="excelTemplateBtn">Download Template</button>
             <button class="btn" id="excelExportBtn">Export Workbook / CSV</button>
           </div>
-          <p class="hint">The template has <b>Type</b> / <b>Entry Type *</b> and <b>Category *</b> dropdowns sourced from Manage Categories; Export produces the same layout, so it can be re-imported without duplicates.</p>
+          <p class="hint">Every dropdown is dependent and sourced from Manage Categories: <b>Type &gt; Category * &gt; Subcategory</b> (plus <b>Entry Type * &gt; Major Head &gt; Category * &gt; Subcategory</b> on the Income &amp; Expenses sheet). <b>Funded from Asset Subcategory</b> lists the Asset subcategories and rejects input on Cash &amp; Bank Account rows. The Assets &amp; Liabilities options live on a hidden <b>Lists</b> sheet, and Export produces the same layout, so it can be re-imported without duplicates.</p>
           <div class="migration-history">
             <h4>Migration History</h4>
             <p class="hint">Each import is tracked as a batch. Deleting a batch also removes the records it imported.</p>
@@ -391,6 +393,17 @@
           <h3>Mobile App</h3>
           <p id="installHint">Install Personal Finance on your phone or desktop for a full-screen, offline-capable experience.</p>
           <button class="btn btn-primary hidden" id="installBtnSettings"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg><span>Install App</span></button>
+        </div>
+        <div class="card settings-card" id="googleDriveCard">
+          <h3>Google Drive Sync</h3>
+          <p>Back up records, the protected category tree and attached PDFs to the <b>PersonalFinance_Backups</b> folder in your Google Drive. The latest 15 backups are kept.</p>
+          <div class="inline-form drive-sync-actions">
+            <button class="btn btn-primary" id="driveConnectBtn" type="button">Connect Google Drive</button>
+            <button class="btn hidden" id="driveDisconnectBtn" type="button">Disconnect</button>
+            <button class="btn hidden" id="driveSyncBtn" type="button">Sync Now</button>
+          </div>
+          <p class="hint" id="driveSyncStatus" aria-live="polite">Not connected</p>
+          <p class="hint" id="driveLastSynced">Last synced: never</p>
         </div>
         <div class="card settings-card">
           <h3>Local Storage</h3>
@@ -688,6 +701,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=35"></script>
+  <script src="app.js?v=37"></script>
 </body>
 </html>

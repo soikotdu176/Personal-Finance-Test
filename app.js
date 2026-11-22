@@ -295,7 +295,9 @@ async function writeCategoryStructure(categories, incomeGroups, source){
 /** Called by every Manage Categories handler so the UI change is durable immediately.
  *  Writes the `categories` and `incomeGroups` arrays of the protected settingsStore record. */
 async function persistCategoryStructure(source = 'user'){
-  return writeCategoryStructure(state.categories, state.incomeGroups, source);
+  const record = await writeCategoryStructure(state.categories, state.incomeGroups, source);
+  scheduleDriveAutoBackup();
+  return record;
 }
 
 /** Public surface of the category module (Manage Categories UI + backup/restore hooks). */
@@ -981,6 +983,8 @@ async function init(){
   state.settings.currency ||= 'BDT';
   state.settings.locale ||= 'en-BD';
   state.settings.incomeYears ||= ['2026-27','2025-26','2024-25','2023-24','2022-23'];
+  // Google Drive: silent sign-in; restores the newest backup only when the local database is empty.
+  await initGoogleDriveSync();
   // Fill an empty database from Project/ before the first render so the Dashboard is complete.
   await loadProjectDataset();
   await reconcileOfficeCarryForwards();
@@ -988,6 +992,7 @@ async function init(){
   bindGlobalActions();
   bindDelegatedActions();
   renderAll();
+  appReady=true;
   updateMobileMode();
   playEnter(document.getElementById('dashboardPage'));
   placePills(true);
@@ -1036,6 +1041,7 @@ async function loadState(){
     state.incomeGroups=sortBySavedOrder(await getAll('incomeGroups'));
     if(!state.incomeGroups.length){for(const group of defaultIncomeGroups) state.incomeGroups.push(group)}
   }
+  scheduleDriveAutoBackup();
 }
 
 function toast(message,error=false){
@@ -1303,6 +1309,10 @@ function bindGlobalActions(){
   $el('restoreBackup').onclick=()=>$el('restoreFile').click();
   $el('restoreFile').onchange=e=>{restoreFile=e.target.files[0];if(restoreFile)$el('restoreModal').showModal()};
   $el('confirmRestore').onclick=performRestore;
+  /* Google Drive sync card (Settings) */
+  $el('driveConnectBtn').onclick=e=>runWithLoading(e.currentTarget,connectGoogleDrive);
+  $el('driveDisconnectBtn').onclick=e=>runWithLoading(e.currentTarget,disconnectGoogleDrive);
+  $el('driveSyncBtn').onclick=e=>runWithLoading(e.currentTarget,()=>syncGoogleDrive({interactive:true}));
   $el('saveSettings').onclick=saveSettings;
   $el('addYear').onclick=addIncomeYear;
   $el('manageCategories').onclick=()=>openCategoryModal();
@@ -4085,6 +4095,7 @@ function renderSettings(){
   renderYearList();
   renderMigrationHistory();
   renderStorageInfo();
+  renderDriveSyncCard();
   applySettingsMobileLayout();
 }
 /* Settings is the only page that uses two desktop cards per row. On phones the markup is
@@ -7126,10 +7137,18 @@ function officeTemplateSheet(fy){
 function officeXmlEscape(value){
   return String(value??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+/** <dataValidations> block for one sheet, built from explicit dropdown rules. */
+function templateValidationsXml(rules){
+  const rule=({range,listRef,title,prompt,error})=>`<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" errorStyle="stop" errorTitle="${officeXmlEscape(title)}" error="${officeXmlEscape(error||'Please pick a value from the dropdown list.')}" promptTitle="${officeXmlEscape(title)}" prompt="${officeXmlEscape(prompt)}" sqref="${range}"><formula1>${officeXmlEscape(listRef)}</formula1></dataValidation>`;
+  return `<dataValidations count="${rules.length}">${rules.map(rule).join('')}</dataValidations>`;
+}
 /** <dataValidations> for one sheet: a stop-error dropdown on Entry Type * (B) and Category * (D). */
 function officeTemplateValidationsXml(spec){
-  const rule=(range,listRef,title,prompt)=>`<dataValidation type="list" allowBlank="1" showInputMessage="1" showErrorMessage="1" errorStyle="stop" errorTitle="${officeXmlEscape(title)}" error="Please pick a value from the dropdown list." promptTitle="${officeXmlEscape(title)}" prompt="${officeXmlEscape(prompt)}" sqref="${range}"><formula1>${officeXmlEscape(listRef)}</formula1></dataValidation>`;
-  return `<dataValidations count="2">${rule(spec.typeRange,spec.typeList,spec.typeTitle||'Entry Type',spec.typePrompt||'Pick how this entry affects the office ledger.')}${rule(spec.categoryRange,spec.categoryList,spec.categoryTitle||'Category',spec.categoryPrompt||'Pick an office category or one from Settings.')}</dataValidations>`;
+  if(Array.isArray(spec.rules)&&spec.rules.length)return templateValidationsXml(spec.rules);
+  return templateValidationsXml([
+    {range:spec.typeRange,listRef:spec.typeList,title:spec.typeTitle||'Entry Type',prompt:spec.typePrompt||'Pick how this entry affects the office ledger.'},
+    {range:spec.categoryRange,listRef:spec.categoryList,title:spec.categoryTitle||'Category',prompt:spec.categoryPrompt||'Pick an office category or one from Settings.'}
+  ]);
 }
 /** Injects the block in schema order: dataValidations must precede hyperlinks/ignoredErrors/drawing. */
 function officeInjectValidations(xml,block){
@@ -7563,69 +7582,557 @@ async function importBudgeFile(aoa,sourceName,replaceId,options={}){
    Manage Categories, and an export that keeps the template layout so the file
    can be re-imported without duplicates.
    ========================================================================== */
-const MIGRATION_TEMPLATE_ROWS=200;
+const MIGRATION_TEMPLATE_ROWS=500;
 const MIGRATION_TEMPLATE_SHEETS={assets:'Assets & Liabilities',income:'Income & Expenses'};
 const MIGRATION_TEMPLATE_HEADERS={
-  assets:['Date','Type','Category *','Subcategory','Particulars *','Amount / Balance *','Currency','Status','Income Year','Details'],
-  income:['Date','Entry Type *','Major Head','Category *','Subcategory','Amount (Taka) *','Account / Method','Description']
+  assets:['Date','Type','Category *','Subcategory','Particulars *','Amount / Balance *','Currency','Status','Income Year','Details','Funded from Asset Subcategory'],
+  income:['Date','Entry Type *','Major Head','Category *','Subcategory','Amount (Taka) *','Account / Method','Description','Income Year']
 };
 const MIGRATION_TEMPLATE_TYPES={assets:['Asset','Liability'],income:['Income','Expense']};
+/* Assets & Liabilities: every dropdown is resolved from the hidden Lists sheet. */
+const ASSET_TEMPLATE_LISTS_SHEET='Lists';
+const ASSET_TEMPLATE_FUNDING_HEADER='Funded from Asset Subcategory';
+const ASSET_TEMPLATE_FUNDING_KEY='FUND';
+const ASSET_TEMPLATE_EMPTY_NAME='PF_AT_NONE';
 
-/** Dropdown values, straight from Manage Categories. */
-function migrationCategoryNames(kind){
-  const names=kind==='assets'
-    ?(state.categories||[]).map(c=>c.name)
-    :(state.incomeGroups||[]).reduce((all,group)=>all.concat((group.categories||[]).map(c=>c.name)),[]);
-  return [...new Set(names.map(name=>normClass(name)).filter(Boolean))];
+/* --- Income & Expenses template: real Excel dropdowns driven by the classification tree --- */
+const INCOME_TEMPLATE_HELPER_SHEETS={lists:'Meta - Simple Lists',meta:'Meta - Hierarchies'};
+
+/**
+ * Unique Major Heads -> Categories -> Subcategories, in the order saved in Manage Categories.
+ * The same tree fills both hidden helper sheets and the four validations.
+ */
+function incomeTemplateStructure(){
+  const majors=[],catsByHead=new Map(),subsByKey=new Map(),metaRows=[];
+  for(const group of state.incomeGroups||[]){
+    const head=normClass(group&&group.majorHead);
+    if(!head)continue;
+    if(!catsByHead.has(head)){catsByHead.set(head,[]);majors.push(head)}
+    const categories=catsByHead.get(head);
+    for(const category of group.categories||[]){
+      const name=normClass(typeof category==='string'?category:category&&category.name);
+      if(!name)continue;
+      if(!categories.includes(name))categories.push(name);
+      const key=`${head}||${name}`;
+      if(!subsByKey.has(key))subsByKey.set(key,[]);
+      const subs=subsByKey.get(key);
+      const before=metaRows.length;
+      const list=typeof category==='string'?[]:(category.subcategories||[]);
+      for(const value of list){
+        const sub=normClass(value);
+        if(!sub||subs.includes(sub))continue;
+        subs.push(sub);
+        metaRows.push([head,name,sub]);
+      }
+      if(metaRows.length===before)metaRows.push([head,name,'']);
+    }
+  }
+  return {majors,catsByHead,subsByKey,metaRows};
 }
 
 /**
- * One flat sheet in the exact layout read by importMigrationTemplateWorkbook().
- * The dropdown lists live in hidden helper columns, because SheetJS cannot write
- * <dataValidation> itself (its XML is injected by officeTemplateBytesWithValidations).
+ * "Meta - Simple Lists" layout: column A holds the unique Major Heads and every column from C
+ * on holds one unique list under a row-1 key - the Major Head for categories, or
+ * "Major Head||Category" for subcategories. Column B is a spacer so the C-based ranges stay valid.
+ * Each column also becomes a workbook-level defined name (PF_MH_n / PF_SUB_n) so the dependent
+ * validations can reach it with INDIRECT.
  */
-function migrationTemplateSheet(kind,dataRows=[]){
-  const isIncome=kind==='income';
-  const headers=MIGRATION_TEMPLATE_HEADERS[kind];
-  const types=MIGRATION_TEMPLATE_TYPES[kind];
-  const categories=migrationCategoryNames(kind);
-  const typeCol=headers.length+2;
-  const categoryCol=headers.length+3;
+function incomeTemplateListsSheet(structure){
+  const columns=[];
+  for(const head of structure.majors)columns.push({title:head,values:structure.catsByHead.get(head)||[],prefix:'PF_MH_'});
+  for(const [title,values] of structure.subsByKey)columns.push({title,values,prefix:'PF_SUB_'});
+  const height=Math.max(1,structure.majors.length,...columns.map(column=>column.values.length));
+  const rows=[['Major Heads','',...columns.map(column=>column.title)]];
+  for(let i=0;i<height;i++){
+    rows.push([structure.majors[i]||'','',...columns.map(column=>column.values[i]??'')]);
+  }
+  const ws=XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols']=[{wch:44},{wch:2,hidden:true},...columns.map(()=>({wch:30,hidden:true}))];
+  // PF_SUB_0 is the fallback the Subcategory dropdown uses before a Category is picked: the first
+  // real subcategory list when one exists, otherwise the blank spacer cell B2.
+  const firstSub=columns.findIndex(column=>column.prefix==='PF_SUB_');
+  const fallbackLetter=firstSub>=0?XLSX.utils.encode_col(2+firstSub):'B';
+  const fallbackLastRow=firstSub>=0?Math.max(2,1+columns[firstSub].values.length):2;
+  const names=[{Name:'PF_SUB_0',Ref:`'${INCOME_TEMPLATE_HELPER_SHEETS.lists}'!$${fallbackLetter}$2:$${fallbackLetter}$${fallbackLastRow}`}];
+  columns.forEach((column,index)=>{
+    const letter=XLSX.utils.encode_col(2+index);
+    const lastRow=Math.max(2,1+column.values.length);
+    names.push({Name:`${column.prefix}${index+1}`,Ref:`'${INCOME_TEMPLATE_HELPER_SHEETS.lists}'!$${letter}$2:$${letter}$${lastRow}`});
+  });
+  const lastColumn=XLSX.utils.encode_col(2+Math.max(1,columns.length)-1);
+  return {ws,names,lastColumn};
+}
+
+/** "Meta - Hierarchies": the flat Major Head -> Category -> Subcategory table (one row per path). */
+function incomeTemplateMetaSheet(structure){
+  const ws=XLSX.utils.aoa_to_sheet([['Major Head','Category','Subcategory'],...structure.metaRows]);
+  ws['!cols']=[{wch:46},{wch:34},{wch:34}];
+  return ws;
+}
+
+function incomeTemplateListRef(range){return `'${INCOME_TEMPLATE_HELPER_SHEETS.lists}'!${range}`}
+
+/**
+ * Dependent-list formula: MATCH finds the column of the picked parent in the key row, and
+ * INDIRECT resolves the defined name that points at exactly the filled cells below it.
+ * IFERROR falls back to `fallback` while the parent cell is still empty.
+ */
+function incomeTemplateDependentFormula(prefix,keyExpr,headerRange,fallback){
+  return `INDIRECT("${prefix}"&IFERROR(MATCH(${keyExpr},${headerRange},0),${fallback}))`;
+}
+
+/** Income & Expenses sheet with real dropdowns, backed by the two hidden helper sheets. */
+function incomeMigrationTemplateSheet(dataRows=[]){
+  const headers=MIGRATION_TEMPLATE_HEADERS.income;
+  const structure=incomeTemplateStructure();
+  if(!structure.majors.length){structure.majors.push('Other Income');structure.catsByHead.set('Other Income',[])}
   const total=Math.max(MIGRATION_TEMPLATE_ROWS,(dataRows||[]).length);
   const rows=[
-    [`${MIGRATION_TEMPLATE_SHEETS[kind]} - Migration Template`],
-    [isIncome
-      ?'One row per income or expense. Entry Type * is Income/Expense and Category * lists every category from Manage Categories. Re-importing skips rows that are already imported.'
-      :'One row per asset or liability. Type is Asset/Liability and Category * lists every category from Manage Categories. Re-importing skips rows that are already imported.'],
+    [`${MIGRATION_TEMPLATE_SHEETS.income} - Migration Template`],
+    ['Fill one row per income or expense. Entry Type * is Income/Expense; pick Major Head, then Category *, then Subcategory - each dropdown filters the next one. Re-importing skips rows that are already imported.'],
     headers
   ];
   for(let i=0;i<total;i++){
-    const row=new Array(categoryCol+1).fill('');
+    const row=new Array(headers.length).fill('');
     const data=(dataRows||[])[i];
     if(data)data.forEach((value,c)=>{if(c<headers.length)row[c]=value??''});
-    if(i<types.length)row[typeCol]=types[i];
-    if(i<categories.length)row[categoryCol]=categories[i];
     rows.push(row);
   }
   const ws=XLSX.utils.aoa_to_sheet(rows);
-  const widths={assets:[12,14,26,30,40,18,10,12,14,34],income:[12,18,30,26,30,16,20,34]}[kind];
-  ws['!cols']=[...widths.map(wch=>({wch})),{wch:2,hidden:true},{wch:2,hidden:true},{wch:18,hidden:true},{wch:30,hidden:true}];
+  ws['!cols']=[{wch:12},{wch:18},{wch:40},{wch:30},{wch:30},{wch:16},{wch:22},{wch:36},{wch:14}];
+  const lists=incomeTemplateListsSheet(structure);
+  const keys=incomeTemplateListRef(`$C$1:$${lists.lastColumn}$1`);
+  const lastRow=3+total;
+  const spec={
+    name:MIGRATION_TEMPLATE_SHEETS.income,
+    rules:[
+      {range:`B4:B${lastRow}`,listRef:'"Income,Expense"',title:'Entry Type',prompt:'Pick Income or Expense.'},
+      {range:`C4:C${lastRow}`,listRef:incomeTemplateListRef(`$A$2:$A$${1+structure.majors.length}`),title:'Major Head',prompt:'Pick a Major Head - it filters the Category dropdown.'},
+      {range:`D4:D${lastRow}`,listRef:incomeTemplateDependentFormula('PF_MH_','$C4',keys,1),title:'Category',prompt:'The list follows the Major Head you picked.'},
+      {range:`E4:E${lastRow}`,listRef:incomeTemplateDependentFormula('PF_SUB_','$C4&"||"&$D4',keys,0),title:'Subcategory',prompt:'The list follows the Category you picked.'}
+    ]
+  };
+  return {
+    ws,
+    spec,
+    extraSheets:[
+      {name:INCOME_TEMPLATE_HELPER_SHEETS.lists,ws:lists.ws,names:lists.names},
+      {name:INCOME_TEMPLATE_HELPER_SHEETS.meta,ws:incomeTemplateMetaSheet(structure)}
+    ]
+  };
+}
+
+/* --- Assets & Liabilities template: hidden "Lists" sheet + dependent dropdowns --- */
+
+/** Excel defined names may not hold spaces or '&', so every list key is sanitized first. */
+function templateNameToken(value,used){
+  const base=String(value??'').replace(/[^A-Za-z0-9_.]/g,'_').replace(/_{2,}/g,'_').replace(/^_+|_+$/g,'')||'LIST';
+  let name=`PF_AT_${base}`,suffix=2;
+  while(used.has(name.toLowerCase()))name=`PF_AT_${base}_${suffix++}`;
+  used.add(name.toLowerCase());
+  return name;
+}
+
+/**
+ * Category -> Subcategory tree of the Assets & Liabilities sheet, read from the same
+ * state.categories the Add Record form renders (Manage Categories), split by Financial Type.
+ */
+function assetsTemplateStructure(){
+  const catsByType=new Map(),subsByKey=new Map();
+  for(const type of MIGRATION_TEMPLATE_TYPES.assets){
+    const categories=[];
+    catsByType.set(type,categories);
+    for(const category of orderedCategories(type)){
+      const name=normClass(category.name);
+      if(!name||categories.includes(name))continue;
+      categories.push(name);
+      const key=`${type}||${name}`;
+      if(subsByKey.has(key))continue;
+      const subs=[...new Set((category.subcategories||[]).map(sub=>normClass(sub)).filter(Boolean))];
+      // Add Record falls back to the category name when a category has no subcategory yet.
+      subsByKey.set(key,subs.length?subs:[name]);
+    }
+  }
+  const funding=[...new Set([...subsByKey].filter(([key])=>key.startsWith('Asset||')).flatMap(([,subs])=>subs))];
+  return {catsByType,subsByKey,funding};
+}
+
+/**
+ * Hidden "Lists" sheet: column A holds the Financial Types and every column from C on holds one
+ * dropdown list. Row 1 keeps the lookup key (Type, "Type||Category", "FUND||Type||Category"),
+ * row 2 its sanitized defined name and row 3+ the values, so a dependent validation only needs
+ * MATCH + INDIRECT. Cash & Bank categories get an empty funding column: that empty list is what
+ * blocks the Funded from cell, while every other category lists the Asset subcategories.
+ */
+function assetsTemplateListsSheet(structure){
+  const columns=[];
+  for(const type of MIGRATION_TEMPLATE_TYPES.assets)columns.push({key:type,values:structure.catsByType.get(type)||[]});
+  for(const [key,values] of structure.subsByKey)columns.push({key,values});
+  for(const [key] of structure.subsByKey){
+    const [type,category]=key.split('||');
+    // Same rule as the Add Record form: only an Asset/Cash category loses its funding source.
+    const values=type==='Asset'&&isCashCategoryName(category)?[]:structure.funding;
+    columns.push({key:`${ASSET_TEMPLATE_FUNDING_KEY}||${key}`,values});
+  }
+  const used=new Set();
+  for(const column of columns)column.name=templateNameToken(column.key,used);
+  const height=Math.max(1,MIGRATION_TEMPLATE_TYPES.assets.length,...columns.map(column=>column.values.length));
+  const rows=[
+    ['Type','',...columns.map(column=>column.key)],
+    ['','',...columns.map(column=>column.name)]
+  ];
+  for(let i=0;i<height;i++)rows.push([MIGRATION_TEMPLATE_TYPES.assets[i]||'','',...columns.map(column=>column.values[i]??'')]);
+  const ws=XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols']=[{wch:14},{wch:2,hidden:true},...columns.map(()=>({wch:38,hidden:true}))];
+  const names=columns.map((column,index)=>{
+    const letter=XLSX.utils.encode_col(2+index);
+    return {Name:column.name,Ref:`'${ASSET_TEMPLATE_LISTS_SHEET}'!$${letter}$3:$${letter}$${Math.max(3,2+column.values.length)}`};
+  });
+  // Blank spacer cell: fallback list while the parent cell is still empty, and the blocked list.
+  names.push({Name:ASSET_TEMPLATE_EMPTY_NAME,Ref:`'${ASSET_TEMPLATE_LISTS_SHEET}'!$B$3`});
+  return {ws,names,lastColumn:XLSX.utils.encode_col(2+columns.length-1)};
+}
+
+/** MATCH finds the list column for the picked parent key, INDEX returns its defined name. */
+function assetsTemplateDependentList(keysRange,namesRange,matchExpr){
+  return `IFERROR(INDIRECT(INDEX(${namesRange},MATCH(${matchExpr},${keysRange},0))),${ASSET_TEMPLATE_EMPTY_NAME})`;
+}
+
+/** Assets & Liabilities sheet: every dropdown resolves through the hidden Lists sheet. */
+function assetsMigrationTemplateSheet(dataRows=[]){
+  const headers=MIGRATION_TEMPLATE_HEADERS.assets;
+  const structure=assetsTemplateStructure();
+  const total=Math.max(MIGRATION_TEMPLATE_ROWS,(dataRows||[]).length);
+  const rows=[
+    [`${MIGRATION_TEMPLATE_SHEETS.assets} - Migration Template`],
+    ['One row per asset or liability. Type, Category *, Subcategory and Funded from Asset Subcategory are dependent dropdowns fed by the hidden Lists sheet (Manage Categories); Funded from stays blank - and rejects input - on Cash & Bank Account rows. Re-importing skips rows that are already imported.'],
+    headers
+  ];
+  for(let i=0;i<total;i++){
+    const row=new Array(headers.length).fill('');
+    const data=(dataRows||[])[i];
+    if(data)data.forEach((value,c)=>{if(c<headers.length)row[c]=value??''});
+    rows.push(row);
+  }
+  const ws=XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols']=[12,14,26,30,40,18,10,12,14,34,28].map(wch=>({wch}));
+  const lists=assetsTemplateListsSheet(structure);
+  const ref=range=>`'${ASSET_TEMPLATE_LISTS_SHEET}'!${range}`;
+  const keys=ref(`$C$1:$${lists.lastColumn}$1`);
+  const names=ref(`$C$2:$${lists.lastColumn}$2`);
+  const lastRow=3+total;
+  const fundingCol=XLSX.utils.encode_col(headers.indexOf(ASSET_TEMPLATE_FUNDING_HEADER));
   return {
     ws,
     spec:{
-      name:MIGRATION_TEMPLATE_SHEETS[kind],
-      typeRange:`B4:B${3+total}`,
-      categoryRange:`${isIncome?'D':'C'}4:${isIncome?'D':'C'}${3+total}`,
-      typeList:`$${XLSX.utils.encode_col(typeCol)}$4:$${XLSX.utils.encode_col(typeCol)}$${3+types.length}`,
-      categoryList:`$${XLSX.utils.encode_col(categoryCol)}$4:$${XLSX.utils.encode_col(categoryCol)}$${3+categories.length}`,
-      typeTitle:isIncome?'Entry Type':'Type',
-      typePrompt:isIncome?'Pick Income or Expense.':'Pick Asset or Liability.',
-      categoryPrompt:'Pick a category from Manage Categories.'
+      name:MIGRATION_TEMPLATE_SHEETS.assets,
+      rules:[
+        {range:`B4:B${lastRow}`,listRef:ref(`$A$3:$A$${2+MIGRATION_TEMPLATE_TYPES.assets.length}`),title:'Type',prompt:'Pick Asset or Liability - it filters the Category dropdown.'},
+        {range:`C4:C${lastRow}`,listRef:assetsTemplateDependentList(keys,names,'$B4'),title:'Category',prompt:'The list follows the Type you picked.'},
+        {range:`D4:D${lastRow}`,listRef:assetsTemplateDependentList(keys,names,'$B4&"||"&$C4'),title:'Subcategory',prompt:'The list follows the Category you picked.'},
+        {range:`${fundingCol}4:${fundingCol}${lastRow}`,listRef:assetsTemplateDependentList(keys,names,`"${ASSET_TEMPLATE_FUNDING_KEY}||"&$B4&"||"&$C4`),title:ASSET_TEMPLATE_FUNDING_HEADER,prompt:'Pick the Asset subcategory that funded this record. Cash & Bank Account rows keep it blank.',error:'Funded from applies to every category except Cash & Bank Account - leave this cell blank.'}
+      ]
+    },
+    extraSheets:[{name:ASSET_TEMPLATE_LISTS_SHEET,ws:lists.ws,names:lists.names}]
+  };
+}
+
+/**
+ * One flat sheet in the exact layout read by importMigrationTemplateWorkbook(). Both sheets carry
+ * real dropdowns: Income & Expenses uses its hierarchy helper sheets, Assets & Liabilities the
+ * hidden Lists sheet. SheetJS cannot write <dataValidation> itself, so the rules in spec.rules are
+ * injected by officeTemplateBytesWithValidations.
+ */
+function migrationTemplateSheet(kind,dataRows=[]){
+  return kind==='assets'?assetsMigrationTemplateSheet(dataRows):incomeMigrationTemplateSheet(dataRows);
+}
+/* --- ExcelJS migration template: hidden "Lists" sheet + row-relative dependent dropdowns --------
+   The community SheetJS build cannot write <dataValidation>, so the downloadable template is built
+   with ExcelJS instead. Every option list owns one column on the hidden "Lists" sheet: row 1 holds
+   the header (the parent value), row 2+ the options, and each column gets one Named Range that
+   covers only its filled cells. A dropdown resolves its list with a row-relative
+   INDIRECT(SUBSTITUTE(...)) that mirrors sanitizeName(), so the parent cell drives the options. */
+
+const TEMPLATE_EXCELJS_URL='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
+const TEMPLATE_CATEGORY_HEADER='Category';
+const TEMPLATE_MAJOR_HEADER='Major Head';
+/** Funded from Asset Subcategory stays blocked for these even if Manage Categories has no match. */
+const TEMPLATE_CASH_CATEGORIES=['Cash','Bank Account'];
+const TEMPLATE_VALIDATION_FLAGS={allowBlank:true,showInputMessage:true,showErrorMessage:true,errorStyle:'stop'};
+
+let templateExcelJsLoader=null;
+
+/** ExcelJS is only needed for the dropdown templates, so it is fetched on first use. */
+function loadTemplateExcelJS(){
+  if(window.ExcelJS)return Promise.resolve(window.ExcelJS);
+  if(!templateExcelJsLoader){
+    templateExcelJsLoader=new Promise((resolve,reject)=>{
+      const script=document.createElement('script');
+      script.src=TEMPLATE_EXCELJS_URL;
+      script.async=true;
+      script.onload=()=>window.ExcelJS?resolve(window.ExcelJS):reject(new Error('ExcelJS could not be loaded.'));
+      script.onerror=()=>reject(new Error('ExcelJS could not be loaded.'));
+      document.head.appendChild(script);
+    }).catch(error=>{templateExcelJsLoader=null;throw error});
+  }
+  return templateExcelJsLoader;
+}
+
+/**
+ * Single source of truth for a Named Range name and for the text INDIRECT() resolves it from:
+ * every non-alphanumeric becomes "_", a leading digit is prefixed with "_", and reserved or
+ * cell-like names (A1, R1C1, R, C, TRUE, FALSE) are prefixed so Excel reads them as a name.
+ */
+function sanitizeName(value){
+  let name=String(value??'').replace(/[^A-Za-z0-9]/g,'_');
+  if(!name)name='_';
+  if(/^[0-9]/.test(name))name=`_${name}`;
+  if(/^(?:[A-Za-z]{1,3}[0-9]{1,7}|[Rr][0-9]*[Cc][0-9]*|TRUE|FALSE|[RC])$/i.test(name))name=`_${name}`;
+  return name;
+}
+
+/**
+ * Excel formula text (no leading "=") that reproduces sanitizeName() for the parent cell: one
+ * SUBSTITUTE per character the parent values actually contain, plus the same "_" prefix rules.
+ */
+function sanitizeFormula(cellRef,values){
+  const characters=[...new Set(values.flatMap(value=>[...String(value??'')]).filter(character=>!/[A-Za-z0-9]/.test(character)))];
+  if(!characters.length)characters.push(' ','-');
+  let expression=cellRef;
+  for(const character of characters)expression=`SUBSTITUTE(${expression},"${character.replace(/"/g,'""')}","_")`;
+  const conditions=[];
+  if(values.some(value=>/^[0-9]/.test(String(value??''))))conditions.push(`ISNUMBER(VALUE(LEFT(${cellRef},1)))`);
+  for(const value of values){
+    const text=String(value??'');
+    const plain=text.replace(/[^A-Za-z0-9]/g,'_');
+    if(plain&&!/^[0-9]/.test(plain)&&sanitizeName(text)!==plain)conditions.push(`${cellRef}="${text.replace(/"/g,'""')}"`);
+  }
+  return conditions.length?`IF(OR(${conditions.join(',')}),"_","")&${expression}`:expression;
+}
+
+/** 0-based column index -> spreadsheet letter (A, B ... Z, AA). */
+function templateColumnLetter(index){
+  let letter='',value=index+1;
+  while(value>0){const rest=(value-1)%26;letter=String.fromCharCode(65+rest)+letter;value=Math.floor((value-1)/26);}
+  return letter;
+}
+
+function mergeTemplateListValues(column,values){
+  for(const value of values){
+    const text=String(value??'');
+    if(text&&!column.values.includes(text))column.values.push(text);
+  }
+}
+
+/**
+ * Column-per-list registry of the hidden Lists sheet. The first list added owns column A, so the
+ * Categories stay the plain "Lists!$A$2:$A$n" range. A name that is already taken (Excel names
+ * ignore case) reuses that column and merges the options instead of duplicating the list.
+ */
+function templateListBook(){
+  const columns=[],byName=new Map();
+  return {
+    columns,
+    add(header,values,name){
+      const key=name?String(name).toLowerCase():'';
+      const existing=key?byName.get(key):null;
+      if(existing){mergeTemplateListValues(existing,values);return existing;}
+      const column={header:String(header??''),name:name||'',values:[],index:columns.length};
+      mergeTemplateListValues(column,values);
+      if(key)byName.set(key,column);
+      columns.push(column);
+      return column;
     }
   };
 }
 
-/** Locates the template header row (Date + Type/Entry Type + Category) in the first rows. */
+/** Absolute range of one list column - filled cells only, e.g. "Lists!$B$2:$B$8". */
+function templateListRef(column){
+  const letter=templateColumnLetter(column.index);
+  return `${ASSET_TEMPLATE_LISTS_SHEET}!$${letter}$2:$${letter}$${Math.max(2,column.values.length+1)}`;
+}
+
+/** Writes the hidden Lists sheet and registers one Named Range per filled list column. */
+function writeTemplateListsSheet(workbook,columns){
+  const ws=workbook.addWorksheet(ASSET_TEMPLATE_LISTS_SHEET,{state:'hidden'});
+  columns.forEach(column=>{
+    const letter=templateColumnLetter(column.index);
+    ws.getCell(`${letter}1`).value=column.header;
+    column.values.forEach((value,index)=>{ws.getCell(`${letter}${index+2}`).value=value;});
+    if(!column.name)return;
+    // A list without options still owns one blank cell, so INDIRECT(name) never errors.
+    workbook.definedNames.add(`${ASSET_TEMPLATE_LISTS_SHEET}!$${letter}$2:$${letter}$${Math.max(2,column.values.length+1)}`,column.name);
+  });
+  ws.getColumn(1).width=32;
+  columns.forEach((column,index)=>{
+    if(index)ws.getColumn(index+1).width=Math.max(18,Math.min(42,column.header.length+6));
+  });
+  return ws;
+}
+
+/** Named Range holding the Category list of one Type, e.g. "Asset_Categories". */
+function templateTypeListName(type){
+  return sanitizeName(`${type}_Categories`);
+}
+/**
+ * Named Range of one Income list. The "_Income" suffix keeps the user's Major Head / Category
+ * names from colliding with an Asset category of the same name (Excel names ignore case).
+ */
+function templateIncomeListName(...parts){
+  return sanitizeName([...parts].filter(Boolean).join('_')+'_Income');
+}
+/** Column A = Categories, then one column per Category holding its Subcategory options. */
+function assetsTemplateListBook(structure){
+  const book=templateListBook();
+  const categories=[],subsByCategory=new Map();
+  for(const type of MIGRATION_TEMPLATE_TYPES.assets){
+    for(const category of structure.catsByType.get(type)||[]){
+      const key=category.toLowerCase();
+      if(!subsByCategory.has(key)){subsByCategory.set(key,{name:category,values:[]});categories.push(category);}
+      mergeTemplateListValues(subsByCategory.get(key),structure.subsByKey.get(`${type}||${category}`)||[]);
+    }
+  }
+  const categoryColumn=book.add(TEMPLATE_CATEGORY_HEADER,categories);
+  for(const category of categories)book.add(category,subsByCategory.get(category.toLowerCase()).values,sanitizeName(category));
+  const fundingColumn=book.add(ASSET_TEMPLATE_FUNDING_HEADER,structure.funding,sanitizeName(ASSET_TEMPLATE_FUNDING_HEADER));
+  // One extra list per Type, so Category can follow the Type cell instead of showing every category.
+  const typeColumns=new Map();
+  for(const type of MIGRATION_TEMPLATE_TYPES.assets){
+    const values=[];
+    for(const category of structure.catsByType.get(type)||[]){
+      const name=normClass(category);
+      if(name&&!values.includes(name))values.push(name);
+    }
+    typeColumns.set(type,book.add(`${type} Categories`,values,templateTypeListName(type)));
+  }
+  return {book,categories,categoryColumn,fundingColumn,typeColumns};
+}
+
+/** Major Heads list, then one column per Major Head (its Categories) and one per Category. */
+function incomeTemplateListBook(book,structure){
+  const majorColumn=book.add(TEMPLATE_MAJOR_HEADER,structure.majors);
+  for(const head of structure.majors)book.add(head,structure.catsByHead.get(head)||[],templateIncomeListName(head));
+  for(const [key,values] of structure.subsByKey){
+    const [head,category]=key.split('||');
+    book.add(category,values,templateIncomeListName(head,category));
+  }
+  return {majorColumn};
+}
+
+function templateListValidation(formulae,title,prompt,error){
+  return Object.assign({type:'list',formulae},TEMPLATE_VALIDATION_FLAGS,{errorTitle:title,promptTitle:title,prompt,error:error||'Please pick a value from the dropdown list.'});
+}
+function templateCustomValidation(formulae,title,prompt,error){
+  return Object.assign({type:'custom',formulae},TEMPLATE_VALIDATION_FLAGS,{errorTitle:title,promptTitle:title,prompt,error});
+}
+/** One validation per row, so the row-relative parent reference inside the formula stays exact. */
+function applyTemplateValidationRows(ws,column,firstRow,lastRow,makeValidation){
+  for(let row=firstRow;row<=lastRow;row++)ws.getCell(row,column+1).dataValidation=makeValidation(row);
+}
+/** Same rule for a whole column: one entry, no duplicated (overlapping) ranges in the file. */
+function applyTemplateValidationRange(ws,column,firstRow,lastRow,validation){
+  const letter=templateColumnLetter(column);
+  ws.dataValidations.add(`${letter}${firstRow}:${letter}${lastRow}`,validation);
+}
+function writeTemplateSheetHeader(ws,title,description,headers){
+  ws.getCell('A1').value=title;
+  ws.getCell('A1').font={bold:true,size:13};
+  ws.getCell('A2').value=description;
+  headers.forEach((header,index)=>{
+    const cell=ws.getCell(3,index+1);
+    cell.value=header;
+    cell.font={bold:true};
+  });
+  ws.views=[{state:'frozen',ySplit:3}];
+}
+function writeTemplateSheetRows(ws,headers,dataRows){
+  (dataRows||[]).forEach((data,index)=>{
+    data.forEach((value,column)=>{
+      if(column<headers.length)ws.getCell(4+index,column+1).value=value??'';
+    });
+  });
+}
+function setTemplateSheetWidths(ws,widths){widths.forEach((width,index)=>{ws.getColumn(index+1).width=width;});}
+
+/** Categories whose Funded from cell must stay blank: Cash and Bank Account variants. */
+function assetFundingBlockedCategories(structure){
+  const blocked=new Set(TEMPLATE_CASH_CATEGORIES);
+  for(const type of MIGRATION_TEMPLATE_TYPES.assets){
+    for(const category of structure.catsByType.get(type)||[]){
+      if(isCashCategoryName(category))blocked.add(category);
+    }
+  }
+  return [...blocked];
+}
+
+
+/**
+ * Assets & Liabilities sheet: Type, Category, Subcategory and Funded from are real dropdowns.
+ * Category resolves the Named Range built from the Type cell, Subcategory the one built from the
+ * picked Category, and Funded from is a custom rule that only accepts Asset subcategories and
+ * rejects Cash & Bank Account rows.
+ */
+function writeAssetsTemplateSheet(workbook,structure,lists,dataRows=[]){
+  const headers=MIGRATION_TEMPLATE_HEADERS.assets;
+  const ws=workbook.addWorksheet(MIGRATION_TEMPLATE_SHEETS.assets);
+  writeTemplateSheetHeader(ws,`${MIGRATION_TEMPLATE_SHEETS.assets} - Migration Template`,
+    'One row per asset or liability. Type filters Category *, Category filters Subcategory, and Funded from Asset Subcategory only accepts Asset subcategories (blank for Cash & Bank Account rows). Lists come from the hidden Lists sheet (Manage Categories); re-importing skips rows that are already imported.',headers);
+  setTemplateSheetWidths(ws,[12,14,26,30,40,18,10,12,14,34,28]);
+  const total=Math.max(MIGRATION_TEMPLATE_ROWS,(dataRows||[]).length);
+  const firstRow=4,lastRow=3+total;
+  writeTemplateSheetRows(ws,headers,dataRows);
+  const blocked=assetFundingBlockedCategories(structure);
+  const types=[...MIGRATION_TEMPLATE_TYPES.assets];
+  applyTemplateValidationRange(ws,1,firstRow,lastRow,templateListValidation([`"${types.join(',')}"`],'Type','Pick Asset or Liability - it filters the Category dropdown.'));
+  applyTemplateValidationRows(ws,2,firstRow,lastRow,row=>templateListValidation(
+    [`INDIRECT((${sanitizeFormula(`$B${row}`,types)})&"_Categories")`],
+    TEMPLATE_CATEGORY_HEADER,'Pick a Type first - it filters the Category dropdown.'));
+  applyTemplateValidationRows(ws,3,firstRow,lastRow,row=>templateListValidation([`INDIRECT(${sanitizeFormula(`$C${row}`,lists.categories)})`],'Subcategory','The list follows the Category you picked.'));
+  applyTemplateValidationRows(ws,10,firstRow,lastRow,row=>templateCustomValidation(
+    [`OR($K${row}="",AND(${blocked.map(name=>`$C${row}<>"${name.replace(/"/g,'""')}"`).join(',')},COUNTIF(${templateListRef(lists.fundingColumn)},$K${row})>0))`],
+    ASSET_TEMPLATE_FUNDING_HEADER,
+    'Leave this cell blank for Cash & Bank Account rows.',
+    'Funded from only accepts an Asset subcategory from the list, and stays blank for Cash & Bank Account rows.'));
+  return ws;
+}
+
+/** Income & Expenses sheet: Major Head -> Category -> Subcategory, each list feeding the next. */
+function writeIncomeTemplateSheet(workbook,structure,lists,dataRows=[]){
+  const headers=MIGRATION_TEMPLATE_HEADERS.income;
+  const ws=workbook.addWorksheet(MIGRATION_TEMPLATE_SHEETS.income);
+  writeTemplateSheetHeader(ws,`${MIGRATION_TEMPLATE_SHEETS.income} - Migration Template`,
+    'Fill one row per income or expense. Entry Type * is Income/Expense; pick Major Head, then Category *, then Subcategory - each dropdown filters the next one. Re-importing skips rows that are already imported.',headers);
+  setTemplateSheetWidths(ws,[12,18,40,30,30,16,22,36,14]);
+  const total=Math.max(MIGRATION_TEMPLATE_ROWS,(dataRows||[]).length);
+  const firstRow=4,lastRow=3+total;
+  writeTemplateSheetRows(ws,headers,dataRows);
+  const categoryValues=[...structure.catsByHead.values()].flat();
+  applyTemplateValidationRange(ws,1,firstRow,lastRow,templateListValidation(['"Income,Expense"'],'Entry Type','Pick Income or Expense.'));
+  applyTemplateValidationRange(ws,2,firstRow,lastRow,templateListValidation([templateListRef(lists.majorColumn)],TEMPLATE_MAJOR_HEADER,'Pick a Major Head - it filters the Category dropdown.'));
+  applyTemplateValidationRows(ws,3,firstRow,lastRow,row=>templateListValidation([`INDIRECT((${sanitizeFormula(`$C${row}`,structure.majors)})&"_Income")`],'Category','The list follows the Major Head you picked.'));
+  applyTemplateValidationRows(ws,4,firstRow,lastRow,row=>templateListValidation([
+    `INDIRECT((${sanitizeFormula(`$C${row}`,structure.majors)})&"_"&(${sanitizeFormula(`$D${row}`,categoryValues)})&"_Income")`
+  ],'Subcategory','The list follows the Category you picked.'));
+  return ws;
+}
+
+/** Whole downloadable workbook: the two entry sheets first, then the hidden Lists sheet behind them. */
+function buildMigrationTemplateWorkbook(ExcelJSEngine){
+  const workbook=new ExcelJSEngine.Workbook();
+  workbook.creator='Personal Finance';
+  const assets=assetsTemplateStructure();
+  const income=incomeTemplateStructure();
+  if(!income.majors.length){income.majors.push('Other Income');income.catsByHead.set('Other Income',[])}
+  const assetLists=assetsTemplateListBook(assets);
+  const incomeLists=incomeTemplateListBook(assetLists.book,income);
+  writeAssetsTemplateSheet(workbook,assets,assetLists);
+  writeIncomeTemplateSheet(workbook,income,incomeLists);
+  // Added last so the active tab is a visible sheet; Excel unhides a hidden sheet that owns activeTab 0.
+  writeTemplateListsSheet(workbook,assetLists.book.columns);
+  workbook.views=[{x:0,y:0,width:10000,height:20000,firstSheet:0,activeTab:0,visibility:'visible'}];
+  return workbook;
+}
+
 function migrationTemplateHeader(aoa){
   for(let i=0;i<Math.min(aoa.length,8);i++){
     const cells=(aoa[i]||[]).map(c=>nrm(String(c??'')).replace(/\*/g,' ').replace(/\s+/g,' ').trim());
@@ -7650,6 +8157,21 @@ function isMigrationTemplateWorkbook(workbook){
     const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[name],{header:1,defval:'',raw:true});
     return !!migrationTemplateHeader(aoa);
   });
+}
+
+/**
+ * The sheet only carries the funding subcategory, so its Asset category is resolved from the same
+ * Manage Categories tree the Add Record form uses. A value that no longer matches is ignored.
+ */
+function assetFundingFromSheet(value){
+  const subcategory=normClass(value);
+  if(!subcategory)return null;
+  const wanted=subcategory.toLowerCase();
+  for(const category of orderedCategories('Asset')){
+    const match=(category.subcategories||[]).map(sub=>normClass(sub)).find(sub=>sub.toLowerCase()===wanted);
+    if(match)return {category:normClass(category.name),subcategory:match};
+  }
+  return null;
 }
 
 /**
@@ -7682,7 +8204,8 @@ async function importMigrationTemplateWorkbook(workbook,replaceId,fileName,optio
       description:col(['description','notes','details']),
       currency:col(['currency']),
       status:col(['status']),
-      incomeYear:col(['income year'])
+      incomeYear:col(['income year']),
+      funding:col(['funded from asset subcategory','funded from subcategory','funded from','funding source','funding'])
     };
     const cell=(row,index)=>index>=0&&index<row.length?row[index]:'';
     for(let r=header.headerRow+1;r<aoa.length;r++){
@@ -7713,6 +8236,9 @@ async function importMigrationTemplateWorkbook(workbook,replaceId,fileName,optio
           documentIds:[],sourceSheet:sheetName,sourceRow:r+1,importHash:hash,migrationId,
           updatedAt:new Date().toISOString()
         };
+        // Optional "Funded from Asset Subcategory" column; templates without it simply skip this.
+        const funding=assetFundingFromSheet(cell(row,cols.funding));
+        if(funding&&!(kindType==='Asset'&&isCashCategoryName(category)))record.funding=funding;
         recordRows.push(record);
         if(record.incomeYear)years.add(record.incomeYear);
         let definition=newCategories.find(c=>c.type===kindType&&c.name===category)||state.categories.find(c=>c.type===kindType&&c.name===category);
@@ -7838,28 +8364,24 @@ async function confirmExcelImport(){
   }
 }
 
-/** Downloadable .xlsx template: Type / Entry Type * and Category * are real dropdowns. */
+/** Downloadable .xlsx template: Type / Category / Subcategory / Funded from are real dependent dropdowns. */
 async function downloadMigrationTemplate(){
-  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
-  const workbook=XLSX.utils.book_new();
-  const specs=[];
-  for(const kind of ['assets','income']){
-    const {ws,spec}=migrationTemplateSheet(kind);
-    XLSX.utils.book_append_sheet(workbook,ws,spec.name);
-    specs.push(spec);
+  let ExcelJS;
+  try{
+    ExcelJS=await loadTemplateExcelJS();
+  }catch(error){
+    toast('The dropdown template needs the ExcelJS library. Check your internet connection and try again.',true);
+    return;
   }
-  let bytes=XLSX.write(workbook,{bookType:'xlsx',type:'array'});
-  let dropdowns=false;
-  if(window.JSZip){
-    try{
-      bytes=await officeTemplateBytesWithValidations(bytes,specs);
-      dropdowns=true;
-    }catch(error){
-      console.warn('Migration template dropdowns could not be added',error);
-    }
+  try{
+    const workbook=buildMigrationTemplateWorkbook(ExcelJS);
+    const bytes=await workbook.xlsx.writeBuffer();
+    downloadBlob(new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`Finance-Migration-Template-${todayISO()}.xlsx`);
+    toast('Template downloaded — Type → Category → Subcategory and Funded from Asset Subcategory are dependent dropdowns');
+  }catch(error){
+    console.warn('Migration template could not be built',error);
+    toast('The template could not be built. Please try again.',true);
   }
-  downloadBlob(new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`Finance-Migration-Template-${todayISO()}.xlsx`);
-  toast(dropdowns?'Template downloaded — Type / Entry Type * and Category * are dropdowns':'Template downloaded, but the dropdown lists need the ZIP library — reload while online to add them',!dropdowns);
 }
 
 /** Export in the exact template layout, so the workbook can be re-imported without duplicates. */
@@ -7868,8 +8390,8 @@ function exportMigrationWorkbook(){
   const records=(state.records||[]).slice().sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')));
   const income=(state.incomeExpenses||[]).slice().sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')));
   if(!records.length&&!income.length){toast('There is nothing to export yet.',true);return}
-  const assetRows=records.map(r=>[r.date||'',r.type||'',r.category||'',r.subcategory||'',r.particulars||r.name||'',recordAmount(r),r.currency||'',r.status||'Active',r.incomeYear||'',r.details||r.description||'']);
-  const incomeRows=income.map(r=>[r.date||'',r.type||'',r.majorHead||'',r.category||'',r.subcategory||'',Number(r.amount)||0,r.account||'',r.description||'']);
+  const assetRows=records.map(r=>[r.date||'',r.type||'',r.category||'',r.subcategory||'',r.particulars||r.name||'',recordAmount(r),r.currency||'',r.status||'Active',r.incomeYear||'',r.details||r.description||'',r.funding?.subcategory||'']);
+  const incomeRows=income.map(r=>[r.date||'',r.type||'',r.majorHead||'',r.category||'',r.subcategory||'',Number(r.amount)||0,r.account||'',r.description||'',r.incomeYear||'']);
   const workbook=XLSX.utils.book_new();
   const assets=migrationTemplateSheet('assets',assetRows);
   const incomes=migrationTemplateSheet('income',incomeRows);
@@ -7976,6 +8498,486 @@ async function deleteMigration(id){
   await remove('migrationHistory',id);
   await loadState();renderAll();
   toast(`Migration deleted (${count} record(s) removed)`);
+}
+
+/* ==========================================================================
+   Google Drive sync (Google Identity Services token client + Drive v3 REST)
+   - Backups live in the "PersonalFinance_Backups" folder as
+     assetbook-backup-YYYY-MM-DDTHH-mm-ss.json; only the latest 15 are kept.
+   - A snapshot is the full AssetBookDB: the protected settingsStore (category
+     tree), userCustomizedCategories, records, income/expense, office entries,
+     settings, document metadata and every stored PDF (base64 encoded).
+   - Auto-backup is debounced after local mutations. Auto-restore at launch is
+     guarded by isRestoring and only fills an EMPTY database, so launching never
+     overwrites data that already exists on this device.
+   ========================================================================== */
+const GOOGLE_DRIVE_CLIENT_ID='232563199720-sn7bke2332p585r4jlcafivjhjfk0ut8.apps.googleusercontent.com';
+const GOOGLE_DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
+const GOOGLE_DRIVE_FOLDER='PersonalFinance_Backups';
+const GOOGLE_DRIVE_BACKUP_LIMIT=15;
+const GOOGLE_DRIVE_API='https://www.googleapis.com/drive/v3';
+const GOOGLE_DRIVE_UPLOAD='https://www.googleapis.com/upload/drive/v3';
+const GOOGLE_DRIVE_AUTO_BACKUP_DELAY=5000;
+const GOOGLE_DRIVE_FOLDER_KEY='assetbook-drive-folder-id';
+let appReady=false;
+let isRestoring=false;
+let googleDriveTokenClientInstance=null;
+let googleDriveAccessToken='';
+let googleDriveTokenExpiry=0;
+let googleDriveFolderId='';
+let googleDriveBusy=false;
+let googleDriveBackupTimer=null;
+let googleDriveStatus='';
+
+function driveSyncEnabled(){return !!(state.settings&&state.settings.driveSyncEnabled)}
+function driveConnected(){return !!(googleDriveAccessToken&&Date.now()<googleDriveTokenExpiry-60000)}
+
+/** Compact status block: Connect / Disconnect / Sync Now + Last Synced. */
+function renderDriveSyncCard(){
+  const connect=document.getElementById('driveConnectBtn');
+  const disconnect=document.getElementById('driveDisconnectBtn');
+  const sync=document.getElementById('driveSyncBtn');
+  const status=document.getElementById('driveSyncStatus');
+  const last=document.getElementById('driveLastSynced');
+  if(!connect&&!status)return;
+  const enabled=driveSyncEnabled();
+  const connected=driveConnected();
+  if(connect)connect.classList.toggle('hidden',enabled);
+  if(disconnect)disconnect.classList.toggle('hidden',!enabled);
+  if(sync)sync.classList.toggle('hidden',!enabled);
+  if(status){
+    status.textContent=!enabled
+      ?'Not connected — connect Google Drive to enable automatic backups.'
+      :googleDriveStatus||(connected?'Connected to Google Drive.':'Sign-in expired — click Sync Now to renew access.');
+  }
+  if(last){
+    const stamp=state.settings&&state.settings.driveLastSyncedAt;
+    last.textContent=`Last synced: ${stamp?new Date(stamp).toLocaleString():'never'}`;
+  }
+}
+function setDriveStatus(text){
+  googleDriveStatus=text||'';
+  renderDriveSyncCard();
+}
+
+/** The GIS script loads async/defer, so start-up may run before window.google exists. */
+function waitForGoogleIdentity(timeout=6000){
+  if(window.google&&google.accounts&&google.accounts.oauth2)return Promise.resolve(true);
+  return new Promise(resolve=>{
+    const started=Date.now();
+    const tick=()=>{
+      if(window.google&&google.accounts&&google.accounts.oauth2)return resolve(true);
+      if(Date.now()-started>=timeout)return resolve(false);
+      setTimeout(tick,200);
+    };
+    setTimeout(tick,200);
+  });
+}
+
+/** Google Identity Services token client (created lazily; the script loads async). */
+let googleDriveTokenHandler=null;
+function driveTokenClient(){
+  if(!(window.google&&google.accounts&&google.accounts.oauth2))return null;
+  if(!googleDriveTokenClientInstance){
+    googleDriveTokenClientInstance=google.accounts.oauth2.initTokenClient({
+      client_id:GOOGLE_DRIVE_CLIENT_ID,
+      scope:GOOGLE_DRIVE_SCOPE,
+      callback:response=>{const handler=googleDriveTokenHandler;if(handler)handler(response,null)},
+      error_callback:error=>{const handler=googleDriveTokenHandler;if(handler)handler(null,error)}
+    });
+  }
+  return googleDriveTokenClientInstance;
+}
+/** Interactive = consent / account picker; silent = attempt without UI. */
+function requestDriveToken(interactive){
+  const client=driveTokenClient();
+  if(!client)return Promise.reject(new Error('Google sign-in is still loading. Check your connection and try again.'));
+  return new Promise((resolve,reject)=>{
+    let settled=false;
+    const finish=(error,token)=>{
+      if(settled)return;
+      settled=true;
+      clearTimeout(timer);
+      googleDriveTokenHandler=null;
+      if(token)resolve(token);
+      else reject(error||new Error('Google sign-in was cancelled.'));
+    };
+    const timer=setTimeout(()=>finish(new Error('Google sign-in timed out.')),interactive?120000:6000);
+    googleDriveTokenHandler=(response,error)=>{
+      if(error)return finish(new Error(error.message||error.type||'Google sign-in was cancelled.'));
+      if(response&&response.access_token)return finish(null,response.access_token);
+      finish(new Error((response&&(response.error_description||response.error))||'Google sign-in was cancelled.'));
+    };
+    try{
+      client.requestAccessToken({prompt:interactive?'select_account':'none'});
+    }catch(error){
+      finish(error);
+    }
+  });
+}
+async function ensureDriveToken(interactive=false){
+  if(driveConnected())return googleDriveAccessToken;
+  const token=await requestDriveToken(!!interactive);
+  googleDriveAccessToken=token;
+  googleDriveTokenExpiry=Date.now()+3500*1000;      // GIS tokens last ~1 hour; re-checked by driveConnected()
+  googleDriveStatus='Connected to Google Drive.';
+  renderDriveSyncCard();
+  return token;
+}
+
+
+/* --- Drive v3 REST helpers (drive.file: only files this app creates are visible) --- */
+async function googleDriveError(response){
+  let detail='';
+  try{const text=await response.text();detail=text?` ${text.slice(0,200)}`:''}catch(error){}
+  if(response.status===401)return new Error('Google Drive authorisation expired. Click Sync Now to sign in again.');
+  if(response.status===403)return new Error(`Google Drive refused the request (permission or quota).${detail}`);
+  if(response.status===404)return new Error('The Google Drive backup could not be found.');
+  return new Error(`Google Drive request failed (${response.status}).${detail}`);
+}
+async function googleDriveFetch(url,init={},interactive=false){
+  const token=await ensureDriveToken(!!interactive);
+  const send=authToken=>fetch(url,Object.assign({},init,{headers:Object.assign({},init.headers||{},{Authorization:`Bearer ${authToken}`})}));
+  const response=await send(token);
+  if(response.status!==401)return response;
+  googleDriveAccessToken='';
+  googleDriveTokenExpiry=0;
+  return send(await ensureDriveToken(!!interactive));
+}
+async function googleDriveJson(url,init={},interactive=false){
+  const response=await googleDriveFetch(url,init,interactive);
+  if(!response.ok)throw await googleDriveError(response);
+  return response.json();
+}
+function rememberDriveFolder(id){
+  googleDriveFolderId=id;
+  try{localStorage.setItem(GOOGLE_DRIVE_FOLDER_KEY,id)}catch(error){}
+}
+async function googleDriveFolder(interactive=false){
+  if(googleDriveFolderId)return googleDriveFolderId;
+  try{googleDriveFolderId=localStorage.getItem(GOOGLE_DRIVE_FOLDER_KEY)||''}catch(error){}
+  if(googleDriveFolderId)return googleDriveFolderId;
+  const query=encodeURIComponent(`name='${GOOGLE_DRIVE_FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  const found=await googleDriveJson(`${GOOGLE_DRIVE_API}/files?q=${query}&spaces=drive&pageSize=10&fields=files(id,name)`,{},interactive);
+  const folder=(found.files||[])[0];
+  if(folder){rememberDriveFolder(folder.id);return folder.id}
+  const created=await googleDriveJson(`${GOOGLE_DRIVE_API}/files?fields=id`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:GOOGLE_DRIVE_FOLDER,mimeType:'application/vnd.google-apps.folder'})
+  },interactive);
+  rememberDriveFolder(created.id);
+  return created.id;
+}
+async function googleDriveList(interactive=false){
+  const folderId=await googleDriveFolder(interactive);
+  const query=encodeURIComponent(`'${folderId}' in parents and trashed=false and mimeType='application/json'`);
+  const data=await googleDriveJson(`${GOOGLE_DRIVE_API}/files?q=${query}&orderBy=createdTime desc&pageSize=100&fields=files(id,name,createdTime,size)`,{},interactive);
+  return (data.files||[]).filter(file=>/^assetbook-backup-.*\.json$/i.test(file.name||''));
+}
+/** Keeps only the newest GOOGLE_DRIVE_BACKUP_LIMIT (15) backups. */
+async function googleDrivePrune(files,interactive=false){
+  const extras=(files||[]).slice(GOOGLE_DRIVE_BACKUP_LIMIT);
+  for(const file of extras){
+    const response=await googleDriveFetch(`${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file.id)}`,{method:'DELETE'},interactive);
+    if(!response.ok&&response.status!==404)throw await googleDriveError(response);
+  }
+  return extras.length;
+}
+async function googleDriveUpload(snapshot,fileName,interactive=true){
+  const folderId=await googleDriveFolder(interactive);
+  const json=JSON.stringify(snapshot);
+  const form=new FormData();
+  form.append('metadata',new Blob([JSON.stringify({name:fileName,mimeType:'application/json',parents:[folderId]})],{type:'application/json'}));
+  form.append('file',new Blob([json],{type:'application/json'}),fileName);
+  const data=await googleDriveJson(`${GOOGLE_DRIVE_UPLOAD}/files?uploadType=multipart&fields=id,name,createdTime,size`,{method:'POST',body:form},interactive);
+  return {file:data,size:new Blob([json]).size};
+}
+async function googleDriveDownload(fileId,interactive=true){
+  const response=await googleDriveFetch(`${GOOGLE_DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`,{},interactive);
+  if(!response.ok)throw await googleDriveError(response);
+  return response.json();
+}
+/** assetbook-backup-YYYY-MM-DDTHH-mm-ss.json */
+function googleDriveBackupName(date=new Date()){
+  return `assetbook-backup-${date.toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+}
+
+/* --- Snapshot / restore of the complete AssetBookDB --- */
+function blobToBase64(blob){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>{
+      const result=String(reader.result||'');
+      const comma=result.indexOf(',');
+      resolve(comma>=0?result.slice(comma+1):result);
+    };
+    reader.onerror=()=>reject(reader.error||new Error('A stored PDF could not be read.'));
+    reader.readAsDataURL(blob);
+  });
+}
+function base64ToBlob(data,type){
+  const binary=atob(data||'');
+  const bytes=new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+  return new Blob([bytes],{type:type||'application/pdf'});
+}
+const AssetBookDB={
+  name:DB_NAME,
+  stores:['records','categories','documents','documentBlobs','settings','backupHistory','incomeExpenses','incomeGroups','migrationHistory','officePurchases',SETTINGS_STORE],
+  /** Full database snapshot, including every stored PDF as base64. */
+  async snapshot(){
+    const [records,incomeExpenses,officePurchases,incomeGroups,migrationHistory,documents,settingsRows,settingsStore]=await Promise.all([
+      getAll('records'),
+      getAll('incomeExpenses'),
+      getAll('officePurchases'),
+      getAll('incomeGroups'),
+      getAll('migrationHistory'),
+      getAll('documents'),
+      getAll('settings'),
+      getAll(SETTINGS_STORE)
+    ]);
+    const structure=settingsStore.find(row=>row&&row.key===CATEGORY_STRUCTURE_KEY)||null;
+    const pdfs=[];
+    for(const doc of documents){
+      const blob=await getDocBlob(doc.id).catch(()=>null);
+      if(!blob)continue;
+      pdfs.push({id:doc.id,name:doc.name||doc.title||'document.pdf',type:blob.type||'application/pdf',data:await blobToBase64(blob)});
+    }
+    return {
+      app:'Personal Finance',
+      format:'assetbook-drive-backup',
+      version:2,
+      database:DB_NAME,
+      createdAt:new Date().toISOString(),
+      settingsStore,
+      userCustomizedCategories:{
+        source:structure?(structure.source||'default'):'default',
+        updatedAt:structure?(structure.updatedAt||''):'',
+        categories:structure?cloneStructure(structure.categories||[]):[],
+        incomeGroups:structure?cloneStructure(structure.incomeGroups||[]):[]
+      },
+      records,
+      incomeExpenses,
+      officePurchases,
+      incomeGroups,
+      migrationHistory,
+      settings:settingsRows,
+      documents:documents.map(doc=>{const clean=Object.assign({},doc);delete clean.blob;return clean}),
+      pdfs
+    };
+  },
+
+  /** Writes a snapshot back. settingsStore is merge-only and is never cleared. */
+  async restore(snapshot,mode='replace'){
+    if(!snapshot||!Array.isArray(snapshot.records))throw new Error('Unsupported Google Drive backup format.');
+    const records=snapshot.records||[];
+    const incomeExpenses=Array.isArray(snapshot.incomeExpenses)?snapshot.incomeExpenses:[];
+    const officePurchases=Array.isArray(snapshot.officePurchases)?snapshot.officePurchases:[];
+    const incomeGroups=Array.isArray(snapshot.incomeGroups)?snapshot.incomeGroups:[];
+    const migrationHistory=Array.isArray(snapshot.migrationHistory)?snapshot.migrationHistory:[];
+    const documents=(Array.isArray(snapshot.documents)?snapshot.documents:[]).map(doc=>{const clean=Object.assign({},doc);delete clean.blob;return clean});
+    const pdfs=(Array.isArray(snapshot.pdfs)?snapshot.pdfs:[]).filter(entry=>entry&&entry.id&&entry.data);
+    const blobs=pdfs.map(entry=>({id:entry.id,blob:base64ToBlob(entry.data,entry.type)}));
+    if(mode==='replace'){
+      await replaceStore('records',records);
+      await replaceStore('incomeExpenses',incomeExpenses);
+      await replaceStore('officePurchases',officePurchases);
+      await replaceStore('incomeGroups',incomeGroups);
+      await replaceStore('migrationHistory',migrationHistory);
+      await replaceStore('documents',documents);
+      await replaceStore('documentBlobs',blobs);
+    }else{
+      for(const record of records){if(!await getOne('records',record.id))await put('records',record)}
+      for(const entry of incomeExpenses){if(!await getOne('incomeExpenses',entry.id))await put('incomeExpenses',entry)}
+      for(const entry of officePurchases){if(!await getOne('officePurchases',entry.id))await put('officePurchases',entry)}
+      for(const group of incomeGroups){if(!await getOne('incomeGroups',group.id))await put('incomeGroups',group)}
+      for(const row of migrationHistory){if(!await getOne('migrationHistory',row.id))await put('migrationHistory',row)}
+      for(const doc of documents){if(!await getOne('documents',doc.id))await put('documents',doc)}
+      for(const blob of blobs){if(!await getOne('documentBlobs',blob.id))await put('documentBlobs',blob)}
+    }
+    // Protected store: only ADD missing records; the category tree is merged, never replaced.
+    for(const row of Array.isArray(snapshot.settingsStore)?snapshot.settingsStore:[]){
+      if(!row||!row.key||row.key===CATEGORY_STRUCTURE_KEY)continue;
+      if(!await getOne(SETTINGS_STORE,row.key))await put(SETTINGS_STORE,Object.assign({},row));
+    }
+    const custom=snapshot.userCustomizedCategories||null;
+    if(custom&&(custom.categories||custom.incomeGroups))await mergeCategoryStructure({categories:custom.categories||[],incomeGroups:custom.incomeGroups||[]});
+    else if(snapshot.categoryStructure)await mergeCategoryStructure(snapshot.categoryStructure);
+    if(!await readCategoryStructure())await seedCategoryStructure('default');
+    const settingsRows=Array.isArray(snapshot.settings)
+      ?snapshot.settings
+      :Object.entries(snapshot.settings||{}).map(([key,value])=>({key,value}));
+    for(const row of settingsRows){
+      if(!row||!row.key)continue;
+      if(row.key==='driveSyncEnabled')continue;      // the local connection choice stays local
+      await put('settings',{key:row.key,value:row.value});
+    }
+    return {records:records.length,incomeExpenses:incomeExpenses.length,officePurchases:officePurchases.length,documents:blobs.length};
+  }
+};
+
+/** Creates a new backup, uploads it, then prunes everything past the newest 15. */
+async function syncGoogleDrive(options={}){
+  const interactive=options.interactive!==false;
+  const silent=!!options.silent;
+  if(isRestoring){if(!silent)toast('A restore is in progress. Try again in a moment.',true);return false}
+  if(!driveSyncEnabled()){if(!silent)toast('Connect Google Drive first.',true);return false}
+  if(googleDriveBusy)return false;
+  googleDriveBusy=true;
+  setDriveStatus(silent?'Auto-backing up…':'Syncing…');
+  let saved=false;
+  try{
+    const snapshot=await AssetBookDB.snapshot();
+    const fileName=googleDriveBackupName();
+    const result=await googleDriveUpload(snapshot,fileName,interactive);
+    const files=await googleDriveList(interactive);
+    const removed=await googleDrivePrune(files,interactive);
+    const now=new Date().toISOString();
+    state.settings.driveLastSyncedAt=now;
+    state.settings.driveLastBackupName=fileName;
+    await put('settings',{key:'driveLastSyncedAt',value:now});
+    await put('settings',{key:'driveLastBackupName',value:fileName});
+    googleDriveStatus='Connected to Google Drive.';
+    saved=true;
+    if(!silent)toast(`Google Drive backup saved (${formatFileSize(result.size)})${removed?` · ${removed} older backup(s) removed`:''}`);
+  }catch(error){
+    googleDriveStatus=error.message||'Google Drive sync failed.';
+    throw error;
+  }finally{
+    googleDriveBusy=false;
+    renderDriveSyncCard();
+  }
+  return saved;
+}
+
+async function connectGoogleDrive(){
+  if(!await waitForGoogleIdentity(8000)){
+    toast('Google sign-in could not load. Check your connection and try again.',true);
+    return;
+  }
+  setDriveStatus('Connecting to Google Drive…');
+  try{
+    await ensureDriveToken(true);
+    await googleDriveFolder(true);
+    state.settings.driveSyncEnabled=true;
+    await put('settings',{key:'driveSyncEnabled',value:true});
+    googleDriveStatus='Connected to Google Drive.';
+    renderDriveSyncCard();
+    toast('Google Drive connected');
+    // New device / cleared browser: restore the newest cloud backup before uploading anything.
+    const hasLocalData=state.records.length||state.incomeExpenses.length||state.officePurchases.length;
+    if(!hasLocalData)await restoreLatestGoogleDriveBackup(true);
+    try{
+      await syncGoogleDrive({silent:true,interactive:false});
+    }catch(syncError){
+      toast(`Connected, but the first backup failed: ${syncError.message||syncError}`,true);
+    }
+  }catch(error){
+    googleDriveStatus='Not connected';
+    toast(error.message||'Google Drive could not be connected.',true);
+  }finally{
+    googleDriveBusy=false;
+    renderDriveSyncCard();
+  }
+}
+
+async function disconnectGoogleDrive(){
+  if(!await confirm('Disconnect Google Drive? Automatic backups stop until you connect again.','Disconnect Google Drive'))return;
+  const token=googleDriveAccessToken;
+  googleDriveAccessToken='';
+  googleDriveTokenExpiry=0;
+  googleDriveFolderId='';
+  clearTimeout(googleDriveBackupTimer);
+  googleDriveBackupTimer=null;
+  try{localStorage.removeItem(GOOGLE_DRIVE_FOLDER_KEY)}catch(error){}
+  if(token&&window.google&&google.accounts&&google.accounts.oauth2&&google.accounts.oauth2.revoke){
+    try{google.accounts.oauth2.revoke(token,()=>{})}catch(error){}
+  }
+  state.settings.driveSyncEnabled=false;
+  await put('settings',{key:'driveSyncEnabled',value:false});
+  googleDriveStatus='';
+  renderDriveSyncCard();
+  toast('Google Drive disconnected');
+}
+
+/**
+ * Restores the newest Drive backup. Guarded by isRestoring, so no backup can be scheduled or
+ * started while the database is being rewritten. Never touches the protected category tree.
+ */
+async function restoreLatestGoogleDriveBackup(interactive=false){
+  if(isRestoring)return false;
+  isRestoring=true;
+  try{
+    const files=await googleDriveList(interactive);
+    if(!files.length)return false;
+    const snapshot=await googleDriveDownload(files[0].id,interactive);
+    const summary=await AssetBookDB.restore(snapshot,'replace');
+    await loadState();
+    state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
+    googleDriveStatus=`Restored the latest backup (${files[0].name}).`;
+    if(appReady)renderAll();
+    toast(`Restored Google Drive backup: ${summary.records} record(s), ${summary.documents} PDF(s)`);
+    return true;
+  }catch(error){
+    console.info('[drive] restore skipped',error);
+    googleDriveStatus='The latest backup could not be restored automatically.';
+    return false;
+  }finally{
+    isRestoring=false;
+    renderDriveSyncCard();
+  }
+}
+
+/**
+ * Auto-restore at launch. Refused when local data exists, so a launch can never replace
+ * records that are already on this device. Only an empty database (new browser, new phone,
+ * reinstall) is filled from the newest Drive backup.
+ */
+async function googleDriveAutoRestore(){
+  if(isRestoring)return false;
+  if(!driveSyncEnabled())return false;
+  const hasLocalData=state.records.length||state.incomeExpenses.length||state.officePurchases.length;
+  if(hasLocalData)return false;
+  return restoreLatestGoogleDriveBackup(false);
+}
+
+/** Called from init(): paints the card, then silently reconnects and restores an empty database. */
+async function initGoogleDriveSync(){
+  renderDriveSyncCard();
+  if(!driveSyncEnabled())return;
+  if(navigator.onLine===false){
+    googleDriveStatus='Offline — Google Drive sync resumes when you are back online.';
+    renderDriveSyncCard();
+    return;
+  }
+  if(!await waitForGoogleIdentity(3000)){
+    googleDriveStatus='Google sign-in could not load. Check your connection, then click Sync Now.';
+    renderDriveSyncCard();
+    return;
+  }
+  try{
+    await ensureDriveToken(false);
+  }catch(error){
+    console.info('[drive] silent sign-in unavailable',error);
+    googleDriveStatus='Click Sync Now to sign in to Google Drive again.';
+    renderDriveSyncCard();
+    return;
+  }
+  await googleDriveAutoRestore();
+  renderDriveSyncCard();
+}
+
+/** Debounced auto-backup after local mutations (loadState / category saves call this). */
+function scheduleDriveAutoBackup(){
+  if(isRestoring||!appReady||!driveSyncEnabled())return;
+  if(!driveConnected())return;
+  clearTimeout(googleDriveBackupTimer);
+  googleDriveBackupTimer=setTimeout(()=>{
+    googleDriveBackupTimer=null;
+    if(isRestoring||!driveConnected())return;
+    syncGoogleDrive({silent:true,interactive:false}).catch(error=>console.info('[drive] auto-backup skipped',error));
+  },GOOGLE_DRIVE_AUTO_BACKUP_DELAY);
 }
 
 /* ==========================================================================
