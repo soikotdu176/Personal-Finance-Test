@@ -1121,6 +1121,7 @@ html[data-theme="dark"] .amount.expense { color: #fb7185; }
 .migration-history .hint { margin: 0 0 12px; }
 .migration-history-table { min-width: 620px; }
 .migration-badge { background: var(--primary-soft); color: var(--primary-2); }
+.migration-nochange { margin-left: 6px; background: var(--emerald-soft); color: #059669; }
 #migrationEditMeta { margin: 0 0 8px; }
 .migration-edit-table { min-width: 560px; }
 #migrationEditRows { margin-top: 8px; }

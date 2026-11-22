@@ -1647,9 +1647,11 @@ function applyTransferLegs(balanceRecords,transfers,year){
  * the record itself is the single source of truth.
  * The same snapshot rule as transfers applies: a funding row only counts while it is newer than the
  * funding account's own snapshot, otherwise that snapshot already reflects the spending.
+ * A record imported with "I Do not want to change Account" carries noAccountChange, so its "Funded
+ * from" link never deducts from that Cash & Bank account either.
  */
 function applyFundingLegs(balanceRecords,records,year){
-  const fundingRecords=(records||[]).filter(record=>!isTransferRecord(record)&&record.funding&&record.funding.subcategory);
+  const fundingRecords=(records||[]).filter(record=>!isTransferRecord(record)&&!record.noAccountChange&&record.funding&&record.funding.subcategory);
   if(!fundingRecords.length)return balanceRecords;
   const range=year?fiscalRange(year):null;
   const cutoff=range?range.to:'';
@@ -3073,6 +3075,9 @@ async function saveRecord(event){
   const fundingAccount=fundingEl&&!fundingEl.disabled&&fundingEl.value?formState.fundingAccounts?.get(fundingEl.value):null;
   if(fundingAccount&&!(type==='Asset'&&isCashCategoryName(category))){
     record.funding={category:fundingAccount.category,subcategory:fundingAccount.subcategory};
+    // A manually saved "Funded from" link always applies, so an import's "I Do not want to change
+    // Account" opt-out is dropped the moment the user confirms the funding source in this form.
+    delete record.noAccountChange;
   }else{
     delete record.funding;
   }
@@ -4449,6 +4454,12 @@ async function runImport(file,replaceId,options={}){
   if(!file)return;
   if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
   if(file.size>MAX_IMPORT_BYTES){toast('That file is larger than 30 MB. Split it and import the parts.',true);return}
+  // Replacing a batch keeps the account behaviour that batch was imported with, so re-importing an
+  // "I Do not want to change Account" file can never start moving Cash & Bank balances.
+  if(replaceId&&options.noAccountChange===undefined){
+    const batch=(state.migrationHistory||[]).find(m=>m.id===replaceId);
+    options=Object.assign({},options,{noAccountChange:!!(batch&&batch.noAccountChange)});
+  }
   try{
     const isCsv=/\.csv$/i.test(file.name||'');
     if(!isCsv){
@@ -4475,11 +4486,13 @@ async function runImport(file,replaceId,options={}){
       const wb=XLSX.read(text,{type:'string',raw:true});
       const aoa=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:'',raw:true});
       if(detectBudgeHeader(aoa)>=0){
-        await importBudgeFile(aoa,file.name,replaceId);
+        // The CSV branch must forward the confirmation too, otherwise a Budge CSV import would
+        // deduct every Expense from its Cash & Bank account even with the box ticked.
+        await importBudgeFile(aoa,file.name,replaceId,options);
       }else{
         const officeBook=officeWorkbookFromCsv(text,file.name);
         if(officeBook&&isOfficeWorkbook(officeBook)){
-          openOfficeImportModal({file,workbook:officeBook,replaceId});
+          openOfficeImportModal({file,workbook:officeBook,replaceId,noAccountChange:!!options.noAccountChange});
         }else{
           toast('That CSV file is not a recognised Budge export.',true);
         }
@@ -6354,7 +6367,7 @@ async function importOfficeWorkbook(workbook,replaceId,fileName,options={}){
     state.settings.incomeYears=list;
     await put('settings',{key:'incomeYears',value:list});
   }
-  await saveMigrationMeta(migrationId,replacing?target.id:null,'Office Purchase & Bill',fileName,rows.length,skipped+duplicates);
+  await saveMigrationMeta(migrationId,replacing?target.id:null,'Office Purchase & Bill',fileName,rows.length,skipped+duplicates,{noAccountChange:keepAccounts});
   await loadState();
   await reconcileOfficeCarryForwards();
   // Show the newest imported FY straight away instead of an empty current-year ledger.
@@ -7441,7 +7454,7 @@ async function deleteIncomeSubcategory(id,catName,name){
 }
 
 /* --- Import workers (called by importExcel dispatcher) --- */
-async function importAssetsLiabilitiesWorkbook(workbook,replaceId,fileName){
+async function importAssetsLiabilitiesWorkbook(workbook,replaceId,fileName,options={}){
   const migrationId=replaceId||uid('mig');
   const seen=replaceId?new Set():new Set(state.records.filter(r=>r.sourceSheet).map(r=>`${r.sourceSheet}|${r.sourceRow}`));
   const toSave=[],years=new Set();
@@ -7482,7 +7495,7 @@ async function importAssetsLiabilitiesWorkbook(workbook,replaceId,fileName){
     state.settings.incomeYears=[...new Set([...knownYears,...years])].sort((a,b)=>String(b).localeCompare(String(a)));
     await put('settings',{key:'incomeYears',value:state.settings.incomeYears});
   }
-  await saveMigrationMeta(migrationId,replaceId,'Assets & Liabilities',fileName,toSave.length,skippedDuplicates);
+  await saveMigrationMeta(migrationId,replaceId,'Assets & Liabilities',fileName,toSave.length,skippedDuplicates,options);
   await loadState();renderAll();
   const truncatedNote=truncated?` ${truncated} sheet(s) were read up to ${MAX_IMPORT_ROWS} rows.`:'';
   toast(`${replaceId?'Replaced':'Import complete'}: ${toSave.length} imported, ${skippedDuplicates} duplicate(s) skipped, ${manual} sheet(s) need manual review.${truncatedNote}`,manual>0&&!toSave.length);
@@ -7527,7 +7540,7 @@ async function importIncomeExpensesWorkbook(workbook,replaceId,fileName,options=
     state.settings.incomeYears=[...new Set([...known,...years])].sort((a,b)=>String(b).localeCompare(String(a)));
     await put('settings',{key:'incomeYears',value:state.settings.incomeYears});
   }
-  await saveMigrationMeta(migrationId,replaceId,'Income & Expenses',fileName,toSave.length,skipped);
+  await saveMigrationMeta(migrationId,replaceId,'Income & Expenses',fileName,toSave.length,skipped,{noAccountChange:keepAccounts});
   await loadState();renderAll();
   toast(`${replaceId?'Replaced':'Imported'} ${toSave.length} income/expense entries from Income & Expenses.xlsx (Skipped ${skipped} duplicates)`);
 }
@@ -7580,7 +7593,7 @@ async function importBudgeFile(aoa,sourceName,replaceId,options={}){
     state.settings.incomeYears=[...new Set([...known,...years])].sort((a,b)=>String(b).localeCompare(String(a)));
     await put('settings',{key:'incomeYears',value:state.settings.incomeYears});
   }
-  await saveMigrationMeta(migrationId,replaceId,'Budge CSV',sourceName,toSave.length,skipped);
+  await saveMigrationMeta(migrationId,replaceId,'Budge CSV',sourceName,toSave.length,skipped,{noAccountChange:keepAccounts});
   await loadState();renderAll();
   toast(`${replaceId?'Replaced':'Imported'} ${toSave.length} transactions (Skipped ${skipped} already imported)`);
 }
@@ -8250,6 +8263,9 @@ async function importMigrationTemplateWorkbook(workbook,replaceId,fileName,optio
         // Optional "Funded from Asset Subcategory" column; templates without it simply skip this.
         const funding=assetFundingFromSheet(cell(row,cols.funding));
         if(funding&&!(kindType==='Asset'&&isCashCategoryName(category)))record.funding=funding;
+        // "I Do not want to change Account": the row keeps its funding link for reference but never
+        // derives a Cash & Bank movement from it (see applyFundingLegs).
+        if(keepAccounts)record.noAccountChange=true;
         recordRows.push(record);
         if(record.incomeYear)years.add(record.incomeYear);
         let definition=newCategories.find(c=>c.type===kindType&&c.name===category)||state.categories.find(c=>c.type===kindType&&c.name===category);
@@ -8285,7 +8301,7 @@ async function importMigrationTemplateWorkbook(workbook,replaceId,fileName,optio
   }
   const imported=recordRows.length+incomeRows.length;
   if(!imported){toast(duplicates?'These rows are already imported — nothing new to add.':'No importable rows were found in that file.',!duplicates);return 0}
-  await saveMigrationMeta(migrationId,replacing?target.id:null,'Excel & Budge CSV',fileName,imported,duplicates+invalid);
+  await saveMigrationMeta(migrationId,replacing?target.id:null,'Excel & Budge CSV',fileName,imported,duplicates+invalid,{noAccountChange:keepAccounts});
   await loadState();renderAll();
   const bits=[`${recordRows.length} asset/liability row${recordRows.length===1?'':'s'}`,`${incomeRows.length} income/expense row${incomeRows.length===1?'':'s'}`];
   if(duplicates)bits.push(`${duplicates} duplicate${duplicates===1?'':'s'} skipped`);
@@ -8413,12 +8429,15 @@ function exportMigrationWorkbook(){
 }
 
 /* --- Migration batch tracking (Settings → Excel & Budge CSV Migration history) --- */
-async function saveMigrationMeta(id,isReplace,type,fileName,imported,skipped){
+async function saveMigrationMeta(id,isReplace,type,fileName,imported,skipped,options={}){
+  // The "I Do not want to change Account" choice is remembered on the batch, so Replace / re-import
+  // of that batch keeps the same account behaviour instead of silently moving Cash & Bank balances.
+  const extra={noAccountChange:!!(options&&options.noAccountChange)};
   if(isReplace){
     const existing=state.migrationHistory.find(m=>m.id===id)||{id};
-    await put('migrationHistory',Object.assign({},existing,{id,fileName,migrationType:type,timestamp:new Date().toISOString(),importedCount:imported,skippedCount:skipped,status:'completed'}));
+    await put('migrationHistory',Object.assign({},existing,{id,fileName,migrationType:type,timestamp:new Date().toISOString(),importedCount:imported,skippedCount:skipped,status:'completed'},extra));
   }else if(imported>0){
-    await put('migrationHistory',{id,fileName,migrationType:type,timestamp:new Date().toISOString(),importedCount:imported,skippedCount:skipped,status:'completed'});
+    await put('migrationHistory',Object.assign({id,fileName,migrationType:type,timestamp:new Date().toISOString(),importedCount:imported,skippedCount:skipped,status:'completed'},extra));
   }
 }
 /** Delete every record and PDF linked to one migration batch (used by both Delete and Replace). */
@@ -8441,7 +8460,7 @@ function renderMigrationHistory(){
   if(!host)return;
   const history=state.migrationHistory.slice().sort((a,b)=>String(b.timestamp).localeCompare(String(a.timestamp)));
   host.innerHTML=history.length
-    ? `<div class="table-wrap migration-history-wrap"><table class="migration-history-table"><thead><tr><th scope="col">Date &amp; Time</th><th scope="col">File Name</th><th scope="col">Migration Type</th><th scope="col" class="num">Records Imported</th><th scope="col">Actions</th></tr></thead><tbody>${history.map(m=>`<tr><td>${esc(new Date(m.timestamp).toLocaleString())}</td><td>${esc(m.fileName||'—')}</td><td><span class="badge migration-badge">${esc(m.migrationType||'—')}</span></td><td class="num">${Number(m.importedCount)||0}</td><td class="actions-cell"><button type="button" class="action-link" data-cmd="edit-migration" data-id="${esc(m.id)}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-migration" data-id="${esc(m.id)}">Delete</button></td></tr>`).join('')}</tbody></table></div>`
+    ? `<div class="table-wrap migration-history-wrap"><table class="migration-history-table"><thead><tr><th scope="col">Date &amp; Time</th><th scope="col">File Name</th><th scope="col">Migration Type</th><th scope="col" class="num">Records Imported</th><th scope="col">Actions</th></tr></thead><tbody>${history.map(m=>`<tr><td>${esc(new Date(m.timestamp).toLocaleString())}</td><td>${esc(m.fileName||'—')}</td><td><span class="badge migration-badge">${esc(m.migrationType||'—')}</span>${m.noAccountChange?'<span class="badge migration-badge migration-nochange">no account change</span>':''}</td><td class="num">${Number(m.importedCount)||0}</td><td class="actions-cell"><button type="button" class="action-link" data-cmd="edit-migration" data-id="${esc(m.id)}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-migration" data-id="${esc(m.id)}">Delete</button></td></tr>`).join('')}</tbody></table></div>`
     : '<div class="empty-state">No migrations recorded in this browser yet.</div>';
 }
 function migrationRowSummary(r,store){
@@ -8459,7 +8478,7 @@ function renderMigrationEditor(id){
   const rows=[...recRows,...ieRows,...officeRows];
   document.getElementById('migrationEditTitle').textContent='Edit Migration';
   document.getElementById('migrationEditSubtitle').textContent=`${mig.migrationType} · ${mig.fileName}`;
-  document.getElementById('migrationEditMeta').textContent=`${rows.length} record(s) in this batch · imported ${new Date(mig.timestamp).toLocaleString()}`;
+  document.getElementById('migrationEditMeta').textContent=`${rows.length} record(s) in this batch · imported ${new Date(mig.timestamp).toLocaleString()}${mig.noAccountChange?' · Cash & Bank unchanged':''}`;
   const cells=rows.map(({r,store})=>{
     const s=migrationRowSummary(r,store);
     return `<tr><td>${esc(fmtDate(s.date)||'—')}</td><td><span class="badge ${esc(s.type.toLowerCase())}">${esc(s.type)}</span></td><td>${esc(s.category)}</td><td>${esc(s.subcategory)}</td><td class="num">${formatMoney(s.amount)}</td><td class="actions-cell"><button type="button" class="action-link danger" data-cmd="remove-migration-row" data-mig="${esc(id)}" data-store="${store}" data-id="${esc(r.id)}">Remove</button></td></tr>`;
