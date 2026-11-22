@@ -1313,6 +1313,8 @@ function bindGlobalActions(){
   $el('driveConnectBtn').onclick=e=>runWithLoading(e.currentTarget,connectGoogleDrive);
   $el('driveDisconnectBtn').onclick=e=>runWithLoading(e.currentTarget,disconnectGoogleDrive);
   $el('driveSyncBtn').onclick=e=>runWithLoading(e.currentTarget,()=>syncGoogleDrive({interactive:true}));
+  $el('driveRestoreBtn').onclick=e=>runWithLoading(e.currentTarget,openDriveRestoreDialog);
+  $el('driveRestoreConfirm').onclick=restoreSelectedGoogleDriveBackup;
   $el('saveSettings').onclick=saveSettings;
   $el('addYear').onclick=addIncomeYear;
   $el('manageCategories').onclick=()=>openCategoryModal();
@@ -4208,7 +4210,10 @@ async function performRestore(){
   document.getElementById('restoreModal').close();
   if(!window.JSZip){toast('ZIP library is unavailable.',true);return}
   if(restoreFile.size>MAX_RESTORE_BYTES){toast('That backup file is too large to restore safely.',true);restoreFile=null;document.getElementById('restoreFile').value='';return}
+  let restoreOk=false;
   try{
+    isRestoring=true;                                      // no auto-backup may start while the database is rewritten
+    clearTimeout(googleDriveBackupTimer);googleDriveBackupTimer=null;
     const zip=await JSZip.loadAsync(restoreFile);
     const backupFile=zip.file('backup.json');if(!backupFile)throw new Error('Missing backup.json');
     const backup=JSON.parse(await backupFile.async('text'));
@@ -4229,6 +4234,9 @@ async function performRestore(){
       blobs.push({id:entry.id,blob:new Blob([bytes],{type:'application/pdf'})});
     }
 
+    // The file is valid: keep a safety copy of the current data in Drive before replacing it.
+    let safetySaved=false;
+    if(mode==='replace')safetySaved=await saveDriveSafetySnapshot('before manual restore');
     if(mode==='replace'){
       // One transaction per store: a quota failure leaves that store untouched instead of half written.
       await replaceStore('categories',backup.categories||[]);
@@ -4253,15 +4261,18 @@ async function performRestore(){
     await mergeCategoryStructure(backup.categoryStructure||{categories:backup.categories||[],incomeGroups});
     // Old backups still use the "Cash" labels: align them with the definitive Cash & Bank Account.
     await migrateLegacyCashRecords();
-    for(const [key,value] of Object.entries(backup.settings||{}))await put('settings',{key,value});
+    for(const [key,value] of Object.entries(backup.settings||{})){if(/^drive/i.test(key))continue;await put('settings',{key,value})}   // Drive sync state stays local
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,s)=>(out[s.key]=s.value,out),state.settings||{});
     renderAll();
-    toast(`Backup restored: ${backup.records?.length||0} record(s), ${incomeExpenses.length} transaction(s), ${officePurchases.length} office entr${officePurchases.length===1?'y':'ies'} and ${blobs.length} document(s)`);
+    toast(`Backup restored: ${backup.records?.length||0} record(s), ${incomeExpenses.length} transaction(s), ${officePurchases.length} office entr${officePurchases.length===1?'y':'ies'} and ${blobs.length} document(s)${safetySaved?' · Drive safety copy of the previous data saved':''}`);
+    restoreOk=true;
   }catch(error){
     console.error(error);toast(error.message||'Unable to restore backup.',true);
   }finally{
     restoreFile=null;document.getElementById('restoreFile').value='';
+    isRestoring=false;
+    if(restoreOk)scheduleDriveAutoBackup();                // the restored data becomes the newest Drive backup
   }
 }
 
@@ -8515,6 +8526,9 @@ const GOOGLE_DRIVE_CLIENT_ID='232563199720-sn7bke2332p585r4jlcaflvjhjfk0ut8.apps
 const GOOGLE_DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
 const GOOGLE_DRIVE_FOLDER='PersonalFinance_Backups';
 const GOOGLE_DRIVE_BACKUP_LIMIT=15;
+const GOOGLE_DRIVE_KEEP_DAILY=7;     // plus the newest backup of each of the last 7 older days
+const GOOGLE_DRIVE_KEEP_WEEKLY=4;    // plus the newest backup of each of the last 4 older weeks
+const GOOGLE_DRIVE_KEEP_SAFETY=5;    // pre-restore safety copies (assetbook-keep-*.json)
 const GOOGLE_DRIVE_API='https://www.googleapis.com/drive/v3';
 const GOOGLE_DRIVE_UPLOAD='https://www.googleapis.com/upload/drive/v3';
 const GOOGLE_DRIVE_AUTO_BACKUP_DELAY=5000;
@@ -8537,6 +8551,7 @@ function renderDriveSyncCard(){
   const connect=document.getElementById('driveConnectBtn');
   const disconnect=document.getElementById('driveDisconnectBtn');
   const sync=document.getElementById('driveSyncBtn');
+  const driveRestore=document.getElementById('driveRestoreBtn');
   const status=document.getElementById('driveSyncStatus');
   const last=document.getElementById('driveLastSynced');
   if(!connect&&!status)return;
@@ -8545,6 +8560,7 @@ function renderDriveSyncCard(){
   if(connect)connect.classList.toggle('hidden',enabled);
   if(disconnect)disconnect.classList.toggle('hidden',!enabled);
   if(sync)sync.classList.toggle('hidden',!enabled);
+  if(driveRestore)driveRestore.classList.toggle('hidden',!enabled);
   if(status){
     status.textContent=!enabled
       ?'Not connected — connect Google Drive to enable automatic backups.'
@@ -8669,19 +8685,68 @@ async function googleDriveFolder(interactive=false){
   rememberDriveFolder(created.id);
   return created.id;
 }
-async function googleDriveList(interactive=false){
+async function googleDriveListMatching(pattern,interactive=false){
   const folderId=await googleDriveFolder(interactive);
   const query=encodeURIComponent(`'${folderId}' in parents and trashed=false and mimeType='application/json'`);
   const data=await googleDriveJson(`${GOOGLE_DRIVE_API}/files?q=${query}&orderBy=createdTime desc&pageSize=100&fields=files(id,name,createdTime,size)`,{},interactive);
-  return (data.files||[]).filter(file=>/^assetbook-backup-.*\.json$/i.test(file.name||''));
+  return (data.files||[]).filter(file=>pattern.test(file.name||''));
 }
-/** Keeps only the newest GOOGLE_DRIVE_BACKUP_LIMIT (15) backups. */
-async function googleDrivePrune(files,interactive=false){
-  const extras=(files||[]).slice(GOOGLE_DRIVE_BACKUP_LIMIT);
-  for(const file of extras){
-    const response=await googleDriveFetch(`${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file.id)}`,{method:'DELETE'},interactive);
-    if(!response.ok&&response.status!==404)throw await googleDriveError(response);
+/** Regular auto/manual backups, newest first. */
+function googleDriveList(interactive=false){return googleDriveListMatching(/^assetbook-backup-.*\.json$/i,interactive)}
+/** Pre-restore safety copies, newest first. Never used by auto-restore. */
+function googleDriveSafetyList(interactive=false){return googleDriveListMatching(/^assetbook-keep-.*\.json$/i,interactive)}
+async function googleDriveDelete(file,interactive=false){
+  const response=await googleDriveFetch(`${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file.id)}`,{method:'DELETE'},interactive);
+  if(!response.ok&&response.status!==404)throw await googleDriveError(response);
+}
+/**
+ * Smart retention (files are newest first). Keeps:
+ *   - the newest GOOGLE_DRIVE_BACKUP_LIMIT (15) backups,
+ *   - the newest backup of each of the last 7 OLDER days,
+ *   - the newest backup of each of the last 4 OLDER weeks.
+ * Returns the files that may be deleted. A burst of edits can therefore never push yesterday's
+ * or last week's good copy out of Drive.
+ */
+function googleDriveRetentionPlan(files){
+  const list=files||[];
+  const recent=list.slice(0,GOOGLE_DRIVE_BACKUP_LIMIT);
+  const older=list.slice(GOOGLE_DRIVE_BACKUP_LIMIT);
+  const keep=new Set(recent.map(file=>file.id));
+  const dayKey=file=>String(file.createdTime||'').slice(0,10);
+  const weekKey=file=>{
+    const date=new Date(file.createdTime);
+    if(isNaN(date))return '';
+    const days=Math.floor(Date.UTC(date.getUTCFullYear(),date.getUTCMonth(),date.getUTCDate())/86400000);
+    return String(Math.floor((days+3)/7));              // weeks start on Monday
+  };
+  const seenDays=new Set(recent.map(dayKey));
+  const seenWeeks=new Set(recent.map(weekKey));
+  let dailyKept=0;
+  for(const file of older){
+    if(dailyKept>=GOOGLE_DRIVE_KEEP_DAILY)break;
+    const day=dayKey(file);
+    if(!day||seenDays.has(day))continue;
+    seenDays.add(day);seenWeeks.add(weekKey(file));keep.add(file.id);dailyKept++;
   }
+  let weeklyKept=0;
+  for(const file of older){
+    if(weeklyKept>=GOOGLE_DRIVE_KEEP_WEEKLY)break;
+    if(keep.has(file.id))continue;
+    const week=weekKey(file);
+    if(!week||seenWeeks.has(week))continue;
+    seenWeeks.add(week);keep.add(file.id);weeklyKept++;
+  }
+  return list.filter(file=>!keep.has(file.id));
+}
+async function googleDrivePrune(files,interactive=false){
+  const extras=googleDriveRetentionPlan(files);
+  for(const file of extras)await googleDriveDelete(file,interactive);
+  return extras.length;
+}
+/** Keeps only the newest GOOGLE_DRIVE_KEEP_SAFETY safety copies. */
+async function googleDrivePruneSafety(interactive=false){
+  const extras=(await googleDriveSafetyList(interactive)).slice(GOOGLE_DRIVE_KEEP_SAFETY);
+  for(const file of extras)await googleDriveDelete(file,interactive);
   return extras.length;
 }
 async function googleDriveUpload(snapshot,fileName,interactive=true){
@@ -8810,12 +8875,57 @@ const AssetBookDB={
       :Object.entries(snapshot.settings||{}).map(([key,value])=>({key,value}));
     for(const row of settingsRows){
       if(!row||!row.key)continue;
-      if(row.key==='driveSyncEnabled')continue;      // the local connection choice stays local
+      if(/^drive/i.test(String(row.key)))continue;    // Drive connection/bookkeeping stays local to this device
       await put('settings',{key:row.key,value:row.value});
     }
     return {records:records.length,incomeExpenses:incomeExpenses.length,officePurchases:officePurchases.length,documents:blobs.length};
   }
 };
+
+/** SHA-256 of the snapshot content, ignoring the timestamp and the local Drive bookkeeping rows. */
+async function snapshotFingerprint(snapshot){
+  try{
+    if(!(window.crypto&&crypto.subtle&&window.TextEncoder))return '';
+    const copy=Object.assign({},snapshot);
+    delete copy.createdAt;
+    copy.settings=(Array.isArray(copy.settings)?copy.settings:[]).filter(row=>!(row&&/^drive/i.test(String(row.key||''))));
+    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(copy)));
+    return Array.from(new Uint8Array(digest)).map(byte=>byte.toString(16).padStart(2,'0')).join('');
+  }catch(error){return ''}
+}
+async function waitForDriveIdle(timeoutMs=20000){
+  const started=Date.now();
+  while(googleDriveBusy&&Date.now()-started<timeoutMs)await new Promise(resolve=>setTimeout(resolve,250));
+}
+/** assetbook-keep-YYYY-MM-DDTHH-mm-ss.json (pre-restore safety copy; not matched by the backup list) */
+function googleDriveSafetyName(date=new Date()){
+  return `assetbook-keep-${date.toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+}
+/**
+ * Best-effort safety copy of the CURRENT data, saved right before it is replaced by a restore.
+ * Silent (no popup) and never blocks or fails the restore itself. Returns true when saved.
+ */
+async function saveDriveSafetySnapshot(reason){
+  if(!driveSyncEnabled())return false;
+  let locked=false;
+  try{
+    clearTimeout(googleDriveBackupTimer);googleDriveBackupTimer=null;
+    await waitForDriveIdle();
+    googleDriveBusy=true;locked=true;
+    await ensureDriveToken(false);
+    const snapshot=await AssetBookDB.snapshot();
+    if(!(snapshot.records.length||snapshot.incomeExpenses.length||snapshot.officePurchases.length))return false;
+    snapshot.safetyReason=reason||'before restore';
+    await googleDriveUpload(snapshot,googleDriveSafetyName(),false);
+    await googleDrivePruneSafety(false);
+    return true;
+  }catch(error){
+    console.info('[drive] safety snapshot skipped',error);
+    return false;
+  }finally{
+    if(locked)googleDriveBusy=false;
+  }
+}
 
 /** Creates a new backup, uploads it, then prunes everything past the newest 15. */
 async function syncGoogleDrive(options={}){
@@ -8829,6 +8939,19 @@ async function syncGoogleDrive(options={}){
   let saved=false;
   try{
     const snapshot=await AssetBookDB.snapshot();
+    const fingerprint=await snapshotFingerprint(snapshot);
+    if(fingerprint&&!options.force&&state.settings.driveLastSnapshotHash===fingerprint&&state.settings.driveLastBackupName){
+      // Nothing changed since the last upload: only skip while that backup still exists in Drive.
+      const existing=await googleDriveList(interactive);
+      if(existing.some(file=>file.name===state.settings.driveLastBackupName)){
+        const stamp=new Date().toISOString();
+        state.settings.driveLastSyncedAt=stamp;
+        await put('settings',{key:'driveLastSyncedAt',value:stamp});
+        googleDriveStatus='Connected — Google Drive is already up to date.';
+        if(!silent)toast('Google Drive is already up to date (no changes since the last backup).');
+        return true;
+      }
+    }
     const fileName=googleDriveBackupName();
     const result=await googleDriveUpload(snapshot,fileName,interactive);
     const files=await googleDriveList(interactive);
@@ -8838,6 +8961,8 @@ async function syncGoogleDrive(options={}){
     state.settings.driveLastBackupName=fileName;
     await put('settings',{key:'driveLastSyncedAt',value:now});
     await put('settings',{key:'driveLastBackupName',value:fileName});
+    state.settings.driveLastSnapshotHash=fingerprint;
+    await put('settings',{key:'driveLastSnapshotHash',value:fingerprint});
     googleDriveStatus='Connected to Google Drive.';
     saved=true;
     if(!silent)toast(`Google Drive backup saved (${formatFileSize(result.size)})${removed?` · ${removed} older backup(s) removed`:''}`);
@@ -8940,6 +9065,52 @@ async function googleDriveAutoRestore(){
   const hasLocalData=state.records.length||state.incomeExpenses.length||state.officePurchases.length;
   if(hasLocalData)return false;
   return restoreLatestGoogleDriveBackup(false);
+}
+
+/** Settings → Google Drive Sync → "Restore from Drive": pick any backup or safety copy. */
+async function openDriveRestoreDialog(){
+  if(!driveSyncEnabled()){toast('Connect Google Drive first.',true);return}
+  await ensureDriveToken(true);
+  const [backups,safety]=await Promise.all([googleDriveList(true),googleDriveSafetyList(true)]);
+  const select=$el('driveRestoreSelect');
+  select.textContent='';
+  const add=(file,label)=>{
+    const option=document.createElement('option');
+    option.value=file.id;
+    option.textContent=`${label} · ${new Date(file.createdTime).toLocaleString()} · ${formatFileSize(Number(file.size)||0)}`;
+    select.appendChild(option);
+  };
+  backups.forEach(file=>add(file,'Backup'));
+  safety.forEach(file=>add(file,'Safety copy'));
+  if(!select.options.length){toast('No backups were found in Google Drive.',true);return}
+  $el('driveRestoreModal').showModal();
+}
+async function restoreSelectedGoogleDriveBackup(){
+  const fileId=$el('driveRestoreSelect').value;
+  if(!fileId||isRestoring)return;
+  $el('driveRestoreModal').close();
+  isRestoring=true;
+  clearTimeout(googleDriveBackupTimer);googleDriveBackupTimer=null;
+  let restoreOk=false;
+  try{
+    await ensureDriveToken(true);
+    const snapshot=await googleDriveDownload(fileId,true);
+    if(!snapshot||!Array.isArray(snapshot.records))throw new Error('Unsupported Google Drive backup format.');
+    const safetySaved=await saveDriveSafetySnapshot('before Drive restore');
+    const summary=await AssetBookDB.restore(snapshot,'replace');
+    await loadState();
+    state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
+    renderAll();
+    restoreOk=true;
+    toast(`Restored from Google Drive: ${summary.records} record(s), ${summary.documents} PDF(s)${safetySaved?' · safety copy of the previous data saved':''}`);
+  }catch(error){
+    console.error(error);
+    toast(error.message||'Unable to restore from Google Drive.',true);
+  }finally{
+    isRestoring=false;
+    renderDriveSyncCard();
+    if(restoreOk)scheduleDriveAutoBackup();
+  }
 }
 
 /** Called from init(): paints the card, then silently reconnects and restores an empty database. */

@@ -396,11 +396,12 @@
         </div>
         <div class="card settings-card" id="googleDriveCard">
           <h3>Google Drive Sync</h3>
-          <p>Back up records, the protected category tree and attached PDFs to the <b>PersonalFinance_Backups</b> folder in your Google Drive. The latest 15 backups are kept.</p>
+          <p>Back up records, the protected category tree and attached PDFs to the <b>PersonalFinance_Backups</b> folder in your Google Drive. The latest 15 backups are kept, plus one per day (last 7 days) and one per week (last 4 weeks). Unchanged data is not uploaded again, and a safety copy of your current data is saved before every restore.</p>
           <div class="inline-form drive-sync-actions">
             <button class="btn btn-primary" id="driveConnectBtn" type="button">Connect Google Drive</button>
             <button class="btn hidden" id="driveDisconnectBtn" type="button">Disconnect</button>
             <button class="btn hidden" id="driveSyncBtn" type="button">Sync Now</button>
+            <button class="btn hidden" id="driveRestoreBtn" type="button">Restore from Drive</button>
           </div>
           <p class="hint" id="driveSyncStatus" aria-live="polite">Not connected</p>
           <p class="hint" id="driveLastSynced">Last synced: never</p>
@@ -661,6 +662,15 @@
     <div class="modal-foot"><button class="btn" data-close-modal>Cancel</button><button class="btn btn-primary" id="confirmRestore">Restore</button></div>
   </dialog>
 
+  <dialog id="driveRestoreModal" class="modal modal-small" aria-labelledby="driveRestoreTitle">
+    <div class="modal-head"><h2 id="driveRestoreTitle">Restore from Google Drive</h2></div>
+    <div class="modal-body">
+      <p>Pick a backup. Your current data is saved to Drive as a safety copy first, so this can be undone.</p>
+      <select id="driveRestoreSelect" aria-label="Google Drive backup"></select>
+    </div>
+    <div class="modal-foot"><button class="btn" data-close-modal>Cancel</button><button class="btn btn-primary" id="driveRestoreConfirm" type="button">Restore</button></div>
+  </dialog>
+
   <!-- Amount calculator: a top-layer dialog so it is never clipped by a modal's scroll body. -->
   <dialog id="calcPopover" class="calc-popover" aria-labelledby="calcTitle" tabindex="-1">
     <div class="calc-head">
@@ -701,6 +711,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=38"></script>
+  <script src="app.js?v=39"></script>
 </body>
 </html>
