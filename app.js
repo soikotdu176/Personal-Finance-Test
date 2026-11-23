@@ -1365,6 +1365,9 @@ function bindGlobalActions(){
   $el('excelImportConfirm').onclick=confirmExcelImport;
   $el('excelImportNoAccount').onchange=updateExcelImportAccountHint;
   $el('excelImportModal').addEventListener('close',resetExcelImportDraft);
+  $el('migrationPdfChoose').onclick=()=>$el('migrationPdf').click();
+  $el('migrationPdf').onchange=migrationPdfChosen;
+  $el('migrationPdfClear').onclick=clearMigrationPdf;
   $el('excelTemplateBtn').onclick=e=>runWithLoading(e.currentTarget,downloadMigrationTemplate);
   $el('excelExportBtn').onclick=e=>runWithLoading(e.currentTarget,exportMigrationWorkbook);
   $el('migrationChooseFile').onclick=()=>$el('migrationReplaceFile').click();
@@ -4532,29 +4535,29 @@ async function runImport(file,replaceId,options={}){
       const aoa=XLSX.utils.sheet_to_json(workbook.Sheets[first],{header:1,defval:'',raw:true});
       // A filled migration template / export is a flat two-sheet workbook, so it is routed first.
       if(isMigrationTemplateWorkbook(workbook)){
-        await importMigrationTemplateWorkbook(workbook,replaceId,file.name,options);
+        return await importMigrationTemplateWorkbook(workbook,replaceId,file.name,options);
       // The dedicated office ledger has its own FY-sheet shape, so route it before the asset/income readers.
       }else if(isOfficeWorkbook(workbook)){
         // Never move Cash & Bank balances without asking: the popup carries the "I Do not want to
         // change Account" confirmation for this file (and keeps the replace batch id).
-        openOfficeImportModal({file,workbook,replaceId,noAccountChange:!!options.noAccountChange});
+        openOfficeImportModal({file,workbook,replaceId,noAccountChange:!!options.noAccountChange,pdfFile:options.pdfFile||null});
       }else if(detectBudgeHeader(aoa)>=0){
-        await importBudgeFile(aoa,file.name,replaceId,options);
+        return await importBudgeFile(aoa,file.name,replaceId,options);
       }else if(isIncomeExpensesWorkbook(workbook)){
-        await importIncomeExpensesWorkbook(workbook,replaceId,file.name,options);
+        return await importIncomeExpensesWorkbook(workbook,replaceId,file.name,options);
       }else{
-        await importAssetsLiabilitiesWorkbook(workbook,replaceId,file.name,options);
+        return await importAssetsLiabilitiesWorkbook(workbook,replaceId,file.name,options);
       }
     }else{
       const text=(await file.text()).replace(/^\uFEFF/,'');
       const wb=XLSX.read(text,{type:'string',raw:true});
       const aoa=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:'',raw:true});
       if(detectBudgeHeader(aoa)>=0){
-        await importBudgeFile(aoa,file.name,replaceId,options);
+        return await importBudgeFile(aoa,file.name,replaceId,options);
       }else{
         const officeBook=officeWorkbookFromCsv(text,file.name);
         if(officeBook&&isOfficeWorkbook(officeBook)){
-          openOfficeImportModal({file,workbook:officeBook,replaceId,noAccountChange:!!options.noAccountChange});
+          openOfficeImportModal({file,workbook:officeBook,replaceId,noAccountChange:!!options.noAccountChange,pdfFile:options.pdfFile||null});
         }else{
           toast('That CSV file is not a recognised Budge export.',true);
         }
@@ -4567,7 +4570,11 @@ async function runImport(file,replaceId,options={}){
 
 async function importExcel(event){
   const file=event.target.files[0];
-  try{await runImport(file,null)}finally{event.target.value='';}
+  const pdfFile=migrationPdfDraft;
+  try{
+    const pdfAttached=await runImport(file,null,{pdfFile});
+    if(pdfFile&&pdfAttached>0)clearMigrationPdf();
+  }finally{event.target.value='';}
 }
 /** File chosen via the migration editor's "Replace" button: re-import into the same batch. */
 async function replaceMigrationFile(event){
@@ -4579,7 +4586,9 @@ async function replaceMigrationFile(event){
   // The editor has no checkbox: keep the choice the batch was originally imported with.
   const batchRows=[...(state.incomeExpenses||[]),...(state.officePurchases||[]).filter(r=>!isOfficeOpeningType(r.type))].filter(r=>r.migrationId===migId);
   const noAccountChange=batchRows.length>0&&batchRows.every(r=>r.noAccountChange);
-  await runImport(file,migId,{noAccountChange});
+  const pdfFile=migrationPdfDraft;
+  const pdfAttached=await runImport(file,migId,{noAccountChange,pdfFile});
+  if(pdfFile&&pdfAttached>0)clearMigrationPdf();
   replaceMigrationId=null;
 }
 
@@ -6428,9 +6437,10 @@ async function importOfficeWorkbook(workbook,replaceId,fileName,options={}){
   }
   if(!rows.length&&!openingCount){
     toast(duplicates?'These office rows are already imported — nothing new to add.':'No Office Purchase & Bill rows were found in that workbook.',!duplicates);
-    return 0;
+    return {rows:0,pdf:0};
   }
   if(replacing)await removeMigrationRows(migrationId);
+  const pdfAttached=await attachMigrationPdf(rows,options.pdfFile);
   if(rows.length)await putMany('officePurchases',rows);
   if(openingCount){
     state.settings.officeOpeningBalances=openings;
@@ -6456,8 +6466,9 @@ async function importOfficeWorkbook(workbook,replaceId,fileName,options={}){
   if(untyped)bits.push(`${untyped} row${untyped===1?'':'s'} had no Entry Type (defaulted)`);
   if(openingCount)bits.push(`${openingCount} opening balance${openingCount===1?'':'s'} recorded`);
   if(keepAccounts)bits.push('Cash & Bank left unchanged');
+  if(pdfAttached)bits.push(`PDF attached to ${pdfAttached} row${pdfAttached===1?'':'s'}`);
   toast(`Office Purchase & Bill: ${bits.join(', ')}.`);
-  return rows.length;
+  return {rows:rows.length,pdf:pdfAttached};
 }
 
 /* --- Import Office Workbook popup: pick a file, confirm the account behaviour, then import --- */
@@ -6502,8 +6513,8 @@ function openOfficeImportModal(options={}){
   if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
   const file=options.file||null;
   officeImportDraft=file
-    ?{file,workbook:options.workbook||null,replaceId:options.replaceId||null}
-    :{file:null,workbook:null,replaceId:options.replaceId||null};
+    ?{file,workbook:options.workbook||null,replaceId:options.replaceId||null,pdfFile:options.pdfFile||null}
+    :{file:null,workbook:null,replaceId:options.replaceId||null,pdfFile:null};
   const box=$el('officeImportNoAccount');
   if(box)box.checked=!!options.noAccountChange;
   const input=$el('officeImport');
@@ -6517,13 +6528,14 @@ function officeImportFileChosen(event){
   const file=input.files&&input.files[0];
   input.value='';
   if(!file)return;
-  officeImportDraft={file,workbook:null,replaceId:(officeImportDraft&&officeImportDraft.replaceId)||null};
+  officeImportDraft={file,workbook:null,replaceId:(officeImportDraft&&officeImportDraft.replaceId)||null,pdfFile:(officeImportDraft&&officeImportDraft.pdfFile)||null};
   setOfficeImportFileLabel(file);
   updateOfficeImportAccountHint();
 }
 function clearOfficeImportFile(){
   const replaceId=officeImportDraft?officeImportDraft.replaceId||null:null;
-  officeImportDraft={file:null,workbook:null,replaceId};
+  const pdfFile=officeImportDraft?officeImportDraft.pdfFile||null:null;
+  officeImportDraft={file:null,workbook:null,replaceId,pdfFile};
   setOfficeImportFileLabel(null);
 }
 async function readOfficeImportWorkbook(draft){
@@ -6545,9 +6557,11 @@ async function confirmOfficeImport(){
       return;
     }
     const noAccountChange=!!($el('officeImportNoAccount')&&$el('officeImportNoAccount').checked);
-    const imported=await importOfficeWorkbook(workbook,draft.replaceId,draft.file.name,{noAccountChange});
+    const pdfFile=migrationPdfDraft||draft.pdfFile||null;
+    const result=await importOfficeWorkbook(workbook,draft.replaceId,draft.file.name,{noAccountChange,pdfFile});
     // Keep the popup open when nothing was imported so the message stays next to the chosen file.
-    if(imported>0)$el('officeImportModal').close();
+    if(result.rows>0)$el('officeImportModal').close();
+    if(pdfFile&&result.pdf>0)clearMigrationPdf();
   }catch(error){
     console.error(error);
     toast('Could not read that workbook'+(error.message?` — ${error.message}`:''),true);
@@ -7527,8 +7541,87 @@ async function deleteIncomeSubcategory(id,catName,name){
   }
 }
 
+/* --- Optional PDF staged in the Settings migration card ----------------------
+   One PDF can be attached to a whole migration batch. Every imported record gets its own
+   copy in the same "documents" + "documentBlobs" stores and is linked through documentIds,
+   so the PDF badges, viewer, download, delete and Drive backup behave exactly like a PDF
+   attached in the Add/Edit form. With no PDF selected the import runs unchanged.
+   -------------------------------------------------------------------------- */
+let migrationPdfDraft=null;
+
+function setMigrationPdfLabel(file){
+  const label=$el('migrationPdfFileName');
+  const clear=$el('migrationPdfClear');
+  if(label){
+    if(file){
+      label.textContent=`${file.name} · ${formatFileSize(file.size)}`;
+      label.title=file.name;
+      label.classList.add('has-file');
+    }else{
+      label.textContent='No PDF selected';
+      label.removeAttribute('title');
+      label.classList.remove('has-file');
+    }
+  }
+  if(clear)clear.classList.toggle('hidden',!file);
+}
+function migrationPdfChosen(event){
+  const input=event.target;
+  const file=input.files&&input.files[0];
+  input.value='';
+  if(!file)return;
+  if(!isPdfFile(file)){toast('That file is not a PDF. Choose a .pdf file.',true);return}
+  if(file.size>MAX_IMPORT_BYTES){toast('That PDF is larger than 30 MB. Choose a smaller file.',true);return}
+  migrationPdfDraft=file;
+  setMigrationPdfLabel(file);
+}
+function clearMigrationPdf(){
+  migrationPdfDraft=null;
+  const input=$el('migrationPdf');
+  if(input)input.value='';
+  setMigrationPdfLabel(null);
+}
+/** Small metadata record shaped exactly like the ones the record / transaction forms write. */
+function migrationPdfRecord(id,record,file){
+  return {
+    id,recordId:record.id,
+    title:file.name,name:file.name,
+    type:file.type||'application/pdf',size:Number(file.size)||0,
+    category:record.category||'',subcategory:record.subcategory||'',
+    financialType:record.type||'',incomeYear:record.incomeYear||'',
+    createdAt:new Date().toISOString()
+  };
+}
+/** Stores one copy of the staged PDF per imported row and links it through documentIds. */
+async function attachMigrationPdf(rows,file){
+  if(!file||!Array.isArray(rows)||!rows.length)return 0;
+  const docs=[],blobs=[],linked=[];
+  try{
+    for(const row of rows){
+      if(!row)continue;
+      const docId=uid('doc');
+      const previous=Array.isArray(row.documentIds)?[...row.documentIds]:[];
+      blobs.push({id:docId,blob:file});
+      docs.push(migrationPdfRecord(docId,row,file));
+      row.documentIds=[...previous,docId];
+      linked.push({row,previous});
+    }
+    if(!docs.length)return 0;
+    await putMany('documentBlobs',blobs);
+    await putMany('documents',docs);
+    return docs.length;
+  }catch(error){
+    // Never leave a record pointing at a document that was not stored: the rows still import.
+    for(const entry of linked)entry.row.documentIds=entry.previous;
+    console.warn('The migration PDF could not be attached',error);
+    toast('The rows were imported, but the PDF could not be attached.',true);
+    return 0;
+  }
+}
+const migrationPdfNote=count=>count?` · PDF attached to ${count} record${count===1?'':'s'}`:'';
+
 /* --- Import workers (called by importExcel dispatcher) --- */
-async function importAssetsLiabilitiesWorkbook(workbook,replaceId,fileName){
+async function importAssetsLiabilitiesWorkbook(workbook,replaceId,fileName,options={}){
   const migrationId=replaceId||uid('mig');
   const seen=replaceId?new Set():new Set(state.records.filter(r=>r.sourceSheet).map(r=>`${r.sourceSheet}|${r.sourceRow}`));
   const toSave=[],years=new Set();
@@ -7563,6 +7656,7 @@ async function importAssetsLiabilitiesWorkbook(workbook,replaceId,fileName){
   }
   if(newCategories.length)await putMany('categories',newCategories);
   if(replaceId)await removeMigrationRows(replaceId);
+  const pdfAttached=await attachMigrationPdf(toSave,options.pdfFile);
   if(toSave.length)await putMany('records',toSave);
   const knownYears=new Set(state.settings.incomeYears||[]);
   if([...years].some(y=>!knownYears.has(y))){
@@ -7572,8 +7666,9 @@ async function importAssetsLiabilitiesWorkbook(workbook,replaceId,fileName){
   await saveMigrationMeta(migrationId,replaceId,'Assets & Liabilities',fileName,toSave.length,skippedDuplicates);
   await loadState();renderAll();
   const truncatedNote=truncated?` ${truncated} sheet(s) were read up to ${MAX_IMPORT_ROWS} rows.`:'';
-  toast(`${replaceId?'Replaced':'Import complete'}: ${toSave.length} imported, ${skippedDuplicates} duplicate(s) skipped, ${manual} sheet(s) need manual review.${truncatedNote}`,manual>0&&!toSave.length);
+  toast(`${replaceId?'Replaced':'Import complete'}: ${toSave.length} imported, ${skippedDuplicates} duplicate(s) skipped, ${manual} sheet(s) need manual review.${truncatedNote}${migrationPdfNote(pdfAttached)}`,manual>0&&!toSave.length);
   console.info('Excel import summary',summary);
+  return pdfAttached;
 }
 async function importIncomeExpensesWorkbook(workbook,replaceId,fileName,options={}){
   const keepAccounts=!!options.noAccountChange;
@@ -7614,6 +7709,7 @@ async function importIncomeExpensesWorkbook(workbook,replaceId,fileName,options=
   }
   if(replaceId&&!toSave.length){toast('The replacement file produced no valid rows — the existing batch was left unchanged.',true);return}
   if(replaceId)await removeMigrationRows(replaceId);
+  const pdfAttached=await attachMigrationPdf(toSave,options.pdfFile);
   if(toSave.length)await putMany('incomeExpenses',toSave);
   if(reflagged.length)await putMany('incomeExpenses',reflagged);
   await putMany('incomeGroups',state.incomeGroups);
@@ -7625,7 +7721,8 @@ async function importIncomeExpensesWorkbook(workbook,replaceId,fileName,options=
   }
   await saveMigrationMeta(migrationId,replaceId,'Income & Expenses',fileName,toSave.length,skipped);
   await loadState();renderAll();
-  toast(`${replaceId?'Replaced':'Imported'} ${toSave.length} income/expense entries from Income & Expenses.xlsx (Skipped ${skipped} duplicates)${reflagged.length?` · ${reflagged.length} earlier row(s) no longer change Cash & Bank`:''}`);
+  toast(`${replaceId?'Replaced':'Imported'} ${toSave.length} income/expense entries from Income & Expenses.xlsx (Skipped ${skipped} duplicates)${reflagged.length?` · ${reflagged.length} earlier row(s) no longer change Cash & Bank`:''}${migrationPdfNote(pdfAttached)}`);
+  return pdfAttached;
 }
 async function importBudgeFile(aoa,sourceName,replaceId,options={}){
   const keepAccounts=!!options.noAccountChange;
@@ -7677,6 +7774,7 @@ async function importBudgeFile(aoa,sourceName,replaceId,options={}){
   }
   if(replaceId&&!toSave.length){toast('The replacement file produced no valid rows — the existing batch was left unchanged.',true);return}
   if(replaceId)await removeMigrationRows(replaceId);
+  const pdfAttached=await attachMigrationPdf(toSave,options.pdfFile);
   if(toSave.length)await putMany('incomeExpenses',toSave);
   if(reflagged.length)await putMany('incomeExpenses',reflagged);
   await putMany('incomeGroups',state.incomeGroups);
@@ -7688,7 +7786,8 @@ async function importBudgeFile(aoa,sourceName,replaceId,options={}){
   }
   await saveMigrationMeta(migrationId,replaceId,'Budge CSV',sourceName,toSave.length,skipped);
   await loadState();renderAll();
-  toast(`${replaceId?'Replaced':'Imported'} ${toSave.length} transactions (Skipped ${skipped} already imported)${reflagged.length?` · ${reflagged.length} earlier row(s) no longer change Cash & Bank`:''}`);
+  toast(`${replaceId?'Replaced':'Imported'} ${toSave.length} transactions (Skipped ${skipped} already imported)${reflagged.length?` · ${reflagged.length} earlier row(s) no longer change Cash & Bank`:''}${migrationPdfNote(pdfAttached)}`);
+  return pdfAttached;
 }
 
 /* ==========================================================================
@@ -8402,6 +8501,7 @@ async function importMigrationTemplateWorkbook(workbook,replaceId,fileName,optio
   if(replaceId&&!recordRows.length&&!incomeRows.length){toast('The replacement file produced no valid rows — the existing batch was left unchanged.',true);return}
   if(newCategories.length)await putMany('categories',newCategories);
   if(replaceId)await removeMigrationRows(migrationId);
+  const pdfAttached=await attachMigrationPdf([...recordRows,...incomeRows],options.pdfFile);
   if(recordRows.length)await putMany('records',recordRows);
   if(incomeRows.length)await putMany('incomeExpenses',incomeRows);
   if(incomeRows.length)await putMany('incomeGroups',state.incomeGroups);
@@ -8427,8 +8527,9 @@ async function importMigrationTemplateWorkbook(workbook,replaceId,fileName,optio
   const reflaggedAll=reflagged.length+reflaggedAssets.length;
   if(reflaggedAll)bits.push(`${reflaggedAll} earlier row${reflaggedAll===1?'':'s'} set to leave Cash & Bank unchanged`);
   if(keepAccounts)bits.push('Cash & Bank left unchanged');
+  if(pdfAttached)bits.push(`PDF attached to ${pdfAttached} row${pdfAttached===1?'':'s'}`);
   toast(`Import complete: ${bits.join(', ')}.`);
-  return imported;
+  return pdfAttached;
 }
 
 /* --- Import Workbook / CSV popup (Settings migration card) --- */
@@ -8498,11 +8599,13 @@ async function confirmExcelImport(){
   if(draft.file.size>MAX_IMPORT_BYTES){toast('That file is larger than 30 MB. Split it and import the parts.',true);return}
   const noAccountChange=!!($el('excelImportNoAccount')&&$el('excelImportNoAccount').checked);
   const file=draft.file;
+  const pdfFile=migrationPdfDraft;
   const button=$el('excelImportConfirm');
   if(button){button.disabled=true;button.classList.add('loading')}
   try{
     $el('excelImportModal').close();
-    await runImport(file,null,{noAccountChange});
+    const pdfAttached=await runImport(file,null,{noAccountChange,pdfFile});
+    if(pdfFile&&pdfAttached>0)clearMigrationPdf();
   }finally{
     if(button){
       button.classList.remove('loading');

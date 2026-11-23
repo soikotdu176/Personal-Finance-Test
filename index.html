@@ -372,6 +372,13 @@
             <button class="btn" id="excelTemplateBtn">Download Template</button>
             <button class="btn" id="excelExportBtn">Export Workbook / CSV</button>
           </div>
+          <div class="office-import-picker migration-pdf-picker">
+            <input type="file" id="migrationPdf" accept="application/pdf,.pdf" aria-describedby="migrationPdfHint" hidden>
+            <button type="button" class="btn" id="migrationPdfChoose">Upload PDF</button>
+            <span class="office-import-file" id="migrationPdfFileName">No PDF selected</span>
+            <button type="button" class="btn hidden" id="migrationPdfClear">Remove</button>
+          </div>
+          <p class="hint" id="migrationPdfHint">Optional: the chosen PDF is attached to every record the next import creates. It is stored exactly like a receipt uploaded in the Add/Edit form, so viewing, downloading, deleting and backing up work the same. Leave it empty to import without attachments.</p>
           <p class="hint">Every dropdown is dependent and sourced from Manage Categories: <b>Type &gt; Category * &gt; Subcategory</b> (plus <b>Entry Type * &gt; Major Head &gt; Category * &gt; Subcategory</b> on the Income &amp; Expenses sheet). <b>Funded from Asset Subcategory</b> lists the Asset subcategories and rejects input on Cash &amp; Bank Account rows. The Assets &amp; Liabilities options live on a hidden <b>Lists</b> sheet, and Export produces the same layout, so it can be re-imported without duplicates.</p>
           <div class="migration-history">
             <h4>Migration History</h4>
