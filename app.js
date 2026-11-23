@@ -3729,13 +3729,15 @@ function recordsPageFilterState(){
     year:isMobileViewport()?normIncomeYear(yearSelect?.value||''):''
   };
 }
-/** The Assets & Liabilities records matching the active filters. Transfers and synthetic
- *  balance movements stay out, exactly like every other report: they are balance adjustments,
- *  not ledger rows, so including them would count the same money twice. */
+/** The Assets & Liabilities records matching the active filters - exactly the rows the page
+ *  displays. Transfers are rendered on the page too, so reports and exports must not silently drop
+ *  them; they are only kept out of the money totals (see groupRecordsForReport) because a transfer
+ *  moves existing money instead of adding to it. Synthetic balance movements never live in
+ *  state.records - they are filtered out defensively. */
 function recordsPageFilteredRecords(filters){
   const f=filters||recordsPageFilterState();
   const search=String(f.search||'').toLowerCase();
-  let records=state.records.filter(r=>!isTransferRecord(r)&&!r.syntheticTransferLeg);
+  let records=state.records.filter(r=>!r.syntheticTransferLeg);
   if(search)records=records.filter(r=>Object.values(r).some(v=>String(v).toLowerCase().includes(search)));
   if(f.year)records=records.filter(r=>recordFinancialYear(r)===f.year);
   if(f.type)records=records.filter(r=>r.type===f.type);
@@ -4620,7 +4622,10 @@ function groupRecordsForReport(records){
       .sort((a,b)=>{const ia=subOrder.indexOf(a[0]),ib=subOrder.indexOf(b[0]);return (ia<0?999:ia)-(ib<0?999:ib)||a[0].localeCompare(b[0])})
       .map(([name,recs])=>{
         recs.sort((a,b)=>String(a.date||'').localeCompare(String(b.date||''))||recordTitle(a).localeCompare(recordTitle(b)));
-        return {name,records:recs,schema:getSchema(g.category,name),cols:reportColumns(getSchema(g.category,name),recs),total:recs.reduce((s,r)=>s+recordAmount(r),0)};
+        // Transfers are listed (they are visible records) but their amount is not money held, so it
+        // never enters the subtotal - otherwise the same balance would be counted twice.
+        const total=recs.reduce((s,r)=>s+(isTransferRecord(r)?0:recordAmount(r)),0);
+        return {name,records:recs,schema:getSchema(g.category,name),cols:reportColumns(getSchema(g.category,name),recs),total};
       });
     g.total=g.tables.reduce((s,t)=>s+t.total,0);
     g.count=g.records.length;
@@ -4727,7 +4732,7 @@ async function generatePdfReport(){
           t.cols.map(c=>({content:c.label,styles:{halign:numeric(c)?'right':'left'}}))
         ],
         body:t.records.map(r=>t.cols.map(c=>reportCell(r,c))),
-        foot:[[{content:single?`Category Subtotal - ${g.category}`:`Subtotal - ${t.name}`,colSpan:n-1,styles:{halign:'right'}},{content:pdfMoney(t.total),styles:{halign:'right'}}]],
+        foot:[[{content:`${single?`Category Subtotal - ${g.category}`:`Subtotal - ${t.name}`}${t.records.some(isTransferRecord)?' (excl. transfers)':''}`,colSpan:n-1,styles:{halign:'right'}},{content:pdfMoney(t.total),styles:{halign:'right'}}]],
         headStyles:{fillColor:[15,23,42],textColor:[255,255,255],fontStyle:'bold',fontSize:8.5},
         footStyles:{fillColor:[241,245,249],textColor:[15,23,42],fontStyle:'bold',lineColor:[99,102,241],lineWidth:.8},
         alternateRowStyles:{fillColor:[248,250,252]},
@@ -4859,6 +4864,7 @@ function generateExcelReport(){
       // header row
       rows.push(t.cols.map(c=>c.label));
       const firstData=rows.length;           // 0-based index of the first data row
+      const transferCells=[];                // amounts that must stay out of the SUM (see groupRecordsForReport)
       t.records.forEach(r=>{
         const rowIndex=rows.length;
         rows.push(t.cols.map((c,ci)=>{
@@ -4867,14 +4873,18 @@ function generateExcelReport(){
           if((c.kind==='money'||c.kind==='amount')&&v!=='')opts.money.push([rowIndex,ci]);
           return v;
         }));
+        if(isTransferRecord(r))transferCells.push(`${letter}${rowIndex+1}`);
       });
       const lastData=rows.length-1;
       // subtotal row (formula + cached value)
       const subRow=new Array(n).fill('');
-      subRow[n-2>=0?n-2:0]=single?`Category Subtotal - ${g.category}`:`Subtotal - ${t.name}`;
+      const hasTransfer=t.records.some(isTransferRecord);
+      subRow[n-2>=0?n-2:0]=`${single?`Category Subtotal - ${g.category}`:`Subtotal - ${t.name}`}${hasTransfer?' (excl. transfers)':''}`;
       const subIndex=rows.length;
       rows.push(subRow);
-      opts.formulas.push([subIndex,amountIdx,`SUM(${letter}${firstData+1}:${letter}${lastData+1})`,plainMoney(t.total)]);
+      const sumRange=`${letter}${firstData+1}:${letter}${lastData+1}`;
+      const sumFormula=transferCells.length?`SUM(${sumRange})-SUM(${transferCells.join(',')})`:`SUM(${sumRange})`;
+      opts.formulas.push([subIndex,amountIdx,sumFormula,plainMoney(t.total)]);
       subtotalRefs.push(`${letter}${subIndex+1}`);
       subRefs.push({name:t.name,count:t.records.length,cell:`${letter}${subIndex+1}`});
       rows.push([]);
