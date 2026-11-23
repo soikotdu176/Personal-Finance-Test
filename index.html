@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=32">
+  <link rel="stylesheet" href="styles.css?v=33">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -206,6 +206,20 @@
           <div id="mobileCalendarTransactions"></div>
         </section>
       </section>
+      <section class="dash-hero" aria-labelledby="dashHeroTitle">
+        <div class="dash-hero-glow" aria-hidden="true"></div>
+        <div class="dash-hero-copy">
+          <span class="dash-eyebrow"><span class="dash-live-dot" aria-hidden="true"></span> Live financial overview</span>
+          <h2 id="dashHeroTitle">Every taka, clearly in view</h2>
+          <p id="dashHeroMeta">All financial years · assets, liabilities and cash flow</p>
+        </div>
+        <div class="dash-quick" id="dashQuickActions" role="group" aria-label="Quick dashboard filters">
+          <button type="button" class="quick-chip is-active" data-quick="all" aria-pressed="true"><svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg><span>All records</span></button>
+          <button type="button" class="quick-chip" data-quick="year" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-calendar"/></svg><span>Fiscal year</span></button>
+          <button type="button" class="quick-chip" data-quick="asset" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-up"/></svg><span>Assets</span></button>
+          <button type="button" class="quick-chip" data-quick="liability" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-down"/></svg><span>Liabilities</span></button>
+        </div>
+      </section>
       <div class="filters card" id="dashboardFilters"></div>
       <div class="cards-grid" id="summaryCards">
         <div class="summary-card skeleton-card"><div class="sk sk-icon"></div><div class="sk-lines"><div class="sk sk-line short"></div><div class="sk sk-line"></div></div></div>
@@ -216,12 +230,63 @@
         <div class="summary-card skeleton-card"><div class="sk sk-icon"></div><div class="sk-lines"><div class="sk sk-line short"></div><div class="sk sk-line"></div></div></div>
       </div>
       <div class="charts-grid">
-        <div class="card chart-card"><h3>Assets vs Liabilities</h3><div class="chart-box"><canvas id="comparisonChart"></canvas></div></div>
-        <div class="card chart-card"><h3>Assets by Category</h3><div class="chart-box"><canvas id="assetsChart"></canvas></div></div>
-        <div class="card chart-card"><h3>Liabilities by Category</h3><div class="chart-box"><canvas id="liabilitiesChart"></canvas></div></div>
-        <div class="card chart-card"><h3>Net Worth Trend</h3><div class="chart-box"><canvas id="netWorthChart"></canvas></div></div>
-        <div class="card chart-card"><h3>Income vs Expenses</h3><div class="chart-box"><canvas id="incomeTrendChart"></canvas></div></div>
-        <div class="card chart-card"><h3>Expenses by Major Head</h3><div class="chart-box"><canvas id="expenseCategoryChart"></canvas></div></div>
+        <div class="card chart-card">
+          <div class="chart-card-head">
+            <div class="chart-title"><h3>Assets vs Liabilities</h3><span class="chart-sub">Balance composition for the selected range</span></div>
+          </div>
+          <div class="chart-box"><canvas id="comparisonChart"></canvas></div>
+        </div>
+        <div class="card chart-card">
+          <div class="chart-card-head">
+            <div class="chart-title"><h3>Assets by Category</h3><span class="chart-sub">Hover a slice or bar for exact values</span></div>
+            <div class="segmented" role="group" aria-label="Assets chart style">
+              <button type="button" class="seg-btn is-active" data-chart-type="assetsChart" data-chart-value="bar" aria-pressed="true">Bars</button>
+              <button type="button" class="seg-btn" data-chart-type="assetsChart" data-chart-value="doughnut" aria-pressed="false">Donut</button>
+            </div>
+          </div>
+          <div class="chart-box"><canvas id="assetsChart"></canvas></div>
+        </div>
+        <div class="card chart-card">
+          <div class="chart-card-head">
+            <div class="chart-title"><h3>Liabilities by Category</h3><span class="chart-sub">What is owed, grouped by category</span></div>
+            <div class="segmented" role="group" aria-label="Liabilities chart style">
+              <button type="button" class="seg-btn is-active" data-chart-type="liabilitiesChart" data-chart-value="pie" aria-pressed="true">Pie</button>
+              <button type="button" class="seg-btn" data-chart-type="liabilitiesChart" data-chart-value="bar" aria-pressed="false">Bars</button>
+            </div>
+          </div>
+          <div class="chart-box"><canvas id="liabilitiesChart"></canvas></div>
+        </div>
+        <div class="card chart-card">
+          <div class="chart-card-head">
+            <div class="chart-title"><h3>Net Worth Trend</h3><span class="chart-sub">Assets minus liabilities, year by year</span></div>
+            <div class="segmented" role="group" aria-label="Net worth chart style">
+              <button type="button" class="seg-btn is-active" data-chart-type="netWorthChart" data-chart-value="line" aria-pressed="true">Line</button>
+              <button type="button" class="seg-btn" data-chart-type="netWorthChart" data-chart-value="bar" aria-pressed="false">Bars</button>
+            </div>
+          </div>
+          <div class="chart-box"><canvas id="netWorthChart"></canvas></div>
+        </div>
+        <div class="card chart-card">
+          <div class="chart-card-head">
+            <div class="chart-title"><h3>Income vs Expenses</h3><span class="chart-sub">Fiscal-month cash flow</span></div>
+            <div class="segmented" role="group" aria-label="Income trend period">
+              <button type="button" class="seg-btn" data-trend-months="3" aria-pressed="false">3M</button>
+              <button type="button" class="seg-btn" data-trend-months="6" aria-pressed="false">6M</button>
+              <button type="button" class="seg-btn is-active" data-trend-months="12" aria-pressed="true">FY</button>
+            </div>
+          </div>
+          <div class="chart-box"><canvas id="incomeTrendChart"></canvas></div>
+        </div>
+        <div class="card chart-card">
+          <div class="chart-card-head">
+            <div class="chart-title"><h3>Expenses by Major Head</h3><span class="chart-sub">Where the money goes</span></div>
+            <div class="segmented" role="group" aria-label="Group expenses by">
+              <button type="button" class="seg-btn is-active" data-expense-group="majorHead" aria-pressed="true">Head</button>
+              <button type="button" class="seg-btn" data-expense-group="category" aria-pressed="false">Category</button>
+            </div>
+          </div>
+          <div class="chart-box"><canvas id="expenseCategoryChart"></canvas></div>
+        </div>
       </div>
       <div class="card table-card" id="recentIncomeCard">
         <div class="table-toolbar">
@@ -342,83 +407,115 @@
     </section>
 
     <section class="content hidden" id="settingsPage" data-page-panel>
-      <div class="settings-grid settings-mobile-wrap">
-        <div class="card settings-card">
-          <h3>General Settings</h3>
-          <label>Currency
-            <select id="currencySetting"><option value="BDT">BDT (৳)</option><option value="USD">USD ($)</option><option value="EUR">EUR (€)</option><option value="GBP">GBP (£)</option></select>
-          </label>
-          <label>Locale
-            <select id="localeSetting"><option value="en-BD">English (Bangladesh)</option><option value="en-US">English (US)</option></select>
-          </label>
-          <button class="btn btn-primary" id="saveSettings">Save Settings</button>
-        </div>
-        <div class="card settings-card">
-          <h3>Income Years</h3>
-          <p>Bangladesh fiscal year: 1 July to 30 June (e.g. <b>2025-26</b> = 1 Jul 2025 to 30 Jun 2026).</p>
-          <div class="inline-form"><input id="newYear" placeholder="e.g. 2026-27" aria-label="New income year"><button class="btn" id="addYear">Add</button></div>
-          <div id="yearList" class="chip-list"></div>
-        </div>
-        <div class="card settings-card">
-          <h3>Categories &amp; Subcategories</h3>
-          <p>Manage the classification structure used by financial records.</p>
-          <button class="btn" id="manageCategories">Manage Categories</button>
-        </div>
-        <div class="card settings-card" id="excelMigrationCard">
-          <h3>Excel &amp; Budge CSV Migration</h3>
-          <p>Import an Assets &amp; Liabilities, Income &amp; Expenses or Budge export (<b>.xlsx</b>, <b>.xls</b>, <b>.csv</b>). Header rows are detected automatically, re-imports skip duplicates and the original files are never modified.</p>
-          <div class="inline-form migration-actions">
-            <button class="btn" id="excelImportBtn">Import Workbook / CSV</button>
-            <button class="btn" id="excelTemplateBtn">Download Template</button>
-            <button class="btn" id="excelExportBtn">Export Workbook / CSV</button>
-          </div>
-          <div class="office-import-picker migration-pdf-picker">
-            <input type="file" id="migrationPdf" accept="application/pdf,.pdf" aria-describedby="migrationPdfHint" hidden>
-            <button type="button" class="btn" id="migrationPdfChoose">Upload PDF</button>
-            <span class="office-import-file" id="migrationPdfFileName">No PDF selected</span>
-            <button type="button" class="btn hidden" id="migrationPdfClear">Remove</button>
-          </div>
-          <p class="hint" id="migrationPdfHint">Optional: the chosen PDF is attached to every record the next import creates. It is stored exactly like a receipt uploaded in the Add/Edit form, so viewing, downloading, deleting and backing up work the same. Leave it empty to import without attachments.</p>
-          <p class="hint">Every dropdown is dependent and sourced from Manage Categories: <b>Type &gt; Category * &gt; Subcategory</b> (plus <b>Entry Type * &gt; Major Head &gt; Category * &gt; Subcategory</b> on the Income &amp; Expenses sheet). <b>Funded from Asset Subcategory</b> lists the Asset subcategories and rejects input on Cash &amp; Bank Account rows. The Assets &amp; Liabilities options live on a hidden <b>Lists</b> sheet, and Export produces the same layout, so it can be re-imported without duplicates.</p>
-          <div class="migration-history">
-            <h4>Migration History</h4>
-            <p class="hint">Each import is tracked as a batch. Deleting a batch also removes the records it imported.</p>
-            <div id="migrationHistoryList"></div>
+      <div class="settings-tabs" id="settingsTabs" role="tablist" aria-label="Settings sections">
+        <button type="button" class="settings-tab active" id="settingsTabGeneral" data-settings-tab="general" role="tab" aria-selected="true" aria-controls="settingsPanelGeneral" tabindex="0"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg><span>General &amp; Preferences</span></button>
+        <button type="button" class="settings-tab" id="settingsTabCategories" data-settings-tab="categories" role="tab" aria-selected="false" aria-controls="settingsPanelCategories" tabindex="-1"><svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg><span>Categories &amp; Budgets</span></button>
+        <button type="button" class="settings-tab" id="settingsTabMigration" data-settings-tab="migration" role="tab" aria-selected="false" aria-controls="settingsPanelMigration" tabindex="-1"><svg class="ic" aria-hidden="true"><use href="#i-sheet"/></svg><span>Migration &amp; Backup</span></button>
+        <button type="button" class="settings-tab" id="settingsTabDrive" data-settings-tab="drive" role="tab" aria-selected="false" aria-controls="settingsPanelDrive" tabindex="-1"><svg class="ic" aria-hidden="true"><use href="#i-swap"/></svg><span>Cloud Sync</span></button>
+        <button type="button" class="settings-tab" id="settingsTabStorage" data-settings-tab="storage" role="tab" aria-selected="false" aria-controls="settingsPanelStorage" tabindex="-1"><svg class="ic" aria-hidden="true"><use href="#ci-shield"/></svg><span>Storage &amp; Reset</span></button>
+      </div>
+      <div class="settings-panels" id="settingsPanels">
+        <div class="settings-panel" id="settingsPanelGeneral" data-settings-panel="general" role="tabpanel" aria-labelledby="settingsTabGeneral">
+          <div class="settings-grid settings-mobile-wrap">
+            <div class="card settings-card">
+              <h3>General Settings</h3>
+              <label>Currency
+                <select id="currencySetting"><option value="BDT">BDT (৳)</option><option value="USD">USD ($)</option><option value="EUR">EUR (€)</option><option value="GBP">GBP (£)</option></select>
+              </label>
+              <label>Locale
+                <select id="localeSetting"><option value="en-BD">English (Bangladesh)</option><option value="en-US">English (US)</option></select>
+              </label>
+              <button class="btn btn-primary" id="saveSettings">Save Settings</button>
+            </div>
+            <div class="card settings-card" id="installCard">
+              <h3>Mobile App</h3>
+              <p id="installHint">Install Personal Finance on your phone or desktop for a full-screen, offline-capable experience.</p>
+              <button class="btn btn-primary hidden" id="installBtnSettings"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg><span>Install App</span></button>
+            </div>
           </div>
         </div>
-        <div class="card settings-card" id="officeMigrationCard">
-          <h3>Office Purchase &amp; Bill</h3>
-          <p>Import the FY-wise <b>Office Purchase &amp; Bill.xlsx</b> workbook (sheets such as <b>2025-26</b>, left cash outflow / right cash inflow). Import opens a confirmation popup: tick <b>I Do not want to change Account</b> to add the rows to this ledger only, or leave it unticked to also move the linked Cash &amp; Bank account balances. Rows are deduplicated and each import is tracked as a migration batch.</p>
-          <div class="inline-form migration-actions office-migration-actions">
-            <button class="btn" id="officeImportBtn">Import Office Workbook</button>
-            <button class="btn" id="officeTemplateBtn">Download Template</button>
-            <button class="btn" id="officeExportBtn">Export Office Workbook</button>
+        <div class="settings-panel hidden" id="settingsPanelCategories" data-settings-panel="categories" role="tabpanel" aria-labelledby="settingsTabCategories">
+          <div class="settings-grid settings-mobile-wrap">
+            <div class="card settings-card">
+              <h3>Income Years</h3>
+              <p>Bangladesh fiscal year: 1 July to 30 June (e.g. <b>2025-26</b> = 1 Jul 2025 to 30 Jun 2026).</p>
+              <div class="inline-form"><input id="newYear" placeholder="e.g. 2026-27" aria-label="New income year"><button class="btn" id="addYear">Add</button></div>
+              <div id="yearList" class="chip-list"></div>
+            </div>
+            <div class="card settings-card">
+              <h3>Categories &amp; Subcategories</h3>
+              <p>Manage the classification structure used by financial records.</p>
+              <button class="btn" id="manageCategories">Manage Categories</button>
+            </div>
           </div>
-          <p class="hint">The template has <b>Entry Type *</b> and <b>Category *</b> dropdowns in every FY sheet; Export produces the same side-by-side layout, so the file can be re-imported without duplicates.</p>
         </div>
-        <div class="card settings-card" id="installCard">
-          <h3>Mobile App</h3>
-          <p id="installHint">Install Personal Finance on your phone or desktop for a full-screen, offline-capable experience.</p>
-          <button class="btn btn-primary hidden" id="installBtnSettings"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg><span>Install App</span></button>
-        </div>
-        <div class="card settings-card" id="googleDriveCard">
-          <h3>Google Drive Sync</h3>
-          <p>Back up records, the protected category tree and attached PDFs to the <b>PersonalFinance_Backups</b> folder in your Google Drive. The latest 15 backups are kept, plus one per day (last 7 days) and one per week (last 4 weeks). Unchanged data is not uploaded again, and a safety copy of your current data is saved before every restore. With several devices, Drive is checked before every upload so older data never overwrites newer data.</p>
-          <div class="inline-form drive-sync-actions">
-            <button class="btn btn-primary" id="driveConnectBtn" type="button">Connect Google Drive</button>
-            <button class="btn hidden" id="driveDisconnectBtn" type="button">Disconnect</button>
-            <button class="btn hidden" id="driveSyncBtn" type="button">Sync Now</button>
-            <button class="btn hidden" id="driveRestoreBtn" type="button">Restore from Drive</button>
+        <div class="settings-panel hidden" id="settingsPanelMigration" data-settings-panel="migration" role="tabpanel" aria-labelledby="settingsTabMigration">
+          <div class="settings-grid settings-mobile-wrap">
+            <div class="card settings-card" id="excelMigrationCard">
+            <h3>Excel &amp; Budge CSV Migration</h3>
+            <p>Import an Assets &amp; Liabilities, Income &amp; Expenses or Budge export (<b>.xlsx</b>, <b>.xls</b>, <b>.csv</b>). Header rows are detected automatically, re-imports skip duplicates and the original files are never modified.</p>
+            <div class="inline-form migration-actions">
+              <button class="btn" id="excelImportBtn">Import Workbook / CSV</button>
+              <button class="btn" id="excelTemplateBtn">Download Template</button>
+              <button class="btn" id="excelExportBtn">Export Workbook / CSV</button>
+            </div>
+            <div class="office-import-picker migration-pdf-picker">
+              <input type="file" id="migrationPdf" accept="application/pdf,.pdf" aria-describedby="migrationPdfHint" hidden>
+              <button type="button" class="btn" id="migrationPdfChoose">Upload PDF</button>
+              <span class="office-import-file" id="migrationPdfFileName">No PDF selected</span>
+              <button type="button" class="btn hidden" id="migrationPdfClear">Remove</button>
+            </div>
+            <p class="hint" id="migrationPdfHint">Optional: the chosen PDF is attached to every record the next import creates. It is stored exactly like a receipt uploaded in the Add/Edit form, so viewing, downloading, deleting and backing up work the same. Leave it empty to import without attachments.</p>
+            <p class="hint">Every dropdown is dependent and sourced from Manage Categories: <b>Type &gt; Category * &gt; Subcategory</b> (plus <b>Entry Type * &gt; Major Head &gt; Category * &gt; Subcategory</b> on the Income &amp; Expenses sheet). <b>Funded from Asset Subcategory</b> lists the Asset subcategories and rejects input on Cash &amp; Bank Account rows. The Assets &amp; Liabilities options live on a hidden <b>Lists</b> sheet, and Export produces the same layout, so it can be re-imported without duplicates.</p>
+            <div class="migration-history">
+              <h4>Migration History</h4>
+              <p class="hint">Each import is tracked as a batch. Deleting a batch also removes the records it imported.</p>
+              <div id="migrationHistoryList"></div>
+            </div>
+            </div>
+            <div class="card settings-card" id="officeMigrationCard">
+              <h3>Office Purchase &amp; Bill</h3>
+              <p>Import the FY-wise <b>Office Purchase &amp; Bill.xlsx</b> workbook (sheets such as <b>2025-26</b>, left cash outflow / right cash inflow). Import opens a confirmation popup: tick <b>I Do not want to change Account</b> to add the rows to this ledger only, or leave it unticked to also move the linked Cash &amp; Bank account balances. Rows are deduplicated and each import is tracked as a migration batch.</p>
+              <div class="inline-form migration-actions office-migration-actions">
+                <button class="btn" id="officeImportBtn">Import Office Workbook</button>
+                <button class="btn" id="officeTemplateBtn">Download Template</button>
+                <button class="btn" id="officeExportBtn">Export Office Workbook</button>
+              </div>
+              <p class="hint">The template has <b>Entry Type *</b> and <b>Category *</b> dropdowns in every FY sheet; Export produces the same side-by-side layout, so the file can be re-imported without duplicates.</p>
+            </div>
+            <div class="card settings-card">
+              <h3>Full Backup &amp; Restore</h3>
+              <p>Create a portable ZIP package with every record, category, setting and attached PDF, or restore a backup you saved earlier.</p>
+              <button class="btn" type="button" data-page="backup"><svg class="ic" aria-hidden="true"><use href="#i-backup"/></svg><span>Open Backup &amp; Restore</span></button>
+            </div>
           </div>
-          <p class="hint" id="driveSyncStatus" aria-live="polite">Not connected</p>
-          <p class="hint" id="driveLastSynced">Last synced: never</p>
         </div>
-        <div class="card settings-card">
-          <h3>Local Storage</h3>
-          <p id="storageInfo">Calculating storage usage…</p>
-          <div class="storage-meter" aria-hidden="true"><span id="storageBar"></span></div>
-          <p class="hint">Records and PDFs live only in this browser. Keep a backup ZIP somewhere safe.</p>
-          <button class="btn btn-danger" id="deleteAllData">Delete All Local Data</button>
+        <div class="settings-panel hidden" id="settingsPanelDrive" data-settings-panel="drive" role="tabpanel" aria-labelledby="settingsTabDrive">
+          <div class="settings-grid settings-mobile-wrap">
+            <div class="card settings-card" id="googleDriveCard">
+              <h3>Google Drive Sync</h3>
+              <p>Back up records, the protected category tree and attached PDFs to the <b>PersonalFinance_Backups</b> folder in your Google Drive. The latest 15 backups are kept, plus one per day (last 7 days) and one per week (last 4 weeks). Unchanged data is not uploaded again, and a safety copy of your current data is saved before every restore. With several devices, Drive is checked before every upload so older data never overwrites newer data.</p>
+              <div class="inline-form drive-sync-actions">
+                <button class="btn btn-primary" id="driveConnectBtn" type="button">Connect Google Drive</button>
+                <button class="btn hidden" id="driveDisconnectBtn" type="button">Disconnect</button>
+                <button class="btn hidden" id="driveSyncBtn" type="button">Sync Now</button>
+                <button class="btn hidden" id="driveRestoreBtn" type="button">Restore from Drive</button>
+              </div>
+              <p class="hint" id="driveSyncStatus" aria-live="polite">Not connected</p>
+              <p class="hint" id="driveLastSynced">Last synced: never</p>
+            </div>
+          </div>
+        </div>
+        <div class="settings-panel hidden" id="settingsPanelStorage" data-settings-panel="storage" role="tabpanel" aria-labelledby="settingsTabStorage">
+          <div class="settings-grid settings-mobile-wrap">
+            <div class="card settings-card">
+              <h3>Local Storage</h3>
+              <p id="storageInfo">Calculating storage usage…</p>
+              <div class="storage-meter" aria-hidden="true"><span id="storageBar"></span></div>
+              <p class="hint">Records and PDFs live only in this browser. Keep a backup ZIP somewhere safe.</p>
+              <button class="btn btn-danger" id="deleteAllData">Delete All Local Data</button>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -732,6 +829,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=43"></script>
+  <script src="app.js?v=44"></script>
 </body>
 </html>

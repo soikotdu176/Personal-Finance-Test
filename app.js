@@ -51,6 +51,10 @@ let editingIncomeId = null;
 let savingIncome = false;
 let incomePage = 1;
 let incomeTab = 'transactions';
+/* Settings sub-pages (tab bar inside #settingsPage). The active tab is remembered in
+   localStorage so a reload or a trip to another page keeps the user where they were. */
+const SETTINGS_TABS = ['general', 'categories', 'migration', 'drive', 'storage'];
+let settingsTab = 'general';
 const incomeFilters = { search: '', year: '', month: '', type: '', majorHead: '', category: '', subcategory: '' };
 const incomeDocDraft = { existing: [], removed: new Set(), replaced: new Map(), added: [] };
 /* Office Purchase & Bill page state (kept separate from the Dashboard / Income state). */
@@ -1028,6 +1032,7 @@ async function init(){
   bindNavigation();
   bindGlobalActions();
   bindDelegatedActions();
+  bindDashboardChartToggles();
   renderAll();
   appReady=true;
   updateMobileMode();
@@ -1108,7 +1113,7 @@ function initTheme(){
     try{localStorage.setItem(SITE.prefix+'-theme',next)}catch(e){}
     const meta=document.getElementById('metaThemeColor');
     if(meta)meta.setAttribute('content',next==='dark'?'#0b1020':'#4f46e5');
-    if(db&&currentPage==='dashboard')renderCharts(dashboardBalanceRecords());
+    if(db&&currentPage==='dashboard')refreshDashboardCharts();
   };
 }
 
@@ -1218,6 +1223,63 @@ function bindNavigation(){
     updateMobileMode();
     placePills(true);
   });
+  bindSettingsTabs();
+}
+
+/* ==========================================================================
+   Settings sub-pages (General, Categories, Migration, Cloud Sync, Storage)
+   ========================================================================== */
+function showSettingsTab(tab,{focus=false}={}){
+  const next=SETTINGS_TABS.includes(tab)?tab:'general';
+  settingsTab=next;
+  try{localStorage.setItem(SITE.prefix+'-settings-tab',next)}catch(e){}
+  const page=document.getElementById('settingsPage');
+  if(!page)return;
+  page.dataset.settingsTab=next;
+  page.querySelectorAll('[data-settings-tab]').forEach(button=>{
+    const active=button.dataset.settingsTab===next;
+    button.classList.toggle('active',active);
+    button.setAttribute('aria-selected',active?'true':'false');
+    button.tabIndex=active?0:-1;
+    if(active&&focus)button.focus();
+  });
+  page.querySelectorAll('[data-settings-panel]').forEach(panel=>{
+    panel.classList.toggle('hidden',panel.dataset.settingsPanel!==next);
+  });
+  /* Keep the active pill visible when the bar scrolls horizontally on phones. */
+  const bar=document.getElementById('settingsTabs');
+  const active=bar&&bar.querySelector('.settings-tab.active');
+  if(bar&&active&&active.offsetWidth){
+    bar.scrollLeft=Math.max(0,active.offsetLeft-(bar.clientWidth-active.offsetWidth)/2);
+  }
+  applySettingsMobileLayout();
+}
+function bindSettingsTabs(){
+  const tabs=document.getElementById('settingsTabs');
+  if(!tabs)return;
+  tabs.onclick=e=>{
+    const tab=e.target.closest('[data-settings-tab]');
+    if(!tab)return;
+    showSettingsTab(tab.dataset.settingsTab,{focus:true});
+  };
+  /* Roving tabindex: Left/Right/Home/End move between the sub-pages. */
+  tabs.onkeydown=e=>{
+    const current=e.target.closest('[data-settings-tab]');
+    if(!current)return;
+    const index=SETTINGS_TABS.indexOf(current.dataset.settingsTab);
+    if(index<0)return;
+    let nextIndex=null;
+    if(e.key==='ArrowRight')nextIndex=(index+1)%SETTINGS_TABS.length;
+    else if(e.key==='ArrowLeft')nextIndex=(index-1+SETTINGS_TABS.length)%SETTINGS_TABS.length;
+    else if(e.key==='Home')nextIndex=0;
+    else if(e.key==='End')nextIndex=SETTINGS_TABS.length-1;
+    if(nextIndex===null)return;
+    e.preventDefault();
+    showSettingsTab(SETTINGS_TABS[nextIndex],{focus:true});
+  };
+  let saved='';
+  try{saved=localStorage.getItem(SITE.prefix+'-settings-tab')||''}catch(e){}
+  showSettingsTab(SETTINGS_TABS.includes(saved)?saved:settingsTab);
 }
 
 function bindGlobalActions(){
@@ -1859,6 +1921,101 @@ function renderDashboardFilters(){
   bind('dashDateTo','to',()=>{dashFilters.datesAuto=false});
   const reset=document.getElementById('dashReset');
   if(reset)reset.onclick=()=>{Object.assign(dashFilters,{type:'',category:'',subcategory:'',year:'',from:'',to:'',datesAuto:false});rerender()};
+  updateDashQuickState();
+}
+
+/** Keeps the dashboard hero chips + subtitle in sync with the active filters (display only). */
+function updateDashQuickState(){
+  const host=document.getElementById('dashQuickActions');
+  const meta=document.getElementById('dashHeroMeta');
+  if(meta){
+    const parts=[dashFilters.year?`Fiscal year ${dashFilters.year}`:'All financial years'];
+    if(dashFilters.type)parts.push(dashFilters.type==='Asset'?'assets only':'liabilities only');
+    if(dashFilters.category)parts.push(dashFilters.category);
+    if(dashFilters.from||dashFilters.to)parts.push(`${dashFilters.from?fmtDate(dashFilters.from):'Start'} → ${dashFilters.to?fmtDate(dashFilters.to):'Today'}`);
+    meta.textContent=parts.join(' · ');
+  }
+  if(!host)return;
+  const mode=dashFilters.type==='Asset'?'asset':dashFilters.type==='Liability'?'liability':(dashFilters.year?'year':'all');
+  host.querySelectorAll('[data-quick]').forEach(btn=>{
+    const on=btn.dataset.quick===mode;
+    btn.classList.toggle('is-active',on);
+    btn.setAttribute('aria-pressed',on?'true':'false');
+  });
+}
+
+/** Shared active-state handling for the chart option pills. */
+function setSegmentedState(group,active){
+  if(!group)return;
+  group.querySelectorAll('.seg-btn').forEach(btn=>{
+    const on=btn===active;
+    btn.classList.toggle('is-active',on);
+    btn.setAttribute('aria-pressed',on?'true':'false');
+  });
+}
+
+function refreshDashboardCharts(){
+  renderCharts(dashboardBalanceRecords());
+  renderIncomeCharts(dashboardIncomeExpenses());
+  markEmptyCharts();
+}
+
+/**
+ * Hero quick filters + per-chart view toggles.
+ * Presentation only: every filter still flows through dashFilters -> renderDashboard(), and the
+ * calculation functions are untouched, so totals keep matching the rest of the app.
+ */
+function bindDashboardChartToggles(){
+  const quick=document.getElementById('dashQuickActions');
+  if(quick)quick.addEventListener('click',event=>{
+    const chip=event.target.closest('[data-quick]');
+    if(!chip)return;
+    const mode=chip.dataset.quick;
+    if(mode==='all'){
+      Object.assign(dashFilters,{type:'',category:'',subcategory:'',year:'',from:'',to:'',datesAuto:false});
+    }else if(mode==='year'){
+      const current=fiscalYearFromDate(todayISO());
+      const years=dashYearOptions();
+      const year=years.includes(current)?current:(years[0]||'');
+      Object.assign(dashFilters,{type:'',category:'',subcategory:'',year});
+      const range=year?fiscalRange(year):null;
+      dashFilters.from=range?range.from:'';
+      dashFilters.to=range?range.to:'';
+      dashFilters.datesAuto=!!range;
+    }else{
+      Object.assign(dashFilters,{type:mode==='asset'?'Asset':'Liability',category:'',subcategory:''});
+    }
+    dashboardPage=1;
+    renderDashboardFilters();
+    renderDashboard();
+  });
+  const grid=document.querySelector('#dashboardPage .charts-grid');
+  if(!grid)return;
+  grid.addEventListener('click',event=>{
+    const typeBtn=event.target.closest('[data-chart-type]');
+    if(typeBtn){
+      const id=typeBtn.dataset.chartType,value=typeBtn.dataset.chartValue;
+      if(id==='assetsChart')dashboardChartState.assetType=value;
+      else if(id==='liabilitiesChart')dashboardChartState.liabilityType=value;
+      else if(id==='netWorthChart')dashboardChartState.netWorthType=value;
+      setSegmentedState(typeBtn.parentElement,typeBtn);
+      refreshDashboardCharts();
+      return;
+    }
+    const trendBtn=event.target.closest('[data-trend-months]');
+    if(trendBtn){
+      dashboardChartState.trendMonths=Number(trendBtn.dataset.trendMonths)||12;
+      setSegmentedState(trendBtn.parentElement,trendBtn);
+      refreshDashboardCharts();
+      return;
+    }
+    const groupBtn=event.target.closest('[data-expense-group]');
+    if(groupBtn){
+      dashboardChartState.expenseGrouping=groupBtn.dataset.expenseGroup==='category'?'category':'majorHead';
+      setSegmentedState(groupBtn.parentElement,groupBtn);
+      refreshDashboardCharts();
+    }
+  });
 }
 
 const inRange=(date,from,to)=>(!from||date>=from)&&(!to||date<=to);
@@ -2234,6 +2391,8 @@ function toggleMobileSpeedDial(){
   if(document.getElementById('mobileSpeedDial').classList.contains('open'))closeMobileSpeedDial();
   else openMobileSpeedDial();
 }
+/* Dashboard chart view state - presentation only, never touches financial data. */
+const dashboardChartState={assetType:'bar',liabilityType:'pie',netWorthType:'line',trendMonths:12,expenseGrouping:'majorHead'};
 function renderDashboard(){
   const balance=dashboardBalanceRecords();
   const assets=sumAmount(balance.filter(r=>r.type==='Asset'));
@@ -2298,10 +2457,60 @@ function markEmptyCharts(){
 }
 function chartTheme(){
   const dark=document.documentElement.getAttribute('data-theme')==='dark';
-  return {text:dark?'#a8b3d1':'#64748b',grid:dark?'rgba(148,163,184,.14)':'rgba(15,23,42,.07)'};
+  return {dark,text:dark?'#a8b3d1':'#64748b',grid:dark?'rgba(148,163,184,.14)':'rgba(15,23,42,.07)'};
 }
 const CHART_COLORS=['#6366f1','#10b981','#f59e0b','#0ea5e9','#ec4899','#8b5cf6','#14b8a6','#f97316'];
 const LIABILITY_COLORS=['#f43f5e','#fb923c','#a78bfa','#38bdf8','#facc15'];
+
+/** Rich, theme-aware tooltip shared by every dashboard chart; values reuse formatMoney(). */
+function chartTooltip(theme,{share=false}={}){
+  return {
+    backgroundColor:theme.dark?'rgba(8,12,26,.96)':'rgba(15,23,42,.94)',
+    titleColor:'#fff',bodyColor:theme.dark?'#dbe3f5':'#e9eefb',
+    borderColor:theme.dark?'rgba(148,163,184,.3)':'rgba(255,255,255,.16)',borderWidth:1,
+    padding:12,cornerRadius:12,boxPadding:5,usePointStyle:true,displayColors:true,
+    titleFont:{weight:'700',size:12},bodyFont:{weight:'600',size:12},bodySpacing:6,
+    callbacks:{
+      label:ctx=>{
+        const parsed=ctx.parsed;
+        const raw=parsed&&typeof parsed==='object'?(parsed.y??parsed.x??0):parsed;
+        const value=Number(raw)||0;
+        const values=Array.isArray(ctx.dataset&&ctx.dataset.data)?ctx.dataset.data:[];
+        const total=values.reduce((sum,v)=>sum+(Number(v)||0),0);
+        const suffix=share&&total>0?` · ${((value/total)*100).toFixed(1)}%`:'';
+        return `${ctx.dataset.label?ctx.dataset.label+': ':''}${formatMoney(value)}${suffix}`;
+      }
+    }
+  };
+}
+/** Soft vertical gradient used by the net-worth line/bar fill. */
+function areaFill(ctx,rgb){
+  const chart=ctx&&ctx.chart;
+  const area=chart&&chart.chartArea;
+  if(!area)return `rgba(${rgb},.16)`;
+  const gradient=chart.ctx.createLinearGradient(0,area.top,0,area.bottom);
+  gradient.addColorStop(0,`rgba(${rgb},.34)`);
+  gradient.addColorStop(1,`rgba(${rgb},0)`);
+  return gradient;
+}
+function baseChartOptions(theme){
+  return {
+    maintainAspectRatio:false,responsive:true,
+    animation:{duration:reducedMotion()?0:900,easing:'easeOutQuart'},
+    interaction:{mode:'index',intersect:false},
+    layout:{padding:{top:2,right:2,bottom:0,left:0}},
+    plugins:{tooltip:chartTooltip(theme)}
+  };
+}
+function chartLegend(theme){
+  return {position:'bottom',labels:{usePointStyle:true,boxWidth:8,boxHeight:8,padding:14,color:theme.text,font:{weight:'600'}}};
+}
+function chartScales(theme){
+  return {
+    x:{grid:{display:false},border:{display:false},ticks:{color:theme.text,maxRotation:0,autoSkipPadding:8}},
+    y:{beginAtZero:true,grid:{color:theme.grid,drawTicks:false},border:{display:false},ticks:{color:theme.text,padding:8,maxTicksLimit:6}}
+  };
+}
 
 function renderCharts(records){
   const assets=sumAmount(records.filter(r=>r.type==='Asset'));
@@ -2312,21 +2521,46 @@ function renderCharts(records){
   Chart.defaults.color=theme.text;
   Chart.defaults.borderColor=theme.grid;
   Chart.defaults.font.family="'Plus Jakarta Sans','Inter',system-ui,sans-serif";
-  const anim={duration:reducedMotion()?0:900,easing:'easeOutQuart'};
-  const legend={position:'bottom',labels:{usePointStyle:true,boxWidth:8,color:theme.text}};
-  const scales={x:{grid:{display:false},ticks:{color:theme.text}},y:{grid:{color:theme.grid},ticks:{color:theme.text}}};
-  charts.comparisonChart=new Chart(document.getElementById('comparisonChart'),{type:'doughnut',data:{labels:['Assets','Liabilities'],datasets:[{data:[assets,liabilities],backgroundColor:['#10b981','#f43f5e'],borderWidth:0,hoverOffset:6}]},options:{maintainAspectRatio:false,cutout:'66%',animation:anim,plugins:{legend}}});
+  const base=baseChartOptions(theme);
+  const legend=chartLegend(theme);
+  const scales=chartScales(theme);
+  const circleInteraction={mode:'nearest',intersect:true};
+
+  charts.comparisonChart=new Chart(document.getElementById('comparisonChart'),{type:'doughnut',data:{labels:['Assets','Liabilities'],datasets:[{data:[assets,liabilities],backgroundColor:['#10b981','#f43f5e'],hoverBackgroundColor:['#34d399','#fb7185'],borderWidth:0,spacing:3,hoverOffset:10}]},options:Object.assign({},base,{cutout:'68%',interaction:circleInteraction,plugins:{legend,tooltip:chartTooltip(theme)}})});
+
   const group=(type)=>Object.entries(records.filter(r=>r.type===type).reduce((out,r)=>{out[r.category]=(out[r.category]||0)+recordAmount(r);return out},{}));
   const assetsGroup=group('Asset'),liabilitiesGroup=group('Liability');
-  charts.assetsChart=new Chart(document.getElementById('assetsChart'),{type:'bar',data:{labels:assetsGroup.map(x=>x[0]),datasets:[{data:assetsGroup.map(x=>x[1]),backgroundColor:assetsGroup.map((x,i)=>CHART_COLORS[i%CHART_COLORS.length]),borderRadius:8,maxBarThickness:42}]},options:{maintainAspectRatio:false,animation:anim,scales,plugins:{legend:{display:false}}}});
-  charts.liabilitiesChart=new Chart(document.getElementById('liabilitiesChart'),{type:'pie',data:{labels:liabilitiesGroup.map(x=>x[0]),datasets:[{data:liabilitiesGroup.map(x=>x[1]),backgroundColor:LIABILITY_COLORS,borderWidth:0}]},options:{maintainAspectRatio:false,animation:anim,plugins:{legend}}});
+  const categoryChart=(id,type,entries,colors)=>{
+    const canvas=document.getElementById(id);
+    if(!canvas)return;
+    const isCircle=type==='doughnut'||type==='pie';
+    const rows=entries.slice().sort((a,b)=>b[1]-a[1]);
+    const options=Object.assign({},base,isCircle
+      ?{cutout:type==='doughnut'?'64%':undefined,interaction:circleInteraction,plugins:{legend,tooltip:chartTooltip(theme,{share:true})}}
+      :{scales,plugins:{legend:{display:false},tooltip:chartTooltip(theme,{share:true})}});
+    charts[id]=new Chart(canvas,{type,data:{labels:rows.map(x=>x[0]),datasets:[{
+      data:rows.map(x=>x[1]),
+      backgroundColor:rows.map((x,i)=>colors[i%colors.length]),
+      borderWidth:0,borderSkipped:false,
+      hoverOffset:isCircle?9:0,
+      borderRadius:isCircle?0:10,
+      maxBarThickness:isCircle?undefined:52
+    }]},options});
+  };
+  categoryChart('assetsChart',dashboardChartState.assetType==='doughnut'?'doughnut':'bar',assetsGroup,CHART_COLORS);
+  categoryChart('liabilitiesChart',dashboardChartState.liabilityType==='bar'?'bar':'pie',liabilitiesGroup,LIABILITY_COLORS);
+
   const trendSource=dashboardBaseRecords();
   const byYear=[...new Set(trendSource.map(r=>normIncomeYear(r.incomeYear||'')).filter(Boolean))].sort();
   const trend=byYear.map(year=>{
     const recs=effectiveRecordsForBalance(trendSource,year);
     return sumAmount(recs.filter(r=>r.type==='Asset'))-sumAmount(recs.filter(r=>r.type==='Liability'));
   });
-  charts.netWorthChart=new Chart(document.getElementById('netWorthChart'),{type:'line',data:{labels:byYear,datasets:[{label:'Net Worth',data:trend,borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,.16)',fill:true,tension:.38,pointRadius:4,pointBackgroundColor:'#6366f1',borderWidth:2.5}]},options:{maintainAspectRatio:false,animation:anim,scales,plugins:{legend:{display:false}}}});
+  const netType=dashboardChartState.netWorthType==='bar'?'bar':'line';
+  const netDataset=netType==='bar'
+    ?{label:'Net Worth',data:trend,backgroundColor:ctx=>areaFill(ctx,'99,102,241'),hoverBackgroundColor:'#818cf8',borderRadius:10,borderSkipped:false,maxBarThickness:46}
+    :{label:'Net Worth',data:trend,borderColor:'#6366f1',backgroundColor:ctx=>areaFill(ctx,'99,102,241'),fill:true,tension:.4,borderWidth:2.5,pointRadius:4,pointHoverRadius:7,pointBackgroundColor:'#6366f1',pointBorderColor:'#ffffff',pointBorderWidth:2};
+  charts.netWorthChart=new Chart(document.getElementById('netWorthChart'),{type:netType,data:{labels:byYear,datasets:[netDataset]},options:Object.assign({},base,{scales,plugins:{legend:{display:false},tooltip:chartTooltip(theme)}})});
 }
 
 function docsOf(record){
@@ -4174,19 +4408,18 @@ function renderSettings(){
   renderMigrationHistory();
   renderStorageInfo();
   renderDriveSyncCard();
-  applySettingsMobileLayout();
+  showSettingsTab(settingsTab);
 }
-/* Settings is the only page that uses two desktop cards per row. On phones the markup is
-   switched to the compact .settings-mobile-wrap column, so every field, dropdown and the
-   import / template / export rows stay 100% wide. Desktop keeps its grid untouched. */
+/* Settings sub-pages share one responsive container. Desktop keeps the two-column
+   .settings-grid inside every panel; on phones each panel turns into one full-width
+   column (.settings-mobile-wrap) with 12px gutters and 100%-wide fields. */
 let settingsLayoutBound=false;
 function applySettingsMobileLayout(){
   const page=document.getElementById('settingsPage');
   if(!page)return;
-  const wrap=page.querySelector('.settings-mobile-wrap')||page.firstElementChild;
   const mobile=!!(window.matchMedia&&window.matchMedia('(max-width: 768px)').matches);
   page.classList.toggle('settings-page-mobile',mobile);
-  if(wrap)wrap.classList.toggle('settings-mobile-wrap',mobile);
+  page.querySelectorAll('.settings-grid').forEach(wrap=>wrap.classList.toggle('settings-mobile-wrap',mobile));
   if(!settingsLayoutBound&&window.matchMedia){
     settingsLayoutBound=true;
     const query=window.matchMedia('(max-width: 768px)');
@@ -5226,23 +5459,28 @@ function fiscalMonthFromDate(iso){
 }
 function renderIncomeCharts(records){
   destroyChart('incomeTrendChart');destroyChart('expenseCategoryChart');
-  if(!window.Chart||!document.getElementById('incomeTrendChart')||!document.getElementById('expenseCategoryChart'))return;
+  const trendCanvas=document.getElementById('incomeTrendChart'),expenseCanvas=document.getElementById('expenseCategoryChart');
+  if(!window.Chart||!trendCanvas||!expenseCanvas)return;
   const theme=chartTheme();
-  const anim={duration:reducedMotion()?0:900,easing:'easeOutQuart'};
-  const legend={position:'bottom',labels:{usePointStyle:true,boxWidth:8,color:theme.text}};
-  const scales={x:{grid:{display:false},ticks:{color:theme.text}},y:{grid:{color:theme.grid},ticks:{color:theme.text}}};
+  const base=baseChartOptions(theme);
+  const legend=chartLegend(theme);
+  const scales=chartScales(theme);
   const months=['Jul','Aug','Sep','Oct','Nov','Dec','Jan','Feb','Mar','Apr','May','Jun'];
   const incomeBy=[],expenseBy=[];
   for(let m=1;m<=12;m++){
     incomeBy.push(records.filter(r=>r.type==='Income'&&fiscalMonthFromDate(r.date)===m).reduce((s,r)=>s+(Number(r.amount)||0),0));
     expenseBy.push(records.filter(r=>r.type==='Expense'&&fiscalMonthFromDate(r.date)===m).reduce((s,r)=>s+(Number(r.amount)||0),0));
   }
-  charts.incomeTrendChart=new Chart(document.getElementById('incomeTrendChart'),{type:'bar',data:{labels:months,datasets:[
-    {label:'Income',data:incomeBy,backgroundColor:'#10b981',borderRadius:6,maxBarThickness:26},
-    {label:'Expenses',data:expenseBy,backgroundColor:'#f43f5e',borderRadius:6,maxBarThickness:26}
-  ]},options:{maintainAspectRatio:false,animation:anim,scales,plugins:{legend}}});
-  const group=Object.entries(records.filter(r=>r.type==='Expense').reduce((out,r)=>{out[r.majorHead]=(out[r.majorHead]||0)+(Number(r.amount)||0);return out},{}));
-  charts.expenseCategoryChart=new Chart(document.getElementById('expenseCategoryChart'),{type:'doughnut',data:{labels:group.map(x=>x[0]),datasets:[{data:group.map(x=>x[1]),backgroundColor:group.map((x,i)=>CHART_COLORS[i%CHART_COLORS.length]),borderWidth:0,hoverOffset:6}]},options:{maintainAspectRatio:false,cutout:'58%',animation:anim,plugins:{legend}}});
+  // FY view = all 12 fiscal months; 3M/6M show the tail of the fiscal year.
+  const span=Math.min(12,Math.max(1,dashboardChartState.trendMonths||12));
+  const offset=12-span;
+  charts.incomeTrendChart=new Chart(trendCanvas,{type:'bar',data:{labels:months.slice(offset),datasets:[
+    {label:'Income',data:incomeBy.slice(offset),backgroundColor:'#10b981',hoverBackgroundColor:'#34d399',borderRadius:8,borderSkipped:false,maxBarThickness:30},
+    {label:'Expenses',data:expenseBy.slice(offset),backgroundColor:'#f43f5e',hoverBackgroundColor:'#fb7185',borderRadius:8,borderSkipped:false,maxBarThickness:30}
+  ]},options:Object.assign({},base,{scales,plugins:{legend,tooltip:chartTooltip(theme)}})});
+  const groupKey=dashboardChartState.expenseGrouping==='category'?'category':'majorHead';
+  const group=Object.entries(records.filter(r=>r.type==='Expense').reduce((out,r)=>{const label=r[groupKey]||'Unassigned';out[label]=(out[label]||0)+(Number(r.amount)||0);return out},{})).sort((a,b)=>b[1]-a[1]);
+  charts.expenseCategoryChart=new Chart(expenseCanvas,{type:'doughnut',data:{labels:group.map(x=>x[0]),datasets:[{data:group.map(x=>x[1]),backgroundColor:group.map((x,i)=>CHART_COLORS[i%CHART_COLORS.length]),borderWidth:0,hoverOffset:9}]},options:Object.assign({},base,{cutout:'62%',interaction:{mode:'nearest',intersect:true},plugins:{legend,tooltip:chartTooltip(theme,{share:true})}})});
 }
 function renderRecentIncome(records){
   const countEl=document.getElementById('recentIncomeCount'),tableEl=document.getElementById('recentIncomeTable');
