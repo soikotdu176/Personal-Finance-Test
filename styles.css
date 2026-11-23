@@ -228,6 +228,9 @@ input[type="radio"], input[type="checkbox"] { min-height: 0; accent-color: var(-
 .date-field input { text-transform: none; letter-spacing: 0; font-weight: 500; }
 .fy-hint { flex-basis: 100%; font-size: 12px; color: var(--primary-2); background: var(--primary-soft); padding: 6px 12px; border-radius: 999px; width: fit-content; animation: popIn .35s var(--spring) both; }
 .filter-reset { margin-left: auto; }
+/* Reports & exports: moved from the Dashboard to the Assets & Liabilities filter section. */
+.record-report-toolbar { justify-content: flex-end; }
+.record-report-toolbar .btn { flex: 0 0 auto; }
 
 /* ---------- KPI cards ---------- */
 .cards-grid { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap: 16px; margin-bottom: 16px; }
@@ -914,6 +917,13 @@ dialog.modal[open]::backdrop { opacity: 1; }
   .mobile-record-year-filter { display: block; }
   #recordsPage .toolbar #addRecordBtn { grid-column: 1 / -1; height: 36px; min-height: 36px; }
   #recordsPage .toolbar #recordClearFilters { justify-self: end; }
+  /* Reports & exports: keep the long PDF / Excel labels readable instead of clipped. */
+  #recordsPage .record-report-toolbar .btn { min-width: 0; }
+  #recordsPage .record-report-toolbar .btn > span {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #recordsPage .record-report-toolbar #generatePdfReport,
+  #recordsPage .record-report-toolbar #generateExcelReport { grid-column: 1 / -1; }
   #balancePage .toolbar { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   #balancePage .toolbar #balanceYear { grid-column: 1 / -1; }
   #balancePage .toolbar .btn { padding: 0 8px; font-size: 10px; }

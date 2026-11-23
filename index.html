@@ -234,12 +234,6 @@
         <div class="table-toolbar">
           <div class="tt-title"><h3>Financial Records</h3><p id="recordCount" aria-live="polite"></p></div>
           <input class="search" id="dashboardSearch" placeholder="Search records…" aria-label="Search records">
-          <div class="tt-actions">
-            <button class="btn" id="exportFiltered" title="Flat data export of the filtered records"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg><span>Export Data</span></button>
-            <button class="btn" id="printDashboard"><svg class="ic" aria-hidden="true"><use href="#i-print"/></svg><span>Print</span></button>
-            <button class="btn btn-pdf" id="generatePdfReport"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><span>Generate PDF Report</span></button>
-            <button class="btn btn-xls" id="generateExcelReport"><svg class="ic" aria-hidden="true"><use href="#i-sheet"/></svg><span>Generate Excel Report</span></button>
-          </div>
         </div>
         <div class="table-wrap"><table id="dashboardTable"></table></div>
         <div class="pagination" id="dashboardPagination"></div>
@@ -256,6 +250,12 @@
         <button class="btn" id="recordClearFilters" disabled>Clear Filters</button>
         <button class="btn" id="transferBtn" type="button" title="Move money between two accounts"><svg class="ic" aria-hidden="true"><use href="#i-swap"/></svg><span>Transfer</span></button>
         <button class="btn btn-primary" id="addRecordBtn"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg><span>Add Record</span></button>
+      </div>
+      <div class="toolbar record-report-toolbar" role="group" aria-label="Reports and exports">
+        <button class="btn" id="exportFiltered" title="Flat data export of the Assets &amp; Liabilities records that match the active filters"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg><span>Export Data</span></button>
+        <button class="btn" id="printDashboard" title="Print the Assets &amp; Liabilities records that match the active filters"><svg class="ic" aria-hidden="true"><use href="#i-print"/></svg><span>Print</span></button>
+        <button class="btn btn-pdf" id="generatePdfReport" title="PDF report of the Assets &amp; Liabilities records that match the active filters"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><span>Generate PDF Report</span></button>
+        <button class="btn btn-xls" id="generateExcelReport" title="Excel report of the Assets &amp; Liabilities records that match the active filters"><svg class="ic" aria-hidden="true"><use href="#i-sheet"/></svg><span>Generate Excel Report</span></button>
       </div>
       <div class="record-columns">
         <div class="card"><div class="section-heading"><h3>Assets</h3><span id="assetRecordCount"></span></div><div id="assetList" class="record-list"></div></div>

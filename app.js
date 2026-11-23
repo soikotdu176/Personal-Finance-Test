@@ -1239,6 +1239,7 @@ function bindGlobalActions(){
     renderRecordSections();
   };
   $el('dashboardSearch').oninput=debounce(()=>{dashboardPage=1;renderDashboardTable()});
+  /* Report / export actions live on the Assets & Liabilities page and read its active filters. */
   $el('exportFiltered').onclick=exportFilteredExcel;
   $el('printDashboard').onclick=printCurrentView;
   $el('generatePdfReport').onclick=e=>runWithLoading(e.currentTarget,generatePdfReport);
@@ -3715,14 +3716,39 @@ function recordYearOptions(){
     .sort((a,b)=>String(b).localeCompare(String(a)));
 }
 
+/** Active filter criteria of the Assets & Liabilities page (search, Type, Category,
+ *  Subcategory and - on mobile, exactly like the page - Financial Year). Reports and
+ *  exports are triggered from this page, so they must read the same values. */
+function recordsPageFilterState(){
+  const yearSelect=document.getElementById('recordYearFilter');
+  return {
+    search:(document.getElementById('recordSearch')?.value||'').trim(),
+    type:document.getElementById('recordTypeFilter')?.value||'',
+    category:document.getElementById('recordCategoryFilter')?.value||'',
+    subcategory:document.getElementById('recordSubcategoryFilter')?.value||'',
+    year:isMobileViewport()?normIncomeYear(yearSelect?.value||''):''
+  };
+}
+/** The Assets & Liabilities records matching the active filters. Transfers and synthetic
+ *  balance movements stay out, exactly like every other report: they are balance adjustments,
+ *  not ledger rows, so including them would count the same money twice. */
+function recordsPageFilteredRecords(filters){
+  const f=filters||recordsPageFilterState();
+  const search=String(f.search||'').toLowerCase();
+  let records=state.records.filter(r=>!isTransferRecord(r)&&!r.syntheticTransferLeg);
+  if(search)records=records.filter(r=>Object.values(r).some(v=>String(v).toLowerCase().includes(search)));
+  if(f.year)records=records.filter(r=>recordFinancialYear(r)===f.year);
+  if(f.type)records=records.filter(r=>r.type===f.type);
+  if(f.category)records=records.filter(r=>r.category===f.category);
+  if(f.subcategory)records=records.filter(r=>r.subcategory===f.subcategory);
+  return records;
+}
+
 function renderRecordSections(){
   renderRecordFilters();
-  const search=(document.getElementById('recordSearch')?.value||'').toLowerCase();
-  const type=document.getElementById('recordTypeFilter')?.value||'';
-  const category=document.getElementById('recordCategoryFilter')?.value||'';
-  const subcategory=document.getElementById('recordSubcategoryFilter')?.value||'';
-  const year=isMobileViewport()?(document.getElementById('recordYearFilter')?.value||''):'';
-  let records=state.records.filter(r=>!search||Object.values(r).some(v=>String(v).toLowerCase().includes(search)));
+  const {search,type,category,subcategory,year}=recordsPageFilterState();
+  const needle=search.toLowerCase();
+  let records=state.records.filter(r=>!needle||Object.values(r).some(v=>String(v).toLowerCase().includes(needle)));
   if(year)records=records.filter(r=>recordFinancialYear(r)===year);
   if(type)records=records.filter(r=>r.type===type);
   if(category)records=records.filter(r=>r.category===category);
@@ -4355,7 +4381,9 @@ function exportBalanceExcel(){
    ========================================================================== */
 function exportFilteredExcel(){
   if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
-  const records=getFilteredRecords();
+  const filters=recordsPageFilterState();
+  const records=recordsPageFilteredRecords(filters);
+  if(!records.length){toast('No records match the current filters.',true);return}
   const rows=records.map(r=>({
     Type:r.type,Category:r.category,Subcategory:r.subcategory,Date:r.date||'',Particulars:r.particulars||r.name||'',
     Details:r.details||r.description||'','Detail / Account':r.detailRef||r.accountDetail||'','Income Year':r.incomeYear||'',
@@ -4366,7 +4394,7 @@ function exportFilteredExcel(){
   }));
   const workbook=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook,XLSX.utils.json_to_sheet(rows),'Filtered Records');
-  XLSX.writeFile(workbook,`Financial-Records-${todayISO()}.xlsx`);
+  XLSX.writeFile(workbook,`Financial-Records-${filters.year||'All-Years'}-${todayISO()}.xlsx`);
   toast('Excel data exported');
 }
 
@@ -4557,11 +4585,10 @@ async function replaceMigrationFile(event){
    Filter-wise reports (PDF via jsPDF + AutoTable, Excel via SheetJS)
    ========================================================================== */
 function describeFilters(){
-  const f=dashFilters;
-  const range=(f.from||f.to)?`${fmtDate(f.from)||'Any'} to ${fmtDate(f.to)||'Any'}`:'All dates';
+  const f=recordsPageFilterState();
   return [
     ['Type',f.type||'All'],['Category',f.category||'All'],['Subcategory',f.subcategory||'All'],
-    ['Income Year',f.year||'All'],['Date Range',range]
+    ['Income Year',f.year||'All'],['Search',f.search||'All']
   ];
 }
 const filterText=()=>describeFilters().map(([k,v])=>`${k}: ${v}`).join('   |   ');
@@ -4621,7 +4648,8 @@ function reportCell(r,col){
 }
 
 async function generatePdfReport(){
-  const records=getFilteredRecords();
+  const filters=recordsPageFilterState();
+  const records=recordsPageFilteredRecords(filters);
   if(!records.length){toast('No records match the current filters.',true);return}
   const JsPDF=window.jspdf&&window.jspdf.jsPDF;
   if(!JsPDF){toast('PDF library is unavailable. Check your internet connection.',true);return}
@@ -4754,7 +4782,7 @@ async function generatePdfReport(){
     doc.text('Personal Finance  ·  SOIKOT RAIHAN',M,H-13);
     doc.text(`Page ${i} of ${total}`,W-M,H-13,{align:'right'});
   }
-  doc.save(`Personal-Finance-Report-${dashFilters.year||'All-Years'}-${todayISO()}.pdf`);
+  doc.save(`Personal-Finance-Report-${filters.year||'All-Years'}-${todayISO()}.pdf`);
   toast(`PDF report generated (${total} page${total===1?'':'s'})`);
 }
 
@@ -4796,7 +4824,8 @@ const reportCellValue=(r,c)=>{
  *  then a Category Subtotal.
  */
 function generateExcelReport(){
-  const records=getFilteredRecords();
+  const filters=recordsPageFilterState();
+  const records=recordsPageFilteredRecords(filters);
   if(!records.length){toast('No records match the current filters.',true);return}
   if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
   const groups=groupRecordsForReport(records);
@@ -4903,7 +4932,7 @@ function generateExcelReport(){
   const workbook=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook,makeSheet(rows,opts),'Summary');
   sheets.forEach(s=>XLSX.utils.book_append_sheet(workbook,s.ws,s.name));
-  XLSX.writeFile(workbook,`Personal-Finance-Report-${dashFilters.year||'All-Years'}-${todayISO()}.xlsx`);
+  XLSX.writeFile(workbook,`Personal-Finance-Report-${filters.year||'All-Years'}-${todayISO()}.xlsx`);
   toast(`Excel report generated (${sheets.length+1} sheets)`);
 }
 
