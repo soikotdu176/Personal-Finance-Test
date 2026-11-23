@@ -6,10 +6,36 @@
      - PDF blobs live in their own store, so start-up never loads megabytes of PDFs
    ========================================================================== */
 
-const DB_NAME = 'AssetBookDB';
+/* =====================================================================================
+   SITE PROFILE - the SAME files run as the Test site and as the Main site.
+   The profile is chosen from the URL, so copying files between the two folders needs NO edits:
+     .../Personal-Finance-Test/  (path contains "test")  ->  Test profile
+     .../Personal-Finance/       (anything else)         ->  Main profile
+   Both sites share the origin soikotdu176.github.io, so every browser-side name must differ.
+   The ONLY thing to fill in once: main.clientId = Client ID of the "Personal Finance" Google Cloud project.
+   ===================================================================================== */
+const SITE_PROFILES = {
+  test: {
+    prefix: 'assetbook',                          // localStorage / sessionStorage / cache-name prefix
+    dbName: 'AssetBookDB',                        // IndexedDB database
+    driveFolder: 'PersonalFinance_Backups',       // Google Drive folder
+    clientId: '232563199720-sn7bke2332p585r4jlcaflvjhjfk0ut8.apps.googleusercontent.com',
+    seedProject: true                             // Test only: import the Project/ workbooks into an empty database
+  },
+  main: {
+    prefix: 'pf',
+    dbName: 'PF',
+    driveFolder: 'PF_Backup',
+    clientId: '587017846090-evhpra2iegie48q2t49fv71invkumte8.apps.googleusercontent.com',
+    seedProject: false                            // never auto-import (private workbooks must not be deployed)
+  }
+};
+const SITE = /test/i.test(location.pathname) ? SITE_PROFILES.test : SITE_PROFILES.main;
+
+const DB_NAME = SITE.dbName;
 const DB_VERSION = 6;                       // v6: protected settingsStore keeps the Major Head / Category / Subcategory tree
 const APP_VERSION = '2026-11-21-v13';
-const DATA_VERSION_KEY = 'assetbook-data-version';
+const DATA_VERSION_KEY = SITE.prefix + '-data-version';
 let db;
 let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [], officePurchases: [], categoryStructureMeta: {} };
 let charts = {};
@@ -112,13 +138,13 @@ const ACCOUNTS = ['Cash In Hand','Basic Bank PLC','DBBL','Bkash','Rocket','Nagad
 /* Workbooks kept in the local Project/ folder. They are loaded once into an empty
    database (same pipeline as Settings -> Import) so the Dashboard shows the complete
    finances on first launch. Existing local data is never replaced. */
-const PROJECT_DATASET = [
+const PROJECT_DATASET = !SITE.seedProject ? [] : [
   'Project/Assets & Liabilities.xlsx',
   'Project/Income & Expenses.xlsx',
   'Project/Office Purchase & Bill.xlsx',
   'Project/budge-01-07-2026-31-07-2026_1795143633525.csv'
 ];
-const PROJECT_DATASET_FLAG = 'assetbook-project-dataset';
+const PROJECT_DATASET_FLAG = SITE.prefix + '-project-dataset';
 
 /* ---------- IndexedDB helpers ---------- */
 function openDB() {
@@ -185,6 +211,15 @@ function migrateDocumentBlobs(transaction){
 function tx(store,mode='readonly'){
   return db.transaction(store,mode).objectStore(store);
 }
+function isDriveSyncMetadata(store,value){
+  if(store==='backupHistory')return true;
+  if(store!=='settings')return false;
+  const key=typeof value==='string'?value:value&&value.key;
+  return typeof key==='string'&&/^drive/i.test(key);
+}
+function scheduleDriveBackupAfterMutation(store,value){
+  if(!isDriveSyncMetadata(store,value))scheduleDriveAutoBackup();
+}
 function getAll(store){
   return new Promise((resolve,reject)=>{
     const request=tx(store).getAll();
@@ -195,7 +230,7 @@ function getAll(store){
 function put(store,value){
   return new Promise((resolve,reject)=>{
     const request=tx(store,'readwrite').put(value);
-    request.onsuccess=()=>resolve(request.result);
+    request.onsuccess=()=>{scheduleDriveBackupAfterMutation(store,value);resolve(request.result)};
     request.onerror=()=>reject(request.error);
   });
 }
@@ -204,7 +239,7 @@ function putMany(store,items){
     const transaction=db.transaction(store,'readwrite');
     const objectStore=transaction.objectStore(store);
     items.forEach(item=>objectStore.put(item));
-    transaction.oncomplete=()=>resolve();
+    transaction.oncomplete=()=>{if(items.some(item=>!isDriveSyncMetadata(store,item)))scheduleDriveAutoBackup();resolve()};
     transaction.onerror=()=>reject(transaction.error);
     transaction.onabort=()=>reject(transaction.error);
   });
@@ -212,7 +247,7 @@ function putMany(store,items){
 function remove(store,key){
   return new Promise((resolve,reject)=>{
     const request=tx(store,'readwrite').delete(key);
-    request.onsuccess=()=>resolve();
+    request.onsuccess=()=>{scheduleDriveBackupAfterMutation(store,key);resolve()};
     request.onerror=()=>reject(request.error);
   });
 }
@@ -221,7 +256,7 @@ function removeMany(store,keys){
     const transaction=db.transaction(store,'readwrite');
     const objectStore=transaction.objectStore(store);
     (keys||[]).forEach(key=>objectStore.delete(key));
-    transaction.oncomplete=()=>resolve();
+    transaction.oncomplete=()=>{if((keys||[]).some(key=>!isDriveSyncMetadata(store,key)))scheduleDriveAutoBackup();resolve()};
     transaction.onerror=()=>reject(transaction.error);
     transaction.onabort=()=>reject(transaction.error);
   });
@@ -240,7 +275,7 @@ function replaceStore(store,items){
     const objectStore=transaction.objectStore(store);
     objectStore.clear();
     (items||[]).forEach(item=>objectStore.put(item));
-    transaction.oncomplete=()=>resolve();
+    transaction.oncomplete=()=>{if(store!=='backupHistory'&&(store!=='settings'||(items||[]).some(item=>!isDriveSyncMetadata(store,item))))scheduleDriveAutoBackup();resolve()};
     transaction.onerror=()=>reject(transaction.error||new Error('Could not write to the database.'));
     transaction.onabort=()=>reject(transaction.error||new Error('The database rejected the write (is the disk full?).'));
   });
@@ -892,8 +927,10 @@ function deleteDatabase(){
 }
 async function clearAppCaches(){
   try{
-    if('serviceWorker' in navigator){(await navigator.serviceWorker.getRegistrations()).forEach(r=>r.unregister())}
-    if(window.caches){(await caches.keys()).forEach(k=>caches.delete(k))}
+    // Only this site's service worker and caches: the other site lives on the same origin.
+    const ownScope=new URL('./',location.href).href;
+    if('serviceWorker' in navigator){(await navigator.serviceWorker.getRegistrations()).filter(r=>r.scope===ownScope).forEach(r=>r.unregister())}
+    if(window.caches){(await caches.keys()).filter(k=>k.startsWith(SITE.prefix+'-')).forEach(k=>caches.delete(k))}
   }catch(e){console.warn(e)}
 }
 /** Explicit, user-triggered data deletion (Settings page). Never runs automatically. */
@@ -903,7 +940,7 @@ async function deleteAllLocalData(){
   try{
     db=null;
     await deleteDatabase();
-    try{localStorage.removeItem(DATA_VERSION_KEY);localStorage.removeItem('assetbook-data-token')}catch(e){}
+    try{localStorage.removeItem(DATA_VERSION_KEY);localStorage.removeItem(SITE.prefix+'-data-token')}catch(e){}
     await clearAppCaches();
     location.reload();
   }catch(error){toast(error.message||'Unable to delete the local database.',true)}
@@ -966,8 +1003,8 @@ async function init(){
   initTheme();
   // Self-heal: an old cached index.html without the new elements -> drop caches once and reload.
   if(!document.getElementById('generatePdfReport')||!document.getElementById('pdfViewerModal')||!document.getElementById('incomeTrendChart')){
-    if(!sessionStorage.getItem('assetbook-healed')){
-      sessionStorage.setItem('assetbook-healed','1');
+    if(!sessionStorage.getItem(SITE.prefix+'-healed')){
+      sessionStorage.setItem(SITE.prefix+'-healed','1');
       await clearAppCaches();location.reload();return;
     }
   }
@@ -1068,7 +1105,7 @@ function initTheme(){
   btn.onclick=()=>{
     const next=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';
     document.documentElement.setAttribute('data-theme',next);
-    try{localStorage.setItem('assetbook-theme',next)}catch(e){}
+    try{localStorage.setItem(SITE.prefix+'-theme',next)}catch(e){}
     const meta=document.getElementById('metaThemeColor');
     if(meta)meta.setAttribute('content',next==='dark'?'#0b1020':'#4f46e5');
     if(db&&currentPage==='dashboard')renderCharts(dashboardBalanceRecords());
@@ -8582,9 +8619,9 @@ async function deleteMigration(id){
      guarded by isRestoring and only fills an EMPTY database, so launching never
      overwrites data that already exists on this device.
    ========================================================================== */
-const GOOGLE_DRIVE_CLIENT_ID='232563199720-sn7bke2332p585r4jlcaflvjhjfk0ut8.apps.googleusercontent.com';
+const GOOGLE_DRIVE_CLIENT_ID=SITE.clientId;
 const GOOGLE_DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
-const GOOGLE_DRIVE_FOLDER='PersonalFinance_Backups';
+const GOOGLE_DRIVE_FOLDER=SITE.driveFolder;
 const GOOGLE_DRIVE_BACKUP_LIMIT=15;
 const GOOGLE_DRIVE_KEEP_DAILY=7;     // plus the newest backup of each of the last 7 older days
 const GOOGLE_DRIVE_KEEP_WEEKLY=4;    // plus the newest backup of each of the last 4 older weeks
@@ -8592,7 +8629,9 @@ const GOOGLE_DRIVE_KEEP_SAFETY=5;    // pre-restore safety copies (assetbook-kee
 const GOOGLE_DRIVE_API='https://www.googleapis.com/drive/v3';
 const GOOGLE_DRIVE_UPLOAD='https://www.googleapis.com/upload/drive/v3';
 const GOOGLE_DRIVE_AUTO_BACKUP_DELAY=5000;
-const GOOGLE_DRIVE_FOLDER_KEY='assetbook-drive-folder-id';
+const GOOGLE_DRIVE_AUTO_SYNC_INTERVAL=30000;
+const GOOGLE_DRIVE_RESUME_CHECK_INTERVAL=60000;
+const GOOGLE_DRIVE_FOLDER_KEY=SITE.prefix+'-drive-folder-id';
 let appReady=false;
 let isRestoring=false;
 let googleDriveTokenClientInstance=null;
@@ -8602,6 +8641,10 @@ let googleDriveFolderId='';
 let googleDriveBusy=false;
 let googleDriveBackupTimer=null;
 let googleDriveStatus='';
+let googleDriveDirty=false;
+let googleDriveChangeVersion=0;
+let googleDriveLastAutoSyncAt=0;
+let googleDriveAutoSyncPromise=null;
 
 function driveSyncEnabled(){return !!(state.settings&&state.settings.driveSyncEnabled)}
 function driveConnected(){return !!(googleDriveAccessToken&&Date.now()<googleDriveTokenExpiry-60000)}
@@ -8653,6 +8696,7 @@ function waitForGoogleIdentity(timeout=6000){
 /** Google Identity Services token client (created lazily; the script loads async). */
 let googleDriveTokenHandler=null;
 function driveTokenClient(){
+  if(/PASTE_YOUR_NEW_CLIENT_ID/.test(GOOGLE_DRIVE_CLIENT_ID))throw new Error('Set main.clientId in SITE_PROFILES (top of app.js) to your Google Cloud Client ID first.');
   if(!(window.google&&google.accounts&&google.accounts.oauth2))return null;
   if(!googleDriveTokenClientInstance){
     googleDriveTokenClientInstance=google.accounts.oauth2.initTokenClient({
@@ -8965,13 +9009,15 @@ function googleDriveSafetyName(date=new Date()){
  * Best-effort safety copy of the CURRENT data, saved right before it is replaced by a restore.
  * Silent (no popup) and never blocks or fails the restore itself. Returns true when saved.
  */
-async function saveDriveSafetySnapshot(reason){
+async function saveDriveSafetySnapshot(reason,options={}){
   if(!driveSyncEnabled())return false;
   let locked=false;
   try{
-    clearTimeout(googleDriveBackupTimer);googleDriveBackupTimer=null;
-    await waitForDriveIdle();
-    googleDriveBusy=true;locked=true;
+    if(!options.holdsLock){
+      clearTimeout(googleDriveBackupTimer);googleDriveBackupTimer=null;
+      await waitForDriveIdle();
+      googleDriveBusy=true;locked=true;
+    }
     await ensureDriveToken(false);
     const snapshot=await AssetBookDB.snapshot();
     if(!(snapshot.records.length||snapshot.incomeExpenses.length||snapshot.officePurchases.length))return false;
@@ -8987,6 +9033,119 @@ async function saveDriveSafetySnapshot(reason){
   }
 }
 
+/** Local-only bookkeeping: "this device is now in step with Drive backup <fileName>". */
+async function markDriveInSync(fileName){
+  const fingerprint=await snapshotFingerprint(await AssetBookDB.snapshot());
+  const now=new Date().toISOString();
+  state.settings.driveLastBackupName=fileName;
+  state.settings.driveLastSnapshotHash=fingerprint;
+  state.settings.driveLastSyncedAt=now;
+  await put('settings',{key:'driveLastBackupName',value:fileName});
+  await put('settings',{key:'driveLastSnapshotHash',value:fingerprint});
+  await put('settings',{key:'driveLastSyncedAt',value:now});
+}
+async function reloadSettingsState(){
+  await loadState();
+  state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
+}
+/** Replaces this device's data with a Drive backup and records that the device is now in step with it. */
+async function pullDriveBackup(file,interactive){
+  isRestoring=true;                                   // no auto-backup while the database is rewritten
+  try{
+    const snapshot=await googleDriveDownload(file.id,interactive);
+    const summary=await AssetBookDB.restore(snapshot,'replace');
+    await reloadSettingsState();
+    await markDriveInSync(file.name);
+    if(appReady)renderAll();
+    return summary;
+  }finally{isRestoring=false}
+}
+/** Server-side copy of a Drive backup into the protected safety set (assetbook-keep-*). */
+async function googleDriveCopyAsSafety(file,interactive){
+  const folderId=await googleDriveFolder(interactive);
+  await googleDriveJson(`${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file.id)}/copy?fields=id`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:googleDriveSafetyName(),parents:[folderId]})
+  },interactive);
+  await googleDrivePruneSafety(interactive);
+}
+/** Asks which data to keep when both Drive (other device) and this device changed. */
+function askDriveConflict(latest){
+  return new Promise(resolve=>{
+    const modal=$el('driveConflictModal');
+    const when=latest&&latest.createdTime?new Date(latest.createdTime).toLocaleString():'';
+    $el('driveConflictText').textContent=`Google Drive has newer data${when?` (${when})` :''} saved from another device, and this device also has changes that Drive does not have yet. Nothing has been overwritten. Choose what to keep.`;
+    let done=false;
+    const finish=choice=>{
+      if(done)return;done=true;
+      modal.onclose=null;
+      if(modal.open)modal.close();
+      resolve(choice);
+    };
+    modal.querySelectorAll('[data-drive-choice]').forEach(button=>{button.onclick=()=>finish(button.dataset.driveChoice)});
+    modal.onclose=()=>finish('later');
+    modal.showModal();
+  });
+}
+/**
+ * Multi-device safety check, run BEFORE every upload. Drive's newest backup is compared with the
+ * last backup this device uploaded/loaded:
+ *   same            -> nothing new in Drive, go ahead.
+ *   newer in Drive, this device unchanged  -> silently load Drive's data (action 'pulled').
+ *   newer in Drive AND changed here        -> ask: merge / use Drive / keep this device / later.
+ * Returns {action:'proceed'|'upload'|'pulled'|'cancel', files}.
+ */
+async function reconcileWithDrive(interactive){
+  const files=await googleDriveList(interactive);
+  const latest=files[0];
+  if(!latest)return {action:'proceed',files};
+  const base=state.settings.driveLastBackupName||'';
+  if(base&&latest.name===base)return {action:'proceed',files};
+  const snapshot=await AssetBookDB.snapshot();
+  const hasData=!!(snapshot.records.length||snapshot.incomeExpenses.length||snapshot.officePurchases.length);
+  let localUnchanged=!hasData;
+  if(!localUnchanged&&base){
+    const fingerprint=await snapshotFingerprint(snapshot);
+    if(fingerprint&&state.settings.driveLastSnapshotHash){
+      localUnchanged=state.settings.driveLastSnapshotHash===fingerprint;
+    }else if(fingerprint){
+      // Older app version never stored a fingerprint: compare with the backup this device last uploaded.
+      const baseFile=files.find(file=>file.name===base);
+      if(baseFile){
+        try{localUnchanged=(await snapshotFingerprint(await googleDriveDownload(baseFile.id,interactive)))===fingerprint}catch(error){localUnchanged=false}
+      }
+    }
+  }
+  if(localUnchanged){
+    const summary=await pullDriveBackup(latest,interactive);
+    toast(`Loaded newer data from Google Drive (saved on another device): ${summary.records} record(s)`);
+    return {action:'pulled',files};
+  }
+  const choice=await askDriveConflict(latest);
+  if(choice==='drive'){
+    const kept=await saveDriveSafetySnapshot('before using Drive data',{holdsLock:true,interactive});
+    await pullDriveBackup(latest,interactive);
+    toast(`This device now uses the data from Google Drive.${kept?' Your previous data is kept as a safety copy in Drive.':''}`);
+    return {action:'pulled',files};
+  }
+  if(choice==='merge'){
+    await saveDriveSafetySnapshot('before merging with Drive',{holdsLock:true,interactive});
+    isRestoring=true;
+    try{
+      await AssetBookDB.restore(await googleDriveDownload(latest.id,interactive),'merge');
+      await reloadSettingsState();
+      if(appReady)renderAll();
+    }finally{isRestoring=false}
+    toast('Merged: records from Google Drive were added to this device. Uploading the combined data…');
+    return {action:'upload',files};
+  }
+  if(choice==='local'){
+    try{await googleDriveCopyAsSafety(latest,interactive)}catch(error){console.info('[drive] could not keep a copy of the Drive backup',error)}
+    return {action:'upload',files};
+  }
+  return {action:'cancel',files};
+}
+
 /** Creates a new backup, uploads it, then prunes everything past the newest 15. */
 async function syncGoogleDrive(options={}){
   const interactive=options.interactive!==false;
@@ -8998,11 +9157,24 @@ async function syncGoogleDrive(options={}){
   setDriveStatus(silent?'Auto-backing up…':'Syncing…');
   let saved=false;
   try{
+    // Several devices share one Drive folder: look at Drive BEFORE uploading, so an older device
+    // can never overwrite data that another device saved later.
+    const reconciled=await reconcileWithDrive(interactive);
+    if(reconciled.action==='cancel'){
+      googleDriveStatus='Paused — Google Drive has newer data from another device. Click Sync Now to choose what to keep.';
+      if(!silent)toast('Nothing was uploaded. Drive has newer data from another device.',true);
+      return false;
+    }
+    if(reconciled.action==='pulled'){
+      googleDriveStatus='Connected — loaded the newer data from Google Drive.';
+      return true;
+    }
+    const forceUpload=!!options.force||reconciled.action==='upload';
     const snapshot=await AssetBookDB.snapshot();
     const fingerprint=await snapshotFingerprint(snapshot);
-    if(fingerprint&&!options.force&&state.settings.driveLastSnapshotHash===fingerprint&&state.settings.driveLastBackupName){
+    if(fingerprint&&!forceUpload&&state.settings.driveLastSnapshotHash===fingerprint&&state.settings.driveLastBackupName){
       // Nothing changed since the last upload: only skip while that backup still exists in Drive.
-      const existing=await googleDriveList(interactive);
+      const existing=reconciled.files;
       if(existing.some(file=>file.name===state.settings.driveLastBackupName)){
         const stamp=new Date().toISOString();
         state.settings.driveLastSyncedAt=stamp;
@@ -9100,6 +9272,7 @@ async function restoreLatestGoogleDriveBackup(interactive=false){
     const summary=await AssetBookDB.restore(snapshot,'replace');
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
+    await markDriveInSync(files[0].name);
     googleDriveStatus=`Restored the latest backup (${files[0].name}).`;
     if(appReady)renderAll();
     toast(`Restored Google Drive backup: ${summary.records} record(s), ${summary.documents} PDF(s)`);
@@ -9176,6 +9349,7 @@ async function restoreSelectedGoogleDriveBackup(){
 /** Called from init(): paints the card, then silently reconnects and restores an empty database. */
 async function initGoogleDriveSync(){
   renderDriveSyncCard();
+  setupDriveResumeCheck();
   if(!driveSyncEnabled())return;
   if(navigator.onLine===false){
     googleDriveStatus='Offline — Google Drive sync resumes when you are back online.';
@@ -9197,18 +9371,89 @@ async function initGoogleDriveSync(){
   }
   await googleDriveAutoRestore();
   renderDriveSyncCard();
+  // Pick up (or safely reconcile with) data another device saved while this one was closed.
+  driveLastResumeCheck=Date.now();
+  try{await syncGoogleDrive({silent:true,interactive:false})}catch(error){console.info('[drive] startup sync skipped',error)}
+  renderDriveSyncCard();
+}
+let driveLastResumeCheck=0;
+/** A phone app that stays open in the background wakes up with old data: check Drive when it returns to the foreground. */
+function setupDriveResumeCheck(){
+  if(setupDriveResumeCheck.done)return;
+  setupDriveResumeCheck.done=true;
+  const onLifecycle=(checkDrive)=>{
+    if(!driveSyncEnabled()||!appReady||isRestoring)return;
+    if(navigator.onLine===false){
+      googleDriveStatus='Offline — Google Drive sync resumes when you are back online.';
+      renderDriveSyncCard();
+      return;
+    }
+    if(checkDrive&&document.querySelector('dialog[open]')&&!googleDriveDirty)return;
+    if(googleDriveDirty){
+      clearTimeout(googleDriveBackupTimer);
+      googleDriveBackupTimer=null;
+      runDriveAutoSync();
+    }else if(checkDrive){
+      runDriveAutoSync(true);
+    }
+  };
+  document.addEventListener('visibilitychange',()=>onLifecycle(document.visibilityState==='visible'));
+  window.addEventListener('pagehide',()=>onLifecycle(false));
+  window.addEventListener('online',()=>onLifecycle(document.visibilityState==='visible'));
+  window.addEventListener('focus',()=>onLifecycle(true));
+  window.addEventListener('resume',()=>onLifecycle(true));
+  document.addEventListener('resume',()=>onLifecycle(true));
 }
 
-/** Debounced auto-backup after local mutations (loadState / category saves call this). */
+/** Debounced backup after persisted local mutations; Drive metadata writes are excluded. */
 function scheduleDriveAutoBackup(){
   if(isRestoring||!appReady||!driveSyncEnabled())return;
-  if(!driveConnected())return;
+  googleDriveDirty=true;
+  googleDriveChangeVersion++;
+  queueDriveAutoBackup(Math.max(GOOGLE_DRIVE_AUTO_BACKUP_DELAY,GOOGLE_DRIVE_AUTO_SYNC_INTERVAL-(Date.now()-googleDriveLastAutoSyncAt)));
+}
+function queueDriveAutoBackup(delay){
   clearTimeout(googleDriveBackupTimer);
   googleDriveBackupTimer=setTimeout(()=>{
     googleDriveBackupTimer=null;
-    if(isRestoring||!driveConnected())return;
-    syncGoogleDrive({silent:true,interactive:false}).catch(error=>console.info('[drive] auto-backup skipped',error));
-  },GOOGLE_DRIVE_AUTO_BACKUP_DELAY);
+    runDriveAutoSync();
+  },Math.max(0,delay));
+}
+async function runDriveAutoSync(checkDrive=false){
+  if(isRestoring||!appReady||!driveSyncEnabled()||navigator.onLine===false)return false;
+  if(!googleDriveDirty&&!checkDrive)return false;
+  if(!googleDriveDirty&&Date.now()-driveLastResumeCheck<GOOGLE_DRIVE_RESUME_CHECK_INTERVAL)return false;
+  if(googleDriveAutoSyncPromise)return googleDriveAutoSyncPromise;
+  if(googleDriveBusy){
+    if(googleDriveDirty)queueDriveAutoBackup(GOOGLE_DRIVE_AUTO_BACKUP_DELAY);
+    return false;
+  }
+  const wait=GOOGLE_DRIVE_AUTO_SYNC_INTERVAL-(Date.now()-googleDriveLastAutoSyncAt);
+  if(wait>0){
+    if(googleDriveDirty)queueDriveAutoBackup(wait);
+    return false;
+  }
+  const changeVersion=googleDriveChangeVersion;
+  googleDriveLastAutoSyncAt=Date.now();
+  if(checkDrive)driveLastResumeCheck=Date.now();
+  const task=(async()=>{
+    try{
+      await ensureDriveToken(false);
+      const synced=await syncGoogleDrive({silent:true,interactive:false});
+      if(synced&&changeVersion===googleDriveChangeVersion)googleDriveDirty=false;
+      return synced;
+    }catch(error){
+      googleDriveStatus=error.message||'Google Drive auto-sync failed.';
+      renderDriveSyncCard();
+      console.info('[drive] auto-sync skipped',error);
+      return false;
+    }finally{
+      googleDriveAutoSyncPromise=null;
+      if(googleDriveDirty&&changeVersion!==googleDriveChangeVersion)queueDriveAutoBackup(GOOGLE_DRIVE_AUTO_BACKUP_DELAY);
+    }
+  })();
+  googleDriveAutoSyncPromise=task;
+  return task;
 }
 
 /* ==========================================================================

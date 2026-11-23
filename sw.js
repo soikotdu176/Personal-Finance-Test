@@ -1,13 +1,15 @@
 /* Personal Finance service worker - offline-first caching for the app shell and CDN libraries. */
-const VERSION = 'v16.22.2';
-const SHELL_CACHE = `assetbook-shell-${VERSION}`;
-const RUNTIME_CACHE = `assetbook-runtime-${VERSION}`;
+const VERSION = 'v16.23.1';
+// Same file serves the Test and the Main site (same origin): cache names follow the scope URL.
+const PREFIX = /test/i.test(self.registration.scope) ? 'assetbook' : 'pf';
+const SHELL_CACHE = `${PREFIX}-shell-${VERSION}`;
+const RUNTIME_CACHE = `${PREFIX}-runtime-${VERSION}`;
 
 const SHELL_ASSETS = [
   './',
   'index.html',
   'styles.css?v=32',
-  'app.js?v=41',
+  'app.js?v=43',
   'manifest.json',
   'icons/icon.svg',
   'icons/icon-192.png',
@@ -45,7 +47,7 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter(k => k.startsWith('assetbook-') && k !== SHELL_CACHE && k !== RUNTIME_CACHE).map(k => caches.delete(k)));
+    await Promise.all(keys.filter(k => k.startsWith(PREFIX + '-') && k !== SHELL_CACHE && k !== RUNTIME_CACHE).map(k => caches.delete(k)));
     await self.clients.claim();
   })());
 });
