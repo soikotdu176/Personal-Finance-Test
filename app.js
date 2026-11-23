@@ -8965,13 +8965,15 @@ function googleDriveSafetyName(date=new Date()){
  * Best-effort safety copy of the CURRENT data, saved right before it is replaced by a restore.
  * Silent (no popup) and never blocks or fails the restore itself. Returns true when saved.
  */
-async function saveDriveSafetySnapshot(reason){
+async function saveDriveSafetySnapshot(reason,options={}){
   if(!driveSyncEnabled())return false;
   let locked=false;
   try{
-    clearTimeout(googleDriveBackupTimer);googleDriveBackupTimer=null;
-    await waitForDriveIdle();
-    googleDriveBusy=true;locked=true;
+    if(!options.holdsLock){
+      clearTimeout(googleDriveBackupTimer);googleDriveBackupTimer=null;
+      await waitForDriveIdle();
+      googleDriveBusy=true;locked=true;
+    }
     await ensureDriveToken(false);
     const snapshot=await AssetBookDB.snapshot();
     if(!(snapshot.records.length||snapshot.incomeExpenses.length||snapshot.officePurchases.length))return false;
@@ -8987,6 +8989,119 @@ async function saveDriveSafetySnapshot(reason){
   }
 }
 
+/** Local-only bookkeeping: "this device is now in step with Drive backup <fileName>". */
+async function markDriveInSync(fileName){
+  const fingerprint=await snapshotFingerprint(await AssetBookDB.snapshot());
+  const now=new Date().toISOString();
+  state.settings.driveLastBackupName=fileName;
+  state.settings.driveLastSnapshotHash=fingerprint;
+  state.settings.driveLastSyncedAt=now;
+  await put('settings',{key:'driveLastBackupName',value:fileName});
+  await put('settings',{key:'driveLastSnapshotHash',value:fingerprint});
+  await put('settings',{key:'driveLastSyncedAt',value:now});
+}
+async function reloadSettingsState(){
+  await loadState();
+  state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
+}
+/** Replaces this device's data with a Drive backup and records that the device is now in step with it. */
+async function pullDriveBackup(file,interactive){
+  isRestoring=true;                                   // no auto-backup while the database is rewritten
+  try{
+    const snapshot=await googleDriveDownload(file.id,interactive);
+    const summary=await AssetBookDB.restore(snapshot,'replace');
+    await reloadSettingsState();
+    await markDriveInSync(file.name);
+    if(appReady)renderAll();
+    return summary;
+  }finally{isRestoring=false}
+}
+/** Server-side copy of a Drive backup into the protected safety set (assetbook-keep-*). */
+async function googleDriveCopyAsSafety(file,interactive){
+  const folderId=await googleDriveFolder(interactive);
+  await googleDriveJson(`${GOOGLE_DRIVE_API}/files/${encodeURIComponent(file.id)}/copy?fields=id`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:googleDriveSafetyName(),parents:[folderId]})
+  },interactive);
+  await googleDrivePruneSafety(interactive);
+}
+/** Asks which data to keep when both Drive (other device) and this device changed. */
+function askDriveConflict(latest){
+  return new Promise(resolve=>{
+    const modal=$el('driveConflictModal');
+    const when=latest&&latest.createdTime?new Date(latest.createdTime).toLocaleString():'';
+    $el('driveConflictText').textContent=`Google Drive has newer data${when?` (${when})` :''} saved from another device, and this device also has changes that Drive does not have yet. Nothing has been overwritten. Choose what to keep.`;
+    let done=false;
+    const finish=choice=>{
+      if(done)return;done=true;
+      modal.onclose=null;
+      if(modal.open)modal.close();
+      resolve(choice);
+    };
+    modal.querySelectorAll('[data-drive-choice]').forEach(button=>{button.onclick=()=>finish(button.dataset.driveChoice)});
+    modal.onclose=()=>finish('later');
+    modal.showModal();
+  });
+}
+/**
+ * Multi-device safety check, run BEFORE every upload. Drive's newest backup is compared with the
+ * last backup this device uploaded/loaded:
+ *   same            -> nothing new in Drive, go ahead.
+ *   newer in Drive, this device unchanged  -> silently load Drive's data (action 'pulled').
+ *   newer in Drive AND changed here        -> ask: merge / use Drive / keep this device / later.
+ * Returns {action:'proceed'|'upload'|'pulled'|'cancel', files}.
+ */
+async function reconcileWithDrive(interactive){
+  const files=await googleDriveList(interactive);
+  const latest=files[0];
+  if(!latest)return {action:'proceed',files};
+  const base=state.settings.driveLastBackupName||'';
+  if(base&&latest.name===base)return {action:'proceed',files};
+  const snapshot=await AssetBookDB.snapshot();
+  const hasData=!!(snapshot.records.length||snapshot.incomeExpenses.length||snapshot.officePurchases.length);
+  let localUnchanged=!hasData;
+  if(!localUnchanged&&base){
+    const fingerprint=await snapshotFingerprint(snapshot);
+    if(fingerprint&&state.settings.driveLastSnapshotHash){
+      localUnchanged=state.settings.driveLastSnapshotHash===fingerprint;
+    }else if(fingerprint){
+      // Older app version never stored a fingerprint: compare with the backup this device last uploaded.
+      const baseFile=files.find(file=>file.name===base);
+      if(baseFile){
+        try{localUnchanged=(await snapshotFingerprint(await googleDriveDownload(baseFile.id,interactive)))===fingerprint}catch(error){localUnchanged=false}
+      }
+    }
+  }
+  if(localUnchanged){
+    const summary=await pullDriveBackup(latest,interactive);
+    toast(`Loaded newer data from Google Drive (saved on another device): ${summary.records} record(s)`);
+    return {action:'pulled',files};
+  }
+  const choice=await askDriveConflict(latest);
+  if(choice==='drive'){
+    const kept=await saveDriveSafetySnapshot('before using Drive data',{holdsLock:true,interactive});
+    await pullDriveBackup(latest,interactive);
+    toast(`This device now uses the data from Google Drive.${kept?' Your previous data is kept as a safety copy in Drive.':''}`);
+    return {action:'pulled',files};
+  }
+  if(choice==='merge'){
+    await saveDriveSafetySnapshot('before merging with Drive',{holdsLock:true,interactive});
+    isRestoring=true;
+    try{
+      await AssetBookDB.restore(await googleDriveDownload(latest.id,interactive),'merge');
+      await reloadSettingsState();
+      if(appReady)renderAll();
+    }finally{isRestoring=false}
+    toast('Merged: records from Google Drive were added to this device. Uploading the combined data…');
+    return {action:'upload',files};
+  }
+  if(choice==='local'){
+    try{await googleDriveCopyAsSafety(latest,interactive)}catch(error){console.info('[drive] could not keep a copy of the Drive backup',error)}
+    return {action:'upload',files};
+  }
+  return {action:'cancel',files};
+}
+
 /** Creates a new backup, uploads it, then prunes everything past the newest 15. */
 async function syncGoogleDrive(options={}){
   const interactive=options.interactive!==false;
@@ -8998,11 +9113,24 @@ async function syncGoogleDrive(options={}){
   setDriveStatus(silent?'Auto-backing up…':'Syncing…');
   let saved=false;
   try{
+    // Several devices share one Drive folder: look at Drive BEFORE uploading, so an older device
+    // can never overwrite data that another device saved later.
+    const reconciled=await reconcileWithDrive(interactive);
+    if(reconciled.action==='cancel'){
+      googleDriveStatus='Paused — Google Drive has newer data from another device. Click Sync Now to choose what to keep.';
+      if(!silent)toast('Nothing was uploaded. Drive has newer data from another device.',true);
+      return false;
+    }
+    if(reconciled.action==='pulled'){
+      googleDriveStatus='Connected — loaded the newer data from Google Drive.';
+      return true;
+    }
+    const forceUpload=!!options.force||reconciled.action==='upload';
     const snapshot=await AssetBookDB.snapshot();
     const fingerprint=await snapshotFingerprint(snapshot);
-    if(fingerprint&&!options.force&&state.settings.driveLastSnapshotHash===fingerprint&&state.settings.driveLastBackupName){
+    if(fingerprint&&!forceUpload&&state.settings.driveLastSnapshotHash===fingerprint&&state.settings.driveLastBackupName){
       // Nothing changed since the last upload: only skip while that backup still exists in Drive.
-      const existing=await googleDriveList(interactive);
+      const existing=reconciled.files;
       if(existing.some(file=>file.name===state.settings.driveLastBackupName)){
         const stamp=new Date().toISOString();
         state.settings.driveLastSyncedAt=stamp;
@@ -9100,6 +9228,7 @@ async function restoreLatestGoogleDriveBackup(interactive=false){
     const summary=await AssetBookDB.restore(snapshot,'replace');
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
+    await markDriveInSync(files[0].name);
     googleDriveStatus=`Restored the latest backup (${files[0].name}).`;
     if(appReady)renderAll();
     toast(`Restored Google Drive backup: ${summary.records} record(s), ${summary.documents} PDF(s)`);
@@ -9176,6 +9305,7 @@ async function restoreSelectedGoogleDriveBackup(){
 /** Called from init(): paints the card, then silently reconnects and restores an empty database. */
 async function initGoogleDriveSync(){
   renderDriveSyncCard();
+  setupDriveResumeCheck();
   if(!driveSyncEnabled())return;
   if(navigator.onLine===false){
     googleDriveStatus='Offline — Google Drive sync resumes when you are back online.';
@@ -9197,6 +9327,26 @@ async function initGoogleDriveSync(){
   }
   await googleDriveAutoRestore();
   renderDriveSyncCard();
+  // Pick up (or safely reconcile with) data another device saved while this one was closed.
+  driveLastResumeCheck=Date.now();
+  try{await syncGoogleDrive({silent:true,interactive:false})}catch(error){console.info('[drive] startup sync skipped',error)}
+  renderDriveSyncCard();
+}
+let driveLastResumeCheck=0;
+/** A phone app that stays open in the background wakes up with old data: check Drive when it returns to the foreground. */
+function setupDriveResumeCheck(){
+  if(setupDriveResumeCheck.done)return;
+  setupDriveResumeCheck.done=true;
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState!=='visible'||!driveSyncEnabled()||isRestoring||googleDriveBusy)return;
+    if(navigator.onLine===false||Date.now()-driveLastResumeCheck<60000)return;
+    if(document.querySelector('dialog[open]'))return;            // never interrupt a form the person is filling in
+    driveLastResumeCheck=Date.now();
+    (async()=>{
+      try{await ensureDriveToken(false);await syncGoogleDrive({silent:true,interactive:false})}
+      catch(error){console.info('[drive] resume check skipped',error)}
+    })();
+  });
 }
 
 /** Debounced auto-backup after local mutations (loadState / category saves call this). */
