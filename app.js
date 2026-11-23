@@ -6,10 +6,36 @@
      - PDF blobs live in their own store, so start-up never loads megabytes of PDFs
    ========================================================================== */
 
-const DB_NAME = 'AssetBookDB';
+/* =====================================================================================
+   SITE PROFILE - the SAME files run as the Test site and as the Main site.
+   The profile is chosen from the URL, so copying files between the two folders needs NO edits:
+     .../Personal-Finance-Test/  (path contains "test")  ->  Test profile
+     .../Personal-Finance/       (anything else)         ->  Main profile
+   Both sites share the origin soikotdu176.github.io, so every browser-side name must differ.
+   The ONLY thing to fill in once: main.clientId = Client ID of the "Personal Finance" Google Cloud project.
+   ===================================================================================== */
+const SITE_PROFILES = {
+  test: {
+    prefix: 'assetbook',                          // localStorage / sessionStorage / cache-name prefix
+    dbName: 'AssetBookDB',                        // IndexedDB database
+    driveFolder: 'PersonalFinance_Backups',       // Google Drive folder
+    clientId: '232563199720-sn7bke2332p585r4jlcaflvjhjfk0ut8.apps.googleusercontent.com',
+    seedProject: true                             // Test only: import the Project/ workbooks into an empty database
+  },
+  main: {
+    prefix: 'pf',
+    dbName: 'PF',
+    driveFolder: 'PF_Backup',
+    clientId: '587017846090-evhpra2iegie48q2t49fv71invkumte8.apps.googleusercontent.com',
+    seedProject: false                            // never auto-import (private workbooks must not be deployed)
+  }
+};
+const SITE = /test/i.test(location.pathname) ? SITE_PROFILES.test : SITE_PROFILES.main;
+
+const DB_NAME = SITE.dbName;
 const DB_VERSION = 6;                       // v6: protected settingsStore keeps the Major Head / Category / Subcategory tree
 const APP_VERSION = '2026-11-21-v13';
-const DATA_VERSION_KEY = 'assetbook-data-version';
+const DATA_VERSION_KEY = SITE.prefix + '-data-version';
 let db;
 let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [], officePurchases: [], categoryStructureMeta: {} };
 let charts = {};
@@ -112,13 +138,13 @@ const ACCOUNTS = ['Cash In Hand','Basic Bank PLC','DBBL','Bkash','Rocket','Nagad
 /* Workbooks kept in the local Project/ folder. They are loaded once into an empty
    database (same pipeline as Settings -> Import) so the Dashboard shows the complete
    finances on first launch. Existing local data is never replaced. */
-const PROJECT_DATASET = [
+const PROJECT_DATASET = !SITE.seedProject ? [] : [
   'Project/Assets & Liabilities.xlsx',
   'Project/Income & Expenses.xlsx',
   'Project/Office Purchase & Bill.xlsx',
   'Project/budge-01-07-2026-31-07-2026_1795143633525.csv'
 ];
-const PROJECT_DATASET_FLAG = 'assetbook-project-dataset';
+const PROJECT_DATASET_FLAG = SITE.prefix + '-project-dataset';
 
 /* ---------- IndexedDB helpers ---------- */
 function openDB() {
@@ -892,8 +918,10 @@ function deleteDatabase(){
 }
 async function clearAppCaches(){
   try{
-    if('serviceWorker' in navigator){(await navigator.serviceWorker.getRegistrations()).forEach(r=>r.unregister())}
-    if(window.caches){(await caches.keys()).forEach(k=>caches.delete(k))}
+    // Only this site's service worker and caches: the other site lives on the same origin.
+    const ownScope=new URL('./',location.href).href;
+    if('serviceWorker' in navigator){(await navigator.serviceWorker.getRegistrations()).filter(r=>r.scope===ownScope).forEach(r=>r.unregister())}
+    if(window.caches){(await caches.keys()).filter(k=>k.startsWith(SITE.prefix+'-')).forEach(k=>caches.delete(k))}
   }catch(e){console.warn(e)}
 }
 /** Explicit, user-triggered data deletion (Settings page). Never runs automatically. */
@@ -903,7 +931,7 @@ async function deleteAllLocalData(){
   try{
     db=null;
     await deleteDatabase();
-    try{localStorage.removeItem(DATA_VERSION_KEY);localStorage.removeItem('assetbook-data-token')}catch(e){}
+    try{localStorage.removeItem(DATA_VERSION_KEY);localStorage.removeItem(SITE.prefix+'-data-token')}catch(e){}
     await clearAppCaches();
     location.reload();
   }catch(error){toast(error.message||'Unable to delete the local database.',true)}
@@ -966,8 +994,8 @@ async function init(){
   initTheme();
   // Self-heal: an old cached index.html without the new elements -> drop caches once and reload.
   if(!document.getElementById('generatePdfReport')||!document.getElementById('pdfViewerModal')||!document.getElementById('incomeTrendChart')){
-    if(!sessionStorage.getItem('assetbook-healed')){
-      sessionStorage.setItem('assetbook-healed','1');
+    if(!sessionStorage.getItem(SITE.prefix+'-healed')){
+      sessionStorage.setItem(SITE.prefix+'-healed','1');
       await clearAppCaches();location.reload();return;
     }
   }
@@ -1068,7 +1096,7 @@ function initTheme(){
   btn.onclick=()=>{
     const next=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';
     document.documentElement.setAttribute('data-theme',next);
-    try{localStorage.setItem('assetbook-theme',next)}catch(e){}
+    try{localStorage.setItem(SITE.prefix+'-theme',next)}catch(e){}
     const meta=document.getElementById('metaThemeColor');
     if(meta)meta.setAttribute('content',next==='dark'?'#0b1020':'#4f46e5');
     if(db&&currentPage==='dashboard')renderCharts(dashboardBalanceRecords());
@@ -8582,9 +8610,9 @@ async function deleteMigration(id){
      guarded by isRestoring and only fills an EMPTY database, so launching never
      overwrites data that already exists on this device.
    ========================================================================== */
-const GOOGLE_DRIVE_CLIENT_ID='232563199720-sn7bke2332p585r4jlcaflvjhjfk0ut8.apps.googleusercontent.com';
+const GOOGLE_DRIVE_CLIENT_ID=SITE.clientId;
 const GOOGLE_DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
-const GOOGLE_DRIVE_FOLDER='PersonalFinance_Backups';
+const GOOGLE_DRIVE_FOLDER=SITE.driveFolder;
 const GOOGLE_DRIVE_BACKUP_LIMIT=15;
 const GOOGLE_DRIVE_KEEP_DAILY=7;     // plus the newest backup of each of the last 7 older days
 const GOOGLE_DRIVE_KEEP_WEEKLY=4;    // plus the newest backup of each of the last 4 older weeks
@@ -8592,7 +8620,7 @@ const GOOGLE_DRIVE_KEEP_SAFETY=5;    // pre-restore safety copies (assetbook-kee
 const GOOGLE_DRIVE_API='https://www.googleapis.com/drive/v3';
 const GOOGLE_DRIVE_UPLOAD='https://www.googleapis.com/upload/drive/v3';
 const GOOGLE_DRIVE_AUTO_BACKUP_DELAY=5000;
-const GOOGLE_DRIVE_FOLDER_KEY='assetbook-drive-folder-id';
+const GOOGLE_DRIVE_FOLDER_KEY=SITE.prefix+'-drive-folder-id';
 let appReady=false;
 let isRestoring=false;
 let googleDriveTokenClientInstance=null;
@@ -8653,6 +8681,7 @@ function waitForGoogleIdentity(timeout=6000){
 /** Google Identity Services token client (created lazily; the script loads async). */
 let googleDriveTokenHandler=null;
 function driveTokenClient(){
+  if(/PASTE_YOUR_NEW_CLIENT_ID/.test(GOOGLE_DRIVE_CLIENT_ID))throw new Error('Set main.clientId in SITE_PROFILES (top of app.js) to your Google Cloud Client ID first.');
   if(!(window.google&&google.accounts&&google.accounts.oauth2))return null;
   if(!googleDriveTokenClientInstance){
     googleDriveTokenClientInstance=google.accounts.oauth2.initTokenClient({
