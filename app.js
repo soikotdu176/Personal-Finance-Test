@@ -34,7 +34,7 @@ const SITE = /test/i.test(location.pathname) ? SITE_PROFILES.test : SITE_PROFILE
 
 const DB_NAME = SITE.dbName;
 const DB_VERSION = 6;                       // v6: protected settingsStore keeps the Major Head / Category / Subcategory tree
-const APP_VERSION = '2026-11-21-v13';
+const APP_VERSION = '2026-11-24-v14';
 const DATA_VERSION_KEY = SITE.prefix + '-data-version';
 let db;
 let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [], officePurchases: [], categoryStructureMeta: {} };
@@ -65,6 +65,15 @@ let officeYearChosen = false;
 const officeFilters = { years: null, type: '', account: '', category: '', search: '' };
 let officeYearMenuOpen = false;
 const officeDocDraft = { existing: [], removed: new Set(), added: [] };
+let zakatState = {
+  hijriStart:'4 Dhu al-Qadah 1447',gregorianStart:'',hijriEnd:'',gregorianEnd:'',
+  nisab:189000,nisabReference:'',cash:0,bank:0,investments:0,roi:0,receivables:0,liabilities:0,
+  referencePdf:null,
+  gold:[{name:'Ring',carat:'21',grams:2.75,rate:20205}],
+  payments:[]
+};
+let zakatRecords = [];
+let activeSavedZakatId = null;
 
 const defaultCategories = [
   {id:'c-bank-loan',type:'Liability',name:'Bank Loan',subcategories:['Bank Loan'],order:0},
@@ -914,7 +923,10 @@ async function checkDataVersion(){
   try{stored=localStorage.getItem(DATA_VERSION_KEY)}catch(e){}
   if(stored===APP_VERSION)return;
   let hasData=false;
-  try{hasData=(await getAll('records')).length>0||(await getAll('documents')).length>0||(await getAll('incomeExpenses')).length>0}catch(e){}
+  try{
+    const settings=await getAll('settings');
+    hasData=(await getAll('records')).length>0||(await getAll('documents')).length>0||(await getAll('incomeExpenses')).length>0||settings.some(item=>item.key==='zakat'||item.key==='zakatRecords'&&Array.isArray(item.value)&&item.value.length>0);
+  }catch(e){}
   try{localStorage.setItem(DATA_VERSION_KEY,APP_VERSION)}catch(e){}
   if(!hasData)return;
   toast('App updated. All saved records were kept - create a backup from Data Backup & Restore.');
@@ -983,7 +995,7 @@ function showFatal(error){
  */
 async function loadProjectDataset(){
   if(!window.XLSX)return 0;
-  if(state.records.length||state.incomeExpenses.length)return 0;
+  if(state.records.length||state.incomeExpenses.length||hasZakatData())return 0;
   try{if(localStorage.getItem(PROJECT_DATASET_FLAG))return 0}catch(e){}
   let imported=0;
   for(const path of PROJECT_DATASET){
@@ -1024,6 +1036,7 @@ async function init(){
   state.settings.currency ||= 'BDT';
   state.settings.locale ||= 'en-BD';
   state.settings.incomeYears ||= ['2026-27','2025-26','2024-25','2023-24','2022-23'];
+  loadZakatState();
   // Google Drive: silent sign-in; restores the newest backup only when the local database is empty.
   await initGoogleDriveSync();
   // Fill an empty database from Project/ before the first render so the Dashboard is complete.
@@ -1031,6 +1044,7 @@ async function init(){
   await reconcileOfficeCarryForwards();
   bindNavigation();
   bindGlobalActions();
+  bindZakatEvents();
   bindDelegatedActions();
   bindDashboardChartToggles();
   renderAll();
@@ -1120,7 +1134,7 @@ function initTheme(){
 /* ==========================================================================
    Navigation (sidebar + mobile bottom bar) with animated active pill
    ========================================================================== */
-const PAGE_TITLES={dashboard:['Dashboard','Financial overview'],records:['Assets & Liabilities','Manage financial records'],incomeExpenses:['Income & Expenses','Track cash flow, income and spending'],officePurchases:['Office Purchase & Bill','FY-wise office outflow, inflow and cash & bank effects'],balance:['Balance Sheet','Consolidated financial position'],backup:['Data Backup & Restore','Portable data management'],settings:['Settings','Application preferences']};
+const PAGE_TITLES={dashboard:['Dashboard','Financial overview'],records:['Assets & Liabilities','Manage financial records'],incomeExpenses:['Income & Expenses','Track cash flow, income and spending'],balance:['Balance Sheet','Consolidated financial position'],zakat:['Zakat','Nisab, assets and distribution ledger'],officePurchases:['Office Purchase & Bill','FY-wise office outflow, inflow and cash & bank effects'],backup:['Data Backup & Restore','Portable data management'],settings:['Settings','Application preferences']};
 
 function playEnter(panel){
   if(!panel)return;
@@ -1203,6 +1217,7 @@ function showPage(page){
   if(page==='records')renderRecordSections();
   if(page==='incomeExpenses')renderIncomePage();
   if(page==='balance')renderBalance();
+  if(page==='zakat')renderZakat();
   if(page==='officePurchases')renderOfficePage();
   if(page==='backup')renderBackupHistory();
   if(page==='settings')renderSettings();
@@ -1495,6 +1510,10 @@ function bindDelegatedActions(){
       case 'view-office': viewOfficeEntry(id); break;
       case 'delete-office': await deleteOfficeEntry(id); break;
       case 'office-page': officePage=Number(id)||1; renderOfficeTable(); break;
+      case 'delete-zakat-gold': zakatState.gold.splice(Number(id),1); await saveZakatState(); break;
+      case 'delete-zakat-payment': zakatState.payments=(zakatState.payments||[]).filter(payment=>payment.id!==id); await saveZakatState(); break;
+      case 'load-zakat-record': loadSavedZakatRecord(id); break;
+      case 'delete-zakat-record': await deleteSavedZakatRecord(id); break;
     }
   });
 }
@@ -1516,6 +1535,370 @@ function renderAll(){
   renderSettings();
   renderBackupHistory();
   renderBalance();
+  renderZakat();
+}
+
+const ZAKAT_CATEGORIES=[
+  ['Fakir','A person who has no nisab-level wealth and lacks the means to meet basic needs.'],
+  ['Miskeen','A person with no food or essential means, or whose hardship prevents basic needs from being met.'],
+  ['Amileen','Officials authorized to collect, safeguard and distribute Zakat; payment may come from Zakat funds as compensation.'],
+  ['Muallafat al-Qulub','New Muslims or people whose hearts may be won toward Islam.'],
+  ['Kritadas / Enslaved Persons','People unlawfully captive or enslaved, including captives who need rescue and release.'],
+  ['Debtors','People burdened with debt who lack sufficient means to repay; the debt must not fund prohibited conduct.'],
+  ['Fi Sabilillah','Eligible disadvantaged travelers, mujahideen needing necessary equipment, and needy students or sincere Islamic workers unable to earn.'],
+  ['Ibn al-Sabil','A traveler in hardship who has insufficient means and cannot reach support.']
+];
+
+function loadZakatState(){
+  try{
+    if(state.settings&&state.settings.zakat&&typeof state.settings.zakat==='object'){
+      zakatState=Object.assign(zakatState,state.settings.zakat);
+    }
+    zakatRecords=Array.isArray(state.settings&&state.settings.zakatRecords)?state.settings.zakatRecords:[];
+    activeSavedZakatId=zakatState.activeSavedRecordId||null;
+    delete zakatState.silverGrams;
+    delete zakatState.silverRate;
+    delete zakatState.silverBhori;
+    delete zakatState.basis;
+    if(!zakatState.nisabReference)zakatState.nisabReference='';
+    if(!zakatState.referencePdf||typeof zakatState.referencePdf!=='object')zakatState.referencePdf=null;
+  }catch(error){console.warn('Zakat settings could not be loaded',error)}
+}
+function gregorianToHijri(dateValue){
+  const match=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateValue||''));
+  if(!match)return '';
+  const [,yearText,monthText,dayText]=match;
+  const date=new Date(0);
+  date.setUTCHours(0,0,0,0);
+  date.setUTCFullYear(Number(yearText),Number(monthText)-1,Number(dayText));
+  if(date.getUTCFullYear()!==Number(yearText)||date.getUTCMonth()!==Number(monthText)-1||date.getUTCDate()!==Number(dayText))return '';
+  const months=['Muharram','Safar','Rabi al-Awwal','Rabi al-Thani','Jumada al-Awwal','Jumada al-Thani','Rajab','Shaban','Ramadan','Shawwal','Dhu al-Qadah','Dhu al-Hijjah'];
+  for(const calendar of ['islamic-umalqura','islamic']){
+    try{
+      const formatter=new Intl.DateTimeFormat(`en-u-ca-${calendar}-nu-latn`,{day:'numeric',month:'numeric',year:'numeric',timeZone:'UTC'});
+      if(formatter.resolvedOptions().calendar!==calendar)continue;
+      const parts=formatter.formatToParts(date);
+      const part=type=>parts.find(item=>item.type===type)?.value;
+      const day=part('day'),month=Number(part('month')),year=part('year');
+      if(day&&month>=1&&month<=months.length&&Number(year)>0)return `${day} ${months[month-1]} ${year}`;
+    }catch(error){
+      continue;
+    }
+  }
+  return '';
+}
+async function saveZakatState(render=true){
+  state.settings.zakat=JSON.parse(JSON.stringify(zakatState));
+  await put('settings',{key:'zakat',value:state.settings.zakat});
+  if(render)renderZakat();
+}
+function zakatNumber(value){const number=Number(value);return Number.isFinite(number)?number:0}
+function getZakatValues(){
+  const cash=zakatNumber(zakatState.cash)+zakatNumber(zakatState.bank)+zakatNumber(zakatState.investments)+zakatNumber(zakatState.roi)+zakatNumber(zakatState.receivables)-zakatNumber(zakatState.liabilities);
+  const gold=(zakatState.gold||[]).reduce((sum,row)=>sum+zakatNumber(row.grams)*zakatNumber(row.rate)*0.83,0);
+  const wealth=cash+gold;
+  const payable=wealth>=zakatNumber(zakatState.nisab)?wealth*0.025:0;
+  const paid=(zakatState.payments||[]).reduce((sum,payment)=>sum+zakatNumber(payment.amount),0);
+  return {cash,gold,wealth,payable,paid,balance:Math.max(0,payable-paid)};
+}
+function renderZakat(){
+  if(!document.getElementById('zakatPage'))return;
+  const values=getZakatValues();
+  const fields={
+    zakatHijriStart:zakatState.hijriStart,zakatGregorianStart:zakatState.gregorianStart,
+    zakatHijriEnd:zakatState.hijriEnd,zakatGregorianEnd:zakatState.gregorianEnd,
+    zakatNisab:zakatState.nisab,zakatNisabReference:zakatState.nisabReference,zakatCash:zakatState.cash,zakatBank:zakatState.bank,
+    zakatInvestments:zakatState.investments,zakatRoi:zakatState.roi,
+    zakatReceivables:zakatState.receivables,zakatLiabilities:zakatState.liabilities
+  };
+  Object.entries(fields).forEach(([id,value])=>{const el=document.getElementById(id);if(el&&document.activeElement!==el)el.value=value==null?'':value});
+  $el('zakatNetCashLabel').textContent=`Net Cash: ${formatMoney(values.cash)}`;
+  $el('zakatGoldLabel').textContent=`Zakatable: ${formatMoney(values.gold)}`;
+  $el('zakatWealth').textContent=formatMoney(values.wealth);
+  $el('zakatPayable').textContent=formatMoney(values.payable);
+  $el('zakatPaid').textContent=formatMoney(values.paid);
+  $el('zakatBalance').textContent=formatMoney(values.balance);
+  const reference=zakatState.referencePdf;
+  const referenceInfo=$el('zakatReferencePdfInfo');
+  const referenceActions=$el('zakatReferencePdfActions');
+  if(reference&&reference.name){
+    referenceInfo.textContent=`${reference.name} · ${formatFileSize(Number(reference.size)||0)}`;
+    referenceActions.classList.remove('hidden');
+  }else{
+    referenceInfo.textContent='No PDF attached';
+    referenceActions.classList.add('hidden');
+  }
+  const status=$el('zakatStatus');
+  const meets=zakatNumber(zakatState.nisab)>0&&values.wealth>=zakatNumber(zakatState.nisab);
+  status.textContent=meets?'Meets Nisab':'Below Nisab';
+  status.className='zakat-status '+(meets?'met':'');
+  $el('zakatGoldRows').innerHTML=(zakatState.gold||[]).map((row,index)=>{
+    const value=zakatNumber(row.grams)*zakatNumber(row.rate)*0.83;
+    return `<tr><td><input data-zakat-gold="${index}" data-zakat-field="name" value="${esc(row.name||'')}"></td><td><select data-zakat-gold="${index}" data-zakat-field="carat"><option ${row.carat==='22'?'selected':''}>22</option><option ${row.carat==='21'?'selected':''}>21</option><option ${row.carat==='18'?'selected':''}>18</option><option ${row.carat==='Traditional'?'selected':''}>Traditional</option></select></td><td><input type="number" min="0" step="0.01" data-zakat-gold="${index}" data-zakat-field="grams" value="${esc(row.grams)}"></td><td><input type="number" min="0" step="0.01" data-zakat-gold="${index}" data-zakat-field="rate" value="${esc(row.rate)}"></td><td>${formatMoney(value)} <button type="button" class="action-link danger" data-cmd="delete-zakat-gold" data-id="${index}" aria-label="Delete gold row">×</button></td></tr>`;
+  }).join('')||'<tr><td colspan="5"><div class="empty-state">No gold ornaments added.</div></td></tr>';
+  $el('zakatPaymentRows').innerHTML=(zakatState.payments||[]).slice().sort((a,b)=>String(b.date).localeCompare(String(a.date))).map(payment=>{
+    return `<tr><td>${esc(payment.date||'')}</td><td>${esc(payment.category||'')}</td><td>${formatMoney(payment.amount)}</td><td>${esc(payment.note||'')}</td><td><button type="button" class="action-link danger" data-cmd="delete-zakat-payment" data-id="${esc(payment.id)}" aria-label="Delete payment">×</button></td></tr>`;
+  }).join('')||'<tr><td colspan="5"><div class="empty-state">No Zakat payments recorded.</div></td></tr>';
+  $el('zakatCategoryGuide').innerHTML=ZAKAT_CATEGORIES.map((item,index)=>`<div class="zakat-guide-item"><strong>${index+1}. ${esc(item[0])}</strong><p>${esc(item[1])}</p></div>`).join('');
+  renderZakatSavedRecords();
+  renderZakatDashboard();
+}
+
+function zakatRecordDate(record){
+  return String(record.gregorianEnd||record.gregorianStart||record.savedAt||'').slice(0,10);
+}
+function getFilteredZakatRecords(){
+  const from=$el('zakatFilterFrom')?.value||'';
+  const to=$el('zakatFilterTo')?.value||'';
+  const status=$el('zakatFilterStatus')?.value||'';
+  return zakatRecords.filter(record=>{
+    const date=zakatRecordDate(record);
+    const start=String(record.gregorianStart||date).slice(0,10);
+    const end=String(record.gregorianEnd||date).slice(0,10);
+    if(from&&end&&end<from)return false;
+    if(to&&start&&start>to)return false;
+    if(status==='met'&&!record.meetsNisab)return false;
+    if(status==='below'&&record.meetsNisab)return false;
+    return true;
+  }).sort((a,b)=>String(b.savedAt||'').localeCompare(String(a.savedAt||'')));
+}
+function renderZakatSavedRecords(){
+  const rows=$el('zakatSavedRecordRows');
+  if(!rows)return;
+  const count=$el('zakatSavedRecordCount');
+  if(count)count.textContent=`${zakatRecords.length} record${zakatRecords.length===1?'':'s'}`;
+  rows.innerHTML=zakatRecords.slice().sort((a,b)=>String(b.savedAt||'').localeCompare(String(a.savedAt||''))).map(record=>
+    `<tr><td>${esc(record.savedAt?new Date(record.savedAt).toLocaleDateString():'')}</td><td>${esc([record.hijriStart,record.hijriEnd].filter(Boolean).join(' – ')||'—')}</td><td>${formatMoney(record.wealth)}</td><td>${formatMoney(record.payable)}</td><td>${formatMoney(record.paid)}</td><td>${formatMoney(record.balance)}</td><td>${(record.payments||[]).length}</td><td><button type="button" class="action-link" data-cmd="load-zakat-record" data-id="${esc(record.id)}">Load</button> <button type="button" class="action-link danger" data-cmd="delete-zakat-record" data-id="${esc(record.id)}">Delete</button></td></tr>`
+  ).join('')||'<tr><td colspan="8"><div class="empty-state">No Zakat records saved yet. Save a calculation to keep a dated record.</div></td></tr>';
+}
+function renderZakatDashboard(){
+  const table=$el('zakatDashboardTable');
+  const cards=$el('zakatDashboardCards');
+  if(!table||!cards)return;
+  const records=getFilteredZakatRecords();
+  const total=(key)=>records.reduce((sum,record)=>sum+zakatNumber(record[key]),0);
+  const data=[
+    ['Saved Records',records.length,'var(--primary-soft)','var(--primary-2)','records'],
+    ['Net Zakat Wealth',total('wealth'),'rgba(14,165,233,.12)','#0284c7','money'],
+    ['Zakat Payable',total('payable'),'rgba(245,158,11,.14)','#d97706','money'],
+    ['Payments Made',total('paid'),'var(--emerald-soft)','#059669','money'],
+    ['Outstanding Balance',total('balance'),'var(--rose-soft)','#e11d48','money']
+  ];
+  cards.innerHTML=data.map((item,index)=>`<div class="summary-card" style="--i:${index};--kpi:${item[2]};--kpi-ink:${item[3]}"><div class="summary-icon">${icon(item[4]==='records'?'list':'scale')}</div><div><p>${item[0]}</p><strong class="kpi-value">${item[4]==='money'?formatMoney(item[1]):item[1]}</strong></div></div>`).join('');
+  const count=$el('zakatDashboardRecordCount');
+  if(count)count.textContent=`${records.length} saved record${records.length===1?'':'s'} match the filters`;
+  table.innerHTML=`<thead><tr><th>Period</th><th>Saved</th><th>Status</th><th class="num">Wealth</th><th class="num">Payable</th><th class="num">Paid</th><th class="num">Balance</th><th>Payments</th></tr></thead><tbody>${records.map(record=>`<tr><td>${esc([record.hijriStart,record.hijriEnd].filter(Boolean).join(' – ')||zakatRecordDate(record)||'—')}</td><td>${esc(record.savedAt?new Date(record.savedAt).toLocaleDateString():'')}</td><td>${record.meetsNisab?'Meets Nisab':'Below Nisab'}</td><td class="num">${formatMoney(record.wealth)}</td><td class="num">${formatMoney(record.payable)}</td><td class="num">${formatMoney(record.paid)}</td><td class="num">${formatMoney(record.balance)}</td><td>${(record.payments||[]).length}</td></tr>`).join('')||'<tr><td colspan="8"><div class="empty-state">No saved Zakat records match the selected filters.</div></td></tr>'}</tbody>`;
+}
+function setZakatView(view){
+  const selected=view==='dashboard'?'dashboard':'entry';
+  document.querySelectorAll('[data-zakat-view]').forEach(button=>{
+    const active=button.dataset.zakatView===selected;
+    button.classList.toggle('active',active);
+    button.setAttribute('aria-selected',String(active));
+  });
+  document.querySelectorAll('[data-zakat-panel]').forEach(panel=>panel.classList.toggle('hidden',panel.id!==(selected==='dashboard'?'zakatDashboardView':'zakatEntryView')));
+  if(selected==='dashboard')renderZakatDashboard();
+}
+async function saveZakatRecord(){
+  const values=getZakatValues();
+  const id=activeSavedZakatId||uid('zakat-record');
+  const calculation=JSON.parse(JSON.stringify(zakatState));
+  delete calculation.referencePdf;
+  delete calculation.activeSavedRecordId;
+  const record={
+    id,savedAt:new Date().toISOString(),
+    hijriStart:String(zakatState.hijriStart||''),hijriEnd:String(zakatState.hijriEnd||''),
+    gregorianStart:String(zakatState.gregorianStart||''),gregorianEnd:String(zakatState.gregorianEnd||''),
+    nisab:zakatNumber(zakatState.nisab),wealth:values.wealth,payable:values.payable,
+    paid:values.paid,balance:values.balance,meetsNisab:zakatNumber(zakatState.nisab)>0&&values.wealth>=zakatNumber(zakatState.nisab),
+    payments:JSON.parse(JSON.stringify(zakatState.payments||[])),calculation
+  };
+  const index=zakatRecords.findIndex(item=>item.id===id);
+  if(index<0)zakatRecords.push(record);else zakatRecords[index]=record;
+  activeSavedZakatId=null;
+  delete zakatState.activeSavedRecordId;
+  state.settings.zakatRecords=JSON.parse(JSON.stringify(zakatRecords));
+  state.settings.zakat=JSON.parse(JSON.stringify(zakatState));
+  await putMany('settings',[
+    {key:'zakat',value:state.settings.zakat},
+    {key:'zakatRecords',value:state.settings.zakatRecords}
+  ]);
+  renderZakat();
+  toast(index<0?'Zakat record saved':'Zakat record updated');
+}
+function loadSavedZakatRecord(id){
+  const record=zakatRecords.find(item=>item.id===id);
+  if(!record||!record.calculation)return;
+  const referencePdf=zakatState.referencePdf;
+  zakatState=Object.assign({},zakatState,JSON.parse(JSON.stringify(record.calculation)),{referencePdf,activeSavedRecordId:record.id});
+  activeSavedZakatId=record.id;
+  saveZakatState();
+  setZakatView('entry');
+  toast('Saved Zakat record loaded');
+}
+async function deleteSavedZakatRecord(id){
+  zakatRecords=zakatRecords.filter(record=>record.id!==id);
+  if(activeSavedZakatId===id){
+    activeSavedZakatId=null;
+    delete zakatState.activeSavedRecordId;
+    await saveZakatState(false);
+  }
+  state.settings.zakatRecords=JSON.parse(JSON.stringify(zakatRecords));
+  await put('settings',{key:'zakatRecords',value:state.settings.zakatRecords});
+  renderZakat();
+}
+function zakatReportRows(records){
+  return records.map(record=>[
+    [record.hijriStart,record.hijriEnd].filter(Boolean).join(' – ')||zakatRecordDate(record),
+    record.gregorianStart||'',record.gregorianEnd||'',record.meetsNisab?'Meets Nisab':'Below Nisab',
+    zakatNumber(record.nisab),zakatNumber(record.wealth),zakatNumber(record.payable),
+    zakatNumber(record.paid),zakatNumber(record.balance),(record.payments||[]).length
+  ]);
+}
+function zakatPaymentRows(records){
+  return records.flatMap(record=>(record.payments||[]).map(payment=>[
+    [record.hijriStart,record.hijriEnd].filter(Boolean).join(' – '),
+    payment.date||'',payment.category||'',Number(payment.amount)||0,payment.note||''
+  ]));
+}
+function exportZakatExcel(){
+  const records=getFilteredZakatRecords();
+  if(!records.length){toast('No saved Zakat records match the current filters.',true);return}
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const workbook=XLSX.utils.book_new();
+  const sheet=XLSX.utils.aoa_to_sheet([
+    ['Period','Gregorian Start','Gregorian End','Nisab Status','Nisab (BDT)','Wealth (BDT)','Payable (BDT)','Paid (BDT)','Balance (BDT)','Payment Count'],
+    ...zakatReportRows(records)
+  ]);
+  sheet['!cols']=[{wch:28},{wch:16},{wch:16},{wch:16},{wch:16},{wch:18},{wch:18},{wch:18},{wch:18},{wch:16}];
+  XLSX.utils.book_append_sheet(workbook,sheet,'Zakat Records');
+  const paymentSheet=XLSX.utils.aoa_to_sheet([
+    ['Period','Date','Distribution Category','Amount (BDT)','Note'],
+    ...zakatPaymentRows(records)
+  ]);
+  paymentSheet['!cols']=[{wch:28},{wch:14},{wch:28},{wch:18},{wch:42}];
+  XLSX.utils.book_append_sheet(workbook,paymentSheet,'Payments');
+  XLSX.writeFile(workbook,`Zakat-Report-${todayISO()}.xlsx`);
+  toast('Zakat Excel report exported');
+}
+function exportZakatPdf(){
+  const records=getFilteredZakatRecords();
+  if(!records.length){toast('No saved Zakat records match the current filters.',true);return}
+  const JsPDF=window.jspdf&&window.jspdf.jsPDF;
+  if(!JsPDF){toast('PDF library is unavailable. Check your internet connection.',true);return}
+  const doc=new JsPDF({orientation:'landscape',unit:'pt',format:'a4',compress:true});
+  if(typeof doc.autoTable!=='function'){toast('PDF table plugin is unavailable. Check your internet connection.',true);return}
+  doc.setProperties({title:'Zakat Report',creator:'Personal Finance'});
+  const margin=32;
+  doc.setFont('helvetica','bold');doc.setFontSize(18);doc.text('Zakat Dashboard Report',margin,34);
+  doc.setFont('helvetica','normal');doc.setFontSize(9);doc.text(`Generated ${generatedStamp()} · ${records.length} saved record(s)`,margin,50);
+  doc.autoTable({
+    startY:64,head:[['Period','Gregorian Start','Gregorian End','Status','Nisab','Wealth','Payable','Paid','Balance','Payments']],
+    body:zakatReportRows(records).map(row=>[row[0],row[1],row[2],row[3],...row.slice(4,9).map(value=>Number(value).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})),row[9]]),
+    margin:{left:margin,right:margin},styles:{fontSize:8,cellPadding:5,overflow:'linebreak'},
+    headStyles:{fillColor:[79,70,229]},columnStyles:{0:{cellWidth:105}}
+  });
+  const payments=zakatPaymentRows(records);
+  if(payments.length){
+    let y=doc.lastAutoTable.finalY+22;
+    if(y+40>doc.internal.pageSize.getHeight()){doc.addPage();y=36}
+    doc.setFont('helvetica','bold');doc.setFontSize(12);doc.text('Distribution / Payment Details',margin,y);
+    doc.autoTable({
+      startY:y+8,head:[['Period','Date','Distribution Category','Amount (BDT)','Note']],
+      body:payments.map(row=>[row[0],row[1],row[2],Number(row[3]).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}),row[4]]),
+      margin:{left:margin,right:margin},styles:{fontSize:8,cellPadding:5,overflow:'linebreak'},
+      headStyles:{fillColor:[16,185,129]},columnStyles:{0:{cellWidth:105},4:{cellWidth:190}}
+    });
+  }
+  doc.save(`Zakat-Report-${todayISO()}.pdf`);
+  toast('Zakat PDF report exported');
+}
+function bindZakatEvents(){
+  document.querySelectorAll('[data-zakat-view]').forEach(button=>button.onclick=()=>setZakatView(button.dataset.zakatView));
+  $el('saveZakatRecord').onclick=()=>saveZakatRecord().catch(error=>{console.error(error);toast(error.message||'Zakat record could not be saved.',true)});
+  ['zakatFilterFrom','zakatFilterTo','zakatFilterStatus'].forEach(id=>{
+    const input=$el(id);
+    if(input)input.oninput=renderZakatDashboard;
+  });
+  $el('zakatFilterClear').onclick=()=>{
+    $el('zakatFilterFrom').value='';$el('zakatFilterTo').value='';$el('zakatFilterStatus').value='';
+    renderZakatDashboard();
+  };
+  $el('exportZakatExcel').onclick=exportZakatExcel;
+  $el('exportZakatPdf').onclick=exportZakatPdf;
+  const fields={
+    zakatHijriStart:'hijriStart',zakatGregorianStart:'gregorianStart',zakatHijriEnd:'hijriEnd',
+    zakatGregorianEnd:'gregorianEnd',zakatNisab:'nisab',zakatNisabReference:'nisabReference',zakatCash:'cash',zakatBank:'bank',
+    zakatInvestments:'investments',zakatRoi:'roi',zakatReceivables:'receivables',
+    zakatLiabilities:'liabilities'
+  };
+  Object.entries(fields).forEach(([id,key])=>{
+    const el=document.getElementById(id);if(!el)return;
+    if(key==='gregorianStart'||key==='gregorianEnd'){
+      const hijriKey=key==='gregorianStart'?'hijriStart':'hijriEnd';
+      const hijriInput=$el(key==='gregorianStart'?'zakatHijriStart':'zakatHijriEnd');
+      const updateDates=()=>{
+        const gregorianValue=el.value;
+        const hijriValue=gregorianToHijri(gregorianValue);
+        if(zakatState[key]===gregorianValue&&zakatState[hijriKey]===hijriValue)return;
+        zakatState[key]=gregorianValue;
+        zakatState[hijriKey]=hijriValue;
+        hijriInput.value=hijriValue;
+        saveZakatState();
+      };
+      el.addEventListener('input',updateDates);
+      el.addEventListener('change',updateDates);
+      return;
+    }
+    el.oninput=()=>{zakatState[key]=el.type==='number'?zakatNumber(el.value):el.value;saveZakatState()};
+  });
+  $el('zakatReferencePdf').onchange=async e=>{
+    const file=e.target.files&&e.target.files[0];if(!file)return;
+    if(file.type!=='application/pdf'&&!String(file.name).toLowerCase().endsWith('.pdf')){toast('Please choose a PDF file.',true);e.target.value='';return}
+    if(file.size>25*1024*1024){toast('The Reference PDF must be 25 MB or smaller.',true);e.target.value='';return}
+    try{
+      zakatState.referencePdf={name:file.name,type:file.type||'application/pdf',size:file.size,data:await blobToBase64(file)};
+      await saveZakatState();
+      toast('Reference PDF attached');
+    }catch(error){console.error(error);toast('Reference PDF could not be attached.',true)}
+  };
+  $el('zakatViewReferencePdf').onclick=()=>{
+    const reference=zakatState.referencePdf;
+    if(!reference||!reference.data){toast('No Reference PDF attached.',true);return}
+    const url=URL.createObjectURL(base64ToBlob(reference.data,reference.type||'application/pdf'));
+    window.open(url,'_blank','noopener');
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+  };
+  $el('zakatRemoveReferencePdf').onclick=async()=>{
+    zakatState.referencePdf=null;
+    const input=$el('zakatReferencePdf');if(input)input.value='';
+    await saveZakatState();
+    toast('Reference PDF removed');
+  };
+  $el('zakatAddGold').onclick=()=>{zakatState.gold=zakatState.gold||[];zakatState.gold.push({name:'',carat:'21',grams:0,rate:20205});saveZakatState()};
+  $el('zakatAddPayment').onclick=async()=>{
+    const date=window.prompt('Payment date (YYYY-MM-DD)',new Date().toISOString().slice(0,10));if(!date)return;
+    const category=window.prompt('Distribution category',ZAKAT_CATEGORIES[0][0]);if(category===null)return;
+    const amountText=window.prompt('Payment amount','0');if(amountText===null)return;
+    const note=window.prompt('Payment note','')||'';
+    zakatState.payments=zakatState.payments||[];
+    zakatState.payments.push({id:uid('zakat-payment'),date,category,note,amount:zakatNumber(amountText)});
+    await saveZakatState();
+  };
+  $el('zakatGoldRows').oninput=e=>{
+    const input=e.target.closest('[data-zakat-gold]');if(!input)return;
+    const index=Number(input.dataset.zakatGold),key=input.dataset.zakatField;
+    if(!zakatState.gold[index])return;
+    zakatState.gold[index][key]=input.type==='number'?zakatNumber(input.value):input.value;
+    saveZakatState();
+  };
+  $el('zakatGoldRows').onchange=e=>{
+    const input=e.target.closest('[data-zakat-gold]');if(!input)return;
+    const index=Number(input.dataset.zakatGold),key=input.dataset.zakatField;
+    if(!zakatState.gold[index])return;
+    zakatState.gold[index][key]=input.type==='number'?zakatNumber(input.value):input.value;
+    saveZakatState();
+  };
 }
 
 /* ==========================================================================
@@ -4598,9 +4981,16 @@ async function performRestore(){
     await mergeCategoryStructure(backup.categoryStructure||{categories:backup.categories||[],incomeGroups});
     // Old backups still use the "Cash" labels: align them with the definitive Cash & Bank Account.
     await migrateLegacyCashRecords();
-    for(const [key,value] of Object.entries(backup.settings||{})){if(/^drive/i.test(key))continue;await put('settings',{key,value})}   // Drive sync state stays local
+    for(const [key,value] of Object.entries(backup.settings||{})){
+      if(/^drive/i.test(key))continue;
+      const restoredValue=mode==='merge'&&key==='zakatRecords'
+        ?mergeZakatRecordLists((await getOne('settings',key))?.value,value)
+        :value;
+      await put('settings',{key,value:restoredValue});
+    }   // Drive sync state stays local
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,s)=>(out[s.key]=s.value,out),state.settings||{});
+    loadZakatState();
     renderAll();
     toast(`Backup restored: ${backup.records?.length||0} record(s), ${incomeExpenses.length} transaction(s), ${officePurchases.length} office entr${officePurchases.length===1?'y':'ies'} and ${blobs.length} document(s)${safetySaved?' · Drive safety copy of the previous data saved':''}`);
     restoreOk=true;
@@ -9299,6 +9689,26 @@ function base64ToBlob(data,type){
   for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
   return new Blob([bytes],{type:type||'application/pdf'});
 }
+function mergeZakatRecordLists(local=[],incoming=[]){
+  const records=new Map();
+  [...(Array.isArray(local)?local:[]),...(Array.isArray(incoming)?incoming:[])].forEach(record=>{
+    if(record&&record.id&&!records.has(record.id))records.set(record.id,record);
+  });
+  return [...records.values()];
+}
+function hasZakatData(settings=state.settings){
+  const records=settings&&Array.isArray(settings.zakatRecords)?settings.zakatRecords:zakatRecords;
+  return !!((Array.isArray(records)&&records.length)||(settings&&settings.zakat));
+}
+function snapshotHasZakatData(snapshot){
+  const rows=Array.isArray(snapshot&&snapshot.settings)
+    ?snapshot.settings
+    :Object.entries(snapshot&&snapshot.settings||{}).map(([key,value])=>({key,value}));
+  return rows.some(row=>row&&row.key==='zakat')||rows.some(row=>row&&row.key==='zakatRecords'&&Array.isArray(row.value)&&row.value.length>0);
+}
+function snapshotHasData(snapshot){
+  return !!(snapshot&&(snapshot.records&&snapshot.records.length||snapshot.incomeExpenses&&snapshot.incomeExpenses.length||snapshot.officePurchases&&snapshot.officePurchases.length||snapshotHasZakatData(snapshot)));
+}
 const AssetBookDB={
   name:DB_NAME,
   stores:['records','categories','documents','documentBlobs','settings','backupHistory','incomeExpenses','incomeGroups','migrationHistory','officePurchases',SETTINGS_STORE],
@@ -9388,7 +9798,10 @@ const AssetBookDB={
     for(const row of settingsRows){
       if(!row||!row.key)continue;
       if(/^drive/i.test(String(row.key)))continue;    // Drive connection/bookkeeping stays local to this device
-      await put('settings',{key:row.key,value:row.value});
+      const value=mode==='merge'&&row.key==='zakatRecords'
+        ?mergeZakatRecordLists((await getOne('settings',row.key))?.value,row.value)
+        :row.value;
+      await put('settings',{key:row.key,value});
     }
     return {records:records.length,incomeExpenses:incomeExpenses.length,officePurchases:officePurchases.length,documents:blobs.length};
   }
@@ -9428,7 +9841,7 @@ async function saveDriveSafetySnapshot(reason,options={}){
     }
     await ensureDriveToken(false);
     const snapshot=await AssetBookDB.snapshot();
-    if(!(snapshot.records.length||snapshot.incomeExpenses.length||snapshot.officePurchases.length))return false;
+    if(!snapshotHasData(snapshot))return false;
     snapshot.safetyReason=reason||'before restore';
     await googleDriveUpload(snapshot,googleDriveSafetyName(),false);
     await googleDrivePruneSafety(false);
@@ -9455,6 +9868,7 @@ async function markDriveInSync(fileName){
 async function reloadSettingsState(){
   await loadState();
   state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
+  loadZakatState();
 }
 /** Replaces this device's data with a Drive backup and records that the device is now in step with it. */
 async function pullDriveBackup(file,interactive){
@@ -9510,7 +9924,7 @@ async function reconcileWithDrive(interactive){
   const base=state.settings.driveLastBackupName||'';
   if(base&&latest.name===base)return {action:'proceed',files};
   const snapshot=await AssetBookDB.snapshot();
-  const hasData=!!(snapshot.records.length||snapshot.incomeExpenses.length||snapshot.officePurchases.length);
+  const hasData=snapshotHasData(snapshot);
   let localUnchanged=!hasData;
   if(!localUnchanged&&base){
     const fingerprint=await snapshotFingerprint(snapshot);
@@ -9631,7 +10045,7 @@ async function connectGoogleDrive(){
     renderDriveSyncCard();
     toast('Google Drive connected');
     // New device / cleared browser: restore the newest cloud backup before uploading anything.
-    const hasLocalData=state.records.length||state.incomeExpenses.length||state.officePurchases.length;
+    const hasLocalData=state.records.length||state.incomeExpenses.length||state.officePurchases.length||hasZakatData();
     if(!hasLocalData)await restoreLatestGoogleDriveBackup(true);
     try{
       await syncGoogleDrive({silent:true,interactive:false});
@@ -9680,6 +10094,7 @@ async function restoreLatestGoogleDriveBackup(interactive=false){
     const summary=await AssetBookDB.restore(snapshot,'replace');
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
+    loadZakatState();
     await markDriveInSync(files[0].name);
     googleDriveStatus=`Restored the latest backup (${files[0].name}).`;
     if(appReady)renderAll();
@@ -9703,7 +10118,7 @@ async function restoreLatestGoogleDriveBackup(interactive=false){
 async function googleDriveAutoRestore(){
   if(isRestoring)return false;
   if(!driveSyncEnabled())return false;
-  const hasLocalData=state.records.length||state.incomeExpenses.length||state.officePurchases.length;
+  const hasLocalData=state.records.length||state.incomeExpenses.length||state.officePurchases.length||hasZakatData();
   if(hasLocalData)return false;
   return restoreLatestGoogleDriveBackup(false);
 }
@@ -9741,6 +10156,7 @@ async function restoreSelectedGoogleDriveBackup(){
     const summary=await AssetBookDB.restore(snapshot,'replace');
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
+    loadZakatState();
     renderAll();
     restoreOk=true;
     toast(`Restored from Google Drive: ${summary.records} record(s), ${summary.documents} PDF(s)${safetySaved?' · safety copy of the previous data saved':''}`);
