@@ -3917,9 +3917,9 @@ function renderRecordFilters(){
   if(!categorySelect||!subcategorySelect)return;
   const type=typeSelect?.value||'';
   const option=(value,label,selected)=>`<option value="${esc(value)}" ${selected?'selected':''}>${esc(label)}</option>`;
-  const selectedYear=isMobileViewport()?(yearSelect?.value||''):'';
+  const selectedYear=normIncomeYear(yearSelect?.value||'');
   const years=recordYearOptions();
-  const year=years.includes(normIncomeYear(selectedYear))?normIncomeYear(selectedYear):'';
+  const year=years.includes(selectedYear)?selectedYear:'';
   const categories=dashCategoryNames(type);
   if(!categories.includes(categorySelect.value))categorySelect.value='';
   categorySelect.disabled=categories.length===0;
@@ -3929,8 +3929,8 @@ function renderRecordFilters(){
   subcategorySelect.disabled=subcategories.length===0;
   subcategorySelect.innerHTML=option('','All Subcategories',!subcategorySelect.value)+subcategories.map(s=>option(s,s,subcategorySelect.value===s)).join('');
   if(yearSelect){
-    yearSelect.innerHTML=option('','All Financial Years',!year)+years.map(y=>option(y,y,y===year)).join('');
-    yearSelect.value=isMobileViewport()?year:'';
+    yearSelect.innerHTML=option('','All Income Years',!year)+years.map(y=>option(y,y,y===year)).join('');
+    yearSelect.value=year;
   }
   if(clearBtn){
     const active=!!((typeSelect?.value||'')||categorySelect.value||subcategorySelect.value||year||(document.getElementById('recordSearch')?.value||'').trim());
@@ -3954,8 +3954,8 @@ function recordYearOptions(){
 }
 
 /** Active filter criteria of the Assets & Liabilities page (search, Type, Category,
- *  Subcategory and - on mobile, exactly like the page - Financial Year). Reports and
- *  exports are triggered from this page, so they must read the same values. */
+ *  Subcategory and Income Year). Reports and exports are triggered from this page, so they
+ *  must read the same values. */
 function recordsPageFilterState(){
   const yearSelect=document.getElementById('recordYearFilter');
   return {
@@ -3963,7 +3963,7 @@ function recordsPageFilterState(){
     type:document.getElementById('recordTypeFilter')?.value||'',
     category:document.getElementById('recordCategoryFilter')?.value||'',
     subcategory:document.getElementById('recordSubcategoryFilter')?.value||'',
-    year:isMobileViewport()?normIncomeYear(yearSelect?.value||''):''
+    year:normIncomeYear(yearSelect?.value||'')
   };
 }
 /** The Assets & Liabilities records matching the active filters - exactly the rows the page
@@ -3983,16 +3983,44 @@ function recordsPageFilteredRecords(filters){
   return records;
 }
 
+let recordKpiPrev=[];
+/** Summary cards of the Assets & Liabilities page - mirrors the Income & Expenses page layout.
+ *  Transfers are listed on the page but kept out of the totals: they move existing money. */
+function renderRecordSummary(records){
+  const host=document.getElementById('recordSummaryCards');
+  if(!host)return;
+  const list=(records||recordsPageFilteredRecords()).filter(r=>!isTransferRecord(r));
+  const assets=list.filter(r=>r.type==='Asset').reduce((s,r)=>s+recordAmount(r),0);
+  const liabilities=list.filter(r=>r.type==='Liability').reduce((s,r)=>s+recordAmount(r),0);
+  const net=assets-liabilities;
+  const ratio=assets>0?(liabilities/assets)*100:0;
+  const card=(i,iconName,label,value,kind,kpi,kpiInk,cls)=>`<div class="summary-card" style="--i:${i};--kpi:${kpi};--kpi-ink:${kpiInk}"><div class="summary-icon">${icon(iconName)}</div><div><p>${label}</p><strong class="kpi-value ${cls||''}" data-kind="${kind}" data-to="${value}">${kind==='money'?formatMoney(value):kind==='percent'?(Number(value).toFixed(1)+'%'):value}</strong></div></div>`;
+  host.innerHTML=[
+    card(0,'up','Total Assets',assets,'money','var(--emerald-soft)','#059669'),
+    card(1,'down','Total Liabilities',liabilities,'money','var(--rose-soft)','#e11d48'),
+    card(2,'scale','Net Worth',net,'money','var(--primary-soft)','var(--primary-2)',net>=0?'kpi-pos':'kpi-neg'),
+    card(3,'layers','Debt Ratio',ratio,'percent','rgba(245,158,11,.13)','#d97706')
+  ].join('');
+  animateRecordKpis();
+}
+function animateRecordKpis(){
+  document.querySelectorAll('#recordSummaryCards .kpi-value').forEach((el,i)=>{
+    const to=Number(el.dataset.to)||0,kind=el.dataset.kind;
+    const from=recordKpiPrev[i]??0;
+    recordKpiPrev[i]=to;
+    const fmt=v=>kind==='money'?formatMoney(v):kind==='percent'?(Number(v).toFixed(1)+'%'):String(Math.round(v));
+    if(reducedMotion()||from===to){el.textContent=fmt(to);return}
+    const duration=900,start=performance.now();
+    const step=now=>{const t=Math.min(1,(now-start)/duration);const eased=1-Math.pow(1-t,4);el.textContent=fmt(from+(to-from)*eased);if(t<1)requestAnimationFrame(step);else el.textContent=fmt(to)};
+    el.textContent=fmt(from);requestAnimationFrame(step);
+  });
+}
 function renderRecordSections(){
   renderRecordFilters();
   const {search,type,category,subcategory,year}=recordsPageFilterState();
-  const needle=search.toLowerCase();
-  let records=state.records.filter(r=>!needle||Object.values(r).some(v=>String(v).toLowerCase().includes(needle)));
-  if(year)records=records.filter(r=>recordFinancialYear(r)===year);
-  if(type)records=records.filter(r=>r.type===type);
-  if(category)records=records.filter(r=>r.category===category);
-  if(subcategory)records=records.filter(r=>r.subcategory===subcategory);
-  records.sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  const records=recordsPageFilteredRecords({search,type,category,subcategory,year})
+    .sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  renderRecordSummary(records);
   const render=(items)=>items.map((r,i)=>{
     const transfer=isTransferRecord(r);
     const meta=transfer?transferMetaLabel(r):recordMeta(r);

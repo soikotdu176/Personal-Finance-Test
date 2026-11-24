@@ -259,7 +259,6 @@ html[data-theme="dark"] .dash-hero {
 .filters { padding: 14px 16px; margin-bottom: 16px; border-radius: 18px; }
 .filter-row, .toolbar { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 .toolbar { padding: 0 0 16px; align-items: center; }
-.mobile-record-year-filter { display: none; }
 .filter-row select, .filter-row input { min-width: 150px; }
 .toolbar select { min-width: 150px; }
 .date-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
@@ -1028,7 +1027,6 @@ dialog.modal[open]::backdrop { opacity: 1; }
     border-color: rgba(99, 102, 241, .45); background: var(--primary-soft); color: var(--primary-2);
   }
   /* Page-specific placement */
-  .mobile-record-year-filter { display: block; }
   #recordsPage .toolbar #addRecordBtn { grid-column: 1 / -1; height: 36px; min-height: 36px; }
   #recordsPage .toolbar #recordClearFilters { justify-self: end; }
   /* Reports & exports: keep the long PDF / Excel labels readable instead of clipped. */
@@ -1078,10 +1076,10 @@ dialog.modal[open]::backdrop { opacity: 1; }
   #recordsPage .record-actions { gap: 1px; padding-top: 4px; }
   #recordsPage .record-actions .action-link { min-height: 36px; padding: 0 6px; font-size: 10.5px; }
 
-  #incomeSummaryCards { gap: 8px; }
-  #incomeSummaryCards .summary-card { min-width: 0; gap: 8px; padding: 11px; }
-  #incomeSummaryCards .summary-card p { font-size: 10px; line-height: 1.2; }
-  #incomeSummaryCards .summary-card strong { margin-top: 3px; font-size: clamp(14px, 4vw, 16px); line-height: 1.2; }
+  #incomeSummaryCards, #recordSummaryCards { gap: 8px; }
+  #incomeSummaryCards .summary-card, #recordSummaryCards .summary-card { min-width: 0; gap: 8px; padding: 11px; }
+  #incomeSummaryCards .summary-card p, #recordSummaryCards .summary-card p { font-size: 10px; line-height: 1.2; }
+  #incomeSummaryCards .summary-card strong, #recordSummaryCards .summary-card strong { margin-top: 3px; font-size: clamp(14px, 4vw, 16px); line-height: 1.2; }
   #incomeExpensesPage .income-table-card { padding: 12px; }
   .income-table-card .table-toolbar { gap: 8px; }
   .income-table-card .tt-title h3 { font-size: 13px; line-height: 1.25; }
