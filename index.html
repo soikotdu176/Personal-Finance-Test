@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=34">
+  <link rel="stylesheet" href="styles.css?v=36">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -125,6 +125,7 @@
       <button class="nav-item" data-page="records"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg><b>Assets &amp; Liabilities</b></button>
       <button class="nav-item" data-page="incomeExpenses"><svg class="ic" aria-hidden="true"><use href="#i-up"/></svg><b>Income &amp; Expenses</b></button>
       <button class="nav-item" data-page="balance"><svg class="ic" aria-hidden="true"><use href="#i-scale"/></svg><b>Balance Sheet</b></button>
+      <button class="nav-item" data-page="zakat"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><b>Zakat</b></button>
       <button class="nav-item" data-page="officePurchases"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><b>Office Purchase &amp; Bill</b></button>
       <button class="nav-item" data-page="backup"><svg class="ic" aria-hidden="true"><use href="#i-backup"/></svg><b>Data Backup &amp; Restore</b></button>
       <button class="nav-item" data-page="settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg><b>Settings</b></button>
@@ -359,6 +360,125 @@
         <button class="btn" id="exportBalanceExcel"><svg class="ic" aria-hidden="true"><use href="#i-sheet"/></svg><span>Export Excel</span></button>
       </div>
       <div class="card balance-card" id="balanceSheet"></div>
+    </section>
+
+    <section class="content hidden" id="zakatPage" data-page-panel>
+      <div class="zakat-view-tabs" role="tablist" aria-label="Zakat views">
+        <button type="button" class="tab active" id="zakatEntryTab" data-zakat-view="entry" role="tab" aria-selected="true">Calculation &amp; Payments</button>
+        <button type="button" class="tab" id="zakatDashboardTab" data-zakat-view="dashboard" role="tab" aria-selected="false">Dashboard / Overview</button>
+      </div>
+      <div id="zakatEntryView" data-zakat-panel>
+      <div class="zakat-layout">
+        <div class="card zakat-card">
+          <div class="section-heading"><h3>Nisab Year</h3><span class="zakat-badge">1447-1448</span></div>
+          <div class="zakat-form-grid">
+            <label>Hijri start<input id="zakatHijriStart" placeholder="e.g. 4 Dhu al-Qadah 1447"></label>
+            <label>Gregorian start<input id="zakatGregorianStart" type="date"></label>
+            <label>Hijri end<input id="zakatHijriEnd" placeholder="e.g. 4 Dhu al-Qadah 1448"></label>
+            <label>Gregorian end<input id="zakatGregorianEnd" type="date"></label>
+            <label>Nisab threshold (BDT)<input id="zakatNisab" type="number" min="0" step="0.01"></label>
+            <label>Nisab Threshold Reference<input id="zakatNisabReference" placeholder="Reference source or value"></label>
+          </div>
+        </div>
+
+        <div class="card zakat-card zakat-reference-card">
+          <div class="section-heading"><h3>Reference PDF</h3></div>
+          <input type="file" id="zakatReferencePdf" accept="application/pdf,.pdf" hidden>
+          <label class="btn zakat-upload-label" for="zakatReferencePdf">Choose PDF</label>
+          <div id="zakatReferencePdfInfo" class="zakat-reference-info">No PDF attached</div>
+          <div id="zakatReferencePdfActions" class="zakat-reference-actions hidden">
+            <button type="button" class="btn" id="zakatViewReferencePdf">View</button>
+            <button type="button" class="btn" id="zakatRemoveReferencePdf">Remove</button>
+          </div>
+        </div>
+
+        <div class="card zakat-card">
+          <div class="section-heading"><h3>Cash &amp; Receivables / Debt</h3><span id="zakatNetCashLabel">Net Cash: ৳0.00</span></div>
+          <div class="zakat-form-grid">
+            <label>Cash in hand<input id="zakatCash" type="number" min="0" step="0.01"></label>
+            <label>Bank deposits<input id="zakatBank" type="number" min="0" step="0.01"></label>
+            <label>Investments<input id="zakatInvestments" type="number" min="0" step="0.01"></label>
+            <label>ROI<input id="zakatRoi" type="number" min="0" step="0.01"></label>
+            <label>Receivables<input id="zakatReceivables" type="number" min="0" step="0.01"></label>
+            <label>Liabilities<input id="zakatLiabilities" type="number" min="0" step="0.01"></label>
+          </div>
+          <p class="hint">Net Cash = Cash + Bank + Investments + ROI + Receivables - Liabilities</p>
+        </div>
+
+        <div class="card zakat-card">
+          <div class="section-heading"><h3>Gold Ornaments</h3><span id="zakatGoldLabel">Zakatable: ৳0.00</span><button type="button" class="btn" id="zakatAddGold">+ Add Gold</button></div>
+          <div class="zakat-table-wrap">
+            <table class="zakat-table">
+              <thead><tr><th>Ornament</th><th>Carat</th><th>Grams</th><th>Per gram price</th><th>Zakatable value</th></tr></thead>
+              <tbody id="zakatGoldRows"></tbody>
+            </table>
+          </div>
+          <p class="hint">Zakatable Value = Grams × Per-Gram Price × 0.83 · 1 bhori = 11.664 grams</p>
+        </div>
+
+        <div class="card zakat-card zakat-summary-card">
+          <div class="section-heading"><h3>Zakat Payable</h3><span id="zakatStatus" class="zakat-status">Below Nisab</span><button type="button" class="btn btn-primary" id="saveZakatRecord">Save Record</button></div>
+          <div class="zakat-summary-grid">
+            <div><span>Net zakat wealth</span><strong id="zakatWealth">৳0.00</strong></div>
+            <div><span>Payable (2.5%)</span><strong id="zakatPayable">৳0.00</strong></div>
+            <div><span>Paid</span><strong id="zakatPaid">৳0.00</strong></div>
+            <div><span>Balance</span><strong id="zakatBalance">৳0.00</strong></div>
+          </div>
+        </div>
+
+        <div class="card zakat-card">
+          <div class="section-heading"><h3>Zakat Distribution / Payment Ledger</h3><button type="button" class="btn" id="zakatAddPayment">+ Add Payment</button></div>
+          <div class="zakat-table-wrap">
+            <table class="zakat-table">
+              <thead><tr><th>Date</th><th>Distribution category</th><th>Amount</th><th>Note</th><th></th></tr></thead>
+              <tbody id="zakatPaymentRows"></tbody>
+            </table>
+          </div>
+          <p class="hint">Paid − Payable Balance: the balance is Payable minus cumulative payments.</p>
+        </div>
+
+        <div class="card zakat-card zakat-records-card">
+          <div class="section-heading"><h3>Saved Zakat Records</h3><span id="zakatSavedRecordCount" class="zakat-badge">0 records</span></div>
+          <div class="zakat-table-wrap">
+            <table class="zakat-table">
+              <thead><tr><th>Saved</th><th>Hijri period</th><th>Wealth</th><th>Payable</th><th>Paid</th><th>Balance</th><th>Payments</th><th>Actions</th></tr></thead>
+              <tbody id="zakatSavedRecordRows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card zakat-card zakat-guide">
+          <details>
+            <summary>Eight Zakat Distribution Categories &amp; Rules</summary>
+            <div id="zakatCategoryGuide"></div>
+          </details>
+        </div>
+      </div>
+      </div>
+
+      <div class="zakat-dashboard hidden" id="zakatDashboardView" data-zakat-panel>
+        <div class="filters card zakat-dashboard-filters">
+          <div class="filter-row">
+            <label>From<input type="date" id="zakatFilterFrom"></label>
+            <label>To<input type="date" id="zakatFilterTo"></label>
+            <label>Nisab status<select id="zakatFilterStatus"><option value="">All statuses</option><option value="met">Meets Nisab</option><option value="below">Below Nisab</option></select></label>
+            <button type="button" class="btn" id="zakatFilterClear">Clear filters</button>
+          </div>
+        </div>
+        <div class="cards-grid zakat-dashboard-cards" id="zakatDashboardCards"></div>
+        <div class="card table-card">
+          <div class="table-toolbar">
+            <div class="tt-title"><h3>Filtered Zakat Records</h3><p id="zakatDashboardRecordCount" aria-live="polite"></p></div>
+            <div class="tt-actions">
+              <button type="button" class="btn btn-xls" id="exportZakatExcel"><svg class="ic" aria-hidden="true"><use href="#i-sheet"/></svg><span>Export Excel</span></button>
+              <button type="button" class="btn btn-pdf" id="exportZakatPdf"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><span>Export PDF Report</span></button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="zakatDashboardTable"></table>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="content hidden" id="officePurchasesPage" data-page-panel>
@@ -830,6 +950,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=45"></script>
+  <script src="app.js?v=48"></script>
 </body>
 </html>
