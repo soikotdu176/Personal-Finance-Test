@@ -491,6 +491,7 @@ html[data-theme="dark"] .doc-chip .pdf-chip-tag { color: #fb7185; }
 .zakat-upload-label { display:inline-flex; margin:0 0 10px; cursor:pointer; }
 .zakat-reference-info { color:var(--muted); font-size:12px; }
 .zakat-reference-actions { display:flex; gap:8px; margin-top:10px; }
+.zakat-detail-reference-card { margin-top:16px; }
 .zakat-badge, .zakat-status { padding:4px 9px; border-radius:999px; background:var(--primary-soft); color:var(--primary-2); font-size:11px; font-weight:800; }
 .zakat-status.met { background:var(--emerald-soft); color:#059669; }
 .zakat-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
@@ -532,6 +533,25 @@ html[data-theme="dark"] .doc-chip .pdf-chip-tag { color: #fb7185; }
   .zakat-summary-grid div { padding:10px; }
   .zakat-summary-grid strong { font-size:15px; }
   .zakat-table { min-width:560px; }
+}
+
+/* Zakat dashboard toolbar & detail view */
+.zakat-dashboard-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
+.zakat-dashboard-toolbar h3 { margin:0; font-size:18px; }
+.zakat-dashboard-toolbar p { margin:2px 0 0; color:var(--muted); font-size:12px; }
+.zakat-dashboard-toolbar .btn { padding:0 16px; }
+#zakatDashboardTable { min-width:1500px; }
+#zakatHijriYearTable { min-width:1040px; }
+.zakat-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.zakat-detail-grid .detail-field { border:1px solid var(--line); border-radius:12px; background:var(--surface-2); padding:12px; display:flex; flex-direction:column; gap:5px; min-width:0; }
+.zakat-detail-grid .detail-field span { color:var(--muted); font-size:11px; font-weight:700; }
+.zakat-detail-grid .detail-field strong { font-size:14px; font-weight:700; word-break:break-word; }
+.zakat-detail-grid .detail-field.full { grid-column:1/-1; }
+.zakat-detail-section { margin:16px 0 8px; font-size:13px; font-weight:800; color:var(--text-2); }
+@media (max-width:768px){
+  .zakat-dashboard-toolbar { align-items:stretch; flex-direction:column; }
+  .zakat-dashboard-toolbar .btn { justify-content:center; }
+  .zakat-detail-grid { grid-template-columns:1fr; }
 }
 
 .inline-form { display: flex; gap: 8px; }
