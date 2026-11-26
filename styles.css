@@ -2401,3 +2401,8 @@ body.office-fy-open #officePurchasesPage { z-index: 1; }
   #settingsPage .storage-meter { max-width: 100%; }
 }
 
+
+.asset-deduction-select{font:inherit;font-size:.8rem;padding:4px 6px;margin-right:6px;border:1px solid var(--border,#cbd5e1);border-radius:6px;background:var(--surface,#fff);color:inherit;max-width:140px}
+
+.asset-deduction-field{display:inline-flex;align-items:center;gap:6px;margin-right:8px;font-size:.78rem}
+.asset-deduction-field span{color:var(--muted,#64748b);white-space:nowrap}

@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=37">
+  <link rel="stylesheet" href="styles.css?v=39">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -328,6 +328,7 @@
         <div class="card"><div class="section-heading"><h3>Assets</h3><span id="assetRecordCount"></span></div><div id="assetList" class="record-list"></div></div>
         <div class="card"><div class="section-heading"><h3>Liabilities</h3><span id="liabilityRecordCount"></span></div><div id="liabilityList" class="record-list"></div></div>
       </div>
+      <div class="card"><div class="section-heading"><h3>Deducted Items (Gift / Loss / Damage)</h3><span id="deductedRecordCount"></span></div><div id="deductedList" class="record-list"></div></div>
     </section>
 
     <section class="content hidden" id="incomeExpensesPage" data-page-panel>
@@ -991,6 +992,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=49"></script>
+  <script src="app.js?v=52"></script>
 </body>
 </html>

@@ -34,10 +34,10 @@ const SITE = /test/i.test(location.pathname) ? SITE_PROFILES.test : SITE_PROFILE
 
 const DB_NAME = SITE.dbName;
 const DB_VERSION = 6;                       // v6: protected settingsStore keeps the Major Head / Category / Subcategory tree
-const APP_VERSION = '2026-11-24-v14';
+const APP_VERSION = '2026-11-26-v17';
 const DATA_VERSION_KEY = SITE.prefix + '-data-version';
 let db;
-let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], incomeGroups: [], migrationHistory: [], officePurchases: [], categoryStructureMeta: {} };
+let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], deductedRecords: [], incomeGroups: [], migrationHistory: [], officePurchases: [], categoryStructureMeta: {} };
 let charts = {};
 let editingRecordId = null;
 let savingRecord = false;
@@ -75,6 +75,11 @@ let zakatState = {
 };
 let zakatRecords = [];
 let activeSavedZakatId = null;
+
+const ASSET_DEDUCTIONS=['Gift','Loss','Damage'];
+const DEDUCTION_MAJOR_HEAD='Loss Deduction';
+const DEDUCTION_ITEM_LABEL='Furniture, Electronics & Equipments';
+const DEDUCTION_CATEGORY='Other Expense - '+DEDUCTION_ITEM_LABEL;
 
 const defaultCategories = [
   {id:'c-bank-loan',type:'Liability',name:'Bank Loan',subcategories:['Bank Loan'],order:0},
@@ -132,6 +137,9 @@ const defaultIncomeGroups = [
   {id:'ig-fcf29151-3744-4dbe-ba17-31c20c63532b',type:'Income',majorHead:'Income from Other Sources',categories:[
     {name:'WPPF',subcategories:['Payment from WPPF']}
   ],order:8},
+  {id:'ig-loss-deduction',type:'Expense',majorHead:DEDUCTION_MAJOR_HEAD,categories:[
+    {name:DEDUCTION_CATEGORY,subcategories:[...ASSET_DEDUCTIONS]}
+  ],order:9},
   {id:'ig-tax',type:'Expense',majorHead:'Tax, Charges, Etc. Paid',categories:[
     {name:'Tax & Surcharge',subcategories:['Payment of Tax at Source & Advance Tax','Payment of Tax, Surcharge or Other Amounts']}
   ],order:9},
@@ -1069,7 +1077,9 @@ function sortBySavedOrder(items){
   });
 }
 async function loadState(){
-  state.records=await getAll('records');
+  const allRecords=await getAll('records');
+  state.records=allRecords.filter(r=>!r.assetDeduction);
+  state.deductedRecords=allRecords.filter(r=>r.assetDeduction);
   state.documents=await getAll('documents');
   state.backupHistory=await getAll('backupHistory');
   state.incomeExpenses=await getAll('incomeExpenses');
@@ -1478,6 +1488,10 @@ function bindGlobalActions(){
  * value in plain HTML-attribute position, where esc() is sufficient.
  */
 function bindDelegatedActions(){
+  document.addEventListener('change',event=>{
+    const sel=event.target.closest&&event.target.closest('select[data-deduct-id]');
+    if(sel&&sel.value)deductAssetItem(sel.dataset.deductId,sel.value);
+  });
   document.addEventListener('click',async event=>{
     const trigger=event.target.closest('[data-cmd]');
     if(!trigger)return;
@@ -1486,6 +1500,7 @@ function bindDelegatedActions(){
       case 'view-record': viewRecord(id); break;
       case 'edit-record': openRecordModal(id); break;
       case 'delete-record': await deleteRecord(id); break;
+      case 'recover-asset': await recoverDeductedAsset(id); break;
       case 'open-pdf': await openPdfViewer(id); break;
       case 'download-pdf': await downloadDocument(id); break;
       case 'rename-category': await renameCategory(id); break;
@@ -4108,7 +4123,7 @@ function fieldHtml(f){
     if(value&&!options.includes(value))options.push(value);
     const selected=value||options[0];
     formState.draft[f.key]=selected;
-    return `<label>${esc(f.label)}${star}<select ${base}>${options.map(o=>`<option value="${esc(o)}" ${o===selected?'selected':''}>${esc(o)}</option>`).join('')}</select></label>`;
+    return `<label>${esc(f.label)}${star}<select ${base}>${options.map(o=>`<option value="${esc(o)}" ${o===selected?'selected':''}>${o===''?'— None —':esc(o)}</option>`).join('')}</select></label>`;
   }
   if(f.type==='year'){
     const dateValue=document.getElementById('recordDate')?.value||'';
@@ -4283,6 +4298,59 @@ function openRecordModal(id=null){
   document.getElementById('recordModal').showModal();
 }
 
+/** Assets Deduction (Gift / Loss / Damage): the item leaves Assets and is booked as an Expense under
+ *  Loss Deduction -> Other Expense -> Furniture, Electronics & Equipments -> Gift / Loss / Damage. */
+function isDeductibleAsset(r){return !!r&&r.type==='Asset'&&r.category==='Other Assets'&&r.subcategory===DEDUCTION_ITEM_LABEL&&!isTransferRecord(r)}
+async function deductAssetItem(id,deduction){
+  const r=state.records.find(x=>x.id===id);
+  if(!r||!ASSET_DEDUCTIONS.includes(deduction))return;
+  if(!await confirm(`Deduct "${recordTitle(r)}" (${formatMoney(recordAmount(r))}) from Assets as ${deduction}? It will be recorded under Expenses -> ${DEDUCTION_MAJOR_HEAD}.`,'Assets Deduction')){renderRecordSections();return}
+  try{
+    await applyAssetDeduction(Object.assign({},r),deduction,r);
+    await loadState();renderAll();
+    toast(`Moved to Expenses -> ${DEDUCTION_MAJOR_HEAD} (${deduction})`);
+  }catch(error){console.error(error);toast('Could not deduct the item'+(error.message?` — ${error.message}`:''),true);renderRecordSections()}
+}
+async function applyAssetDeduction(record,deduction,old){
+  const cls=ensureIncomeClass('Expense',DEDUCTION_MAJOR_HEAD,DEDUCTION_CATEGORY,deduction);
+  await putMany('incomeGroups',state.incomeGroups);
+  await persistCategoryStructure();
+  const date=todayISO();
+  const amount=Math.abs(recordAmount(record));
+  // The record leaves the Assets totals, which would refund its funding account, so the same account is charged by the expense.
+  const fundingName=record.funding&&!record.noAccountChange?record.funding.subcategory:'';
+  const configured=fundingName?officeAccountOption(fundingName):null;
+  const expense={
+    id:uid('ie'),type:'Expense',date,incomeYear:fiscalYearFromDate(date),
+    majorHead:cls.majorHead,category:cls.category,subcategory:cls.subcategory,
+    amount,account:configured?configured.label:'',
+    description:[recordTitle(record),record.itemCategory,deduction].filter(Boolean).join(' · ')+(record.details?` — ${record.details}`:''),
+    assetDeduction:{reason:deduction,date,recordId:record.id},
+    documentIds:[],
+    createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()
+  };
+  if(!configured)expense.noAccountChange=true;
+  await put('incomeExpenses',expense);
+  // The record (and its PDFs) is kept, only flagged, so it can be viewed or recovered later.
+  record.assetDeduction={reason:deduction,date,expenseId:expense.id};
+  record.updatedAt=new Date().toISOString();
+  await put('records',record);
+}
+async function recoverDeductedAsset(id){
+  const r=(state.deductedRecords||[]).find(x=>x.id===id);
+  if(!r)return;
+  if(!await confirm(`Recover "${recordTitle(r)}" back to Assets? The ${r.assetDeduction.reason} expense entry will be removed.`,'Recover Asset'))return;
+  try{
+    const expense=state.incomeExpenses.find(e=>e.id===r.assetDeduction.expenseId||(e.assetDeduction&&e.assetDeduction.recordId===id));
+    if(expense)await remove('incomeExpenses',expense.id);
+    const restored=Object.assign({},r);
+    delete restored.assetDeduction;
+    restored.updatedAt=new Date().toISOString();
+    await put('records',restored);
+    await loadState();renderAll();
+    toast('Item recovered to Assets');
+  }catch(error){console.error(error);toast('Could not recover the item'+(error.message?` — ${error.message}`:''),true)}
+}
 async function saveRecord(event){
   event.preventDefault();
   if(savingRecord)return;                       // a double click must not create two records
@@ -4310,6 +4378,8 @@ async function saveRecord(event){
     const value=el?el.value:'';
     record[f.key]=f.type==='money'?Number(value||0):String(value).trim();
   }
+  const deduction=ASSET_DEDUCTIONS.includes(record.assetDeduction)&&type==='Asset'&&subcategory==='Furniture, Electronics & Equipments'?record.assetDeduction:'';
+  delete record.assetDeduction;
   if(schema.amountSync==='purchase')record.purchaseValue=amount;      // Jewelry / Other Property: Amount = Purchase Value
   if(schema.amountSync==='market'&&!record.currentMarketValue&&!record.purchaseValue){record.currentMarketValue=amount}
   if(!record.incomeYear){const derived=fiscalYearFromDate(record.date);if(derived)record.incomeYear=derived}
@@ -4353,12 +4423,16 @@ async function saveRecord(event){
       await put('documents',Object.assign(d,{category,subcategory,financialType:type,incomeYear:record.incomeYear||''}));
     }
   }
-  await put('records',record);
+  if(deduction){
+    await applyAssetDeduction(record,deduction,old);
+  }else{
+    await put('records',record);
+  }
   await loadState();
   document.getElementById('recordModal').close();
   editingRecordId=null;
   renderAll();
-  toast(isNew?'Record created successfully':'Record saved successfully');
+  toast(deduction?`Moved to Expenses -> ${DEDUCTION_MAJOR_HEAD} (${deduction})`:isNew?'Record created successfully':'Record saved successfully');
   }catch(error){
     console.error(error);
     const quota=error&&error.name==='QuotaExceededError';
@@ -4387,7 +4461,7 @@ async function deleteRecord(id){
 }
 
 function viewRecord(id){
-  const r=state.records.find(x=>x.id===id);if(!r)return;
+  const r=state.records.find(x=>x.id===id)||(state.deductedRecords||[]).find(x=>x.id===id);if(!r)return;
   if(isTransferRecord(r)){viewTransferRecord(r);return}
   editingRecordId=null;
   const schema=schemaForRecord(r);
@@ -4398,10 +4472,11 @@ function viewRecord(id){
   const showCat=(label,value,type)=>`<label><span class="k">${esc(label)}</span><strong class="view-field">${catLabel(value,type)}</strong></label>`;
   const showRaw=(label,html)=>`<label><span class="k">${esc(label)}</span><strong class="view-field">${html||'—'}</strong></label>`;
   const rows=[show('Type',r.type),showCat('Category',r.category,r.type),showCat('Subcategory',r.subcategory,r.type),show('Date',fmtDate(r.date))];
-  schema.fields.forEach(f=>rows.push(show(f.label,f.type==='money'?(r[f.key]?formatMoney(r[f.key]):''):r[f.key])));
+  schema.fields.filter(f=>!f.transient).forEach(f=>rows.push(show(f.label,f.type==='money'?(r[f.key]?formatMoney(r[f.key]):''):r[f.key])));
   const shown=new Set(schema.fields.map(f=>f.key));
   ['purchaseValue','currentMarketValue'].forEach(k=>{if(!shown.has(k)&&r[k])rows.push(show(k==='purchaseValue'?'Purchase Value':'Current Market Value',formatMoney(r[k])))});
   rows.push(show('Amount / Balance',formatMoney(recordAmount(r))));
+  if(r.assetDeduction)rows.push(show('Assets Deduction',`${r.assetDeduction.reason} · ${fmtDate(r.assetDeduction.date)}`));
   if(r.funding&&r.funding.subcategory)rows.push(showRaw('Funded From',`${catIcon(r.funding.subcategory,'Asset')}${esc(r.funding.category||'Asset')} / ${esc(r.funding.subcategory)}`),show('Funding Impact',r.noAccountChange?'Not deducted (I Do not want to change Account)':`${formatMoney(Math.abs(recordAmount(r)))} deducted from that subcategory`));
   rows.push(show('Details / Description',r.details||r.description||'',true));
   if(r.remarks)rows.push(show('Remarks',r.remarks,true));
@@ -4991,12 +5066,18 @@ function renderRecordSections(){
     const transfer=isTransferRecord(r);
     const meta=transfer?transferMetaLabel(r):recordMeta(r);
     const id=esc(r.id);
-    return `<div class="record-item${transfer?' transfer-record':''}" style="--i:${Math.min(i,14)}"><div><h4>${esc(recordTitle(r))}</h4><p>${transfer?'<span class="badge transfer">Transfer</span> ':''}${catLabel(r.category,r.type)} · ${catLabel(r.subcategory,r.type)}${r.incomeYear?' · <span class="record-income-year">'+esc(r.incomeYear)+'</span>':''}</p>${meta?`<p>${esc(meta)}</p>`:''}</div><div class="record-amount"><strong>${formatMoney(recordAmount(r))}</strong><p>${esc(fmtDate(r.date))}</p></div>${docsFor(r).length?`<div class="record-docs">${docChips(r,3)}</div>`:''}<div class="record-actions"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></div></div>`;
+    return `<div class="record-item${transfer?' transfer-record':''}" style="--i:${Math.min(i,14)}"><div><h4>${esc(recordTitle(r))}</h4><p>${transfer?'<span class="badge transfer">Transfer</span> ':''}${catLabel(r.category,r.type)} · ${catLabel(r.subcategory,r.type)}${r.incomeYear?' · <span class="record-income-year">'+esc(r.incomeYear)+'</span>':''}</p>${meta?`<p>${esc(meta)}</p>`:''}</div><div class="record-amount"><strong>${formatMoney(recordAmount(r))}</strong><p>${esc(fmtDate(r.date))}</p></div>${docsFor(r).length?`<div class="record-docs">${docChips(r,3)}</div>`:''}<div class="record-actions">${isDeductibleAsset(r)?`<label class="asset-deduction-field"><span>Assets Deduction</span><select class="asset-deduction-select" data-deduct-id="${id}" aria-label="Assets Deduction"><option value="">— Select —</option>${ASSET_DEDUCTIONS.map(o=>`<option value="${o}">${o}</option>`).join('')}</select></label>`:''}<button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="edit-record" data-id="${id}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-record" data-id="${id}">Delete</button></div></div>`;
   }).join('');
   const assets=records.filter(r=>r.type==='Asset'),liabilities=records.filter(r=>r.type==='Liability');
   document.getElementById('assetRecordCount').textContent=`${assets.length} records`;
   document.getElementById('liabilityRecordCount').textContent=`${liabilities.length} records`;
   document.getElementById('assetList').innerHTML=render(assets)||'<div class="empty-state">No asset records.</div>';
+  const deducted=(state.deductedRecords||[]).filter(r=>!search||Object.values(r).some(v=>String(v).toLowerCase().includes(String(search).toLowerCase()))).sort((a,b)=>String(b.assetDeduction.date||'').localeCompare(String(a.assetDeduction.date||'')));
+  const deductedHost=document.getElementById('deductedList');
+  if(deductedHost){
+    document.getElementById('deductedRecordCount').textContent=`${deducted.length} items`;
+    deductedHost.innerHTML=deducted.map((r,i)=>{const id=esc(r.id);return `<div class="record-item" style="--i:${Math.min(i,14)}"><div><h4>${esc(recordTitle(r))}</h4><p><span class="badge expense">${esc(r.assetDeduction.reason)}</span> ${esc(fmtDate(r.assetDeduction.date))}</p>${recordMeta(r)?`<p>${esc(recordMeta(r))}</p>`:''}</div><div class="record-amount"><strong>${formatMoney(recordAmount(r))}</strong><p>${esc(fmtDate(r.date))}</p></div>${docsFor(r).length?`<div class="record-docs">${docChips(r,3)}</div>`:''}<div class="record-actions"><button type="button" class="action-link" data-cmd="view-record" data-id="${id}">View</button><button type="button" class="action-link" data-cmd="recover-asset" data-id="${id}">Recover</button></div></div>`}).join('')||'<div class="empty-state">No deducted items.</div>';
+  }
   document.getElementById('liabilityList').innerHTML=render(liabilities)||'<div class="empty-state">No liability records.</div>';
 }
 
@@ -5470,7 +5551,7 @@ async function createBackup(){
     const settings=await getAll('settings');
     const zip=new JSZip();
     const backup={
-      records:state.records,
+      records:[...state.records,...(state.deductedRecords||[])],
       categories:state.categories,
       incomeExpenses:state.incomeExpenses,
       officePurchases:state.officePurchases,
@@ -5679,7 +5760,7 @@ function findSchemaBySheet(sheetName){
 function schemaImportColumns(schema){
   const cols=[];
   if(schema.hasDate)cols.push({key:'date',aliases:['date']});
-  schema.fields.forEach(f=>cols.push({key:f.key,aliases:f.excel||[],type:f.type,norm:f.normalize}));
+  schema.fields.filter(f=>!f.transient).forEach(f=>cols.push({key:f.key,aliases:f.excel||[],type:f.type,norm:f.normalize}));
   if(schema.detailsExcel)cols.push({key:'details',aliases:schema.detailsExcel});
   if(schema.amountExcel.length)cols.push({key:'amount',aliases:schema.amountExcel,type:'money'});
   return cols;
@@ -5738,7 +5819,7 @@ function mapSheetToRecords(schema,aoa){
       type:schema.type,category:schema.category,subcategory:schema.subcategory,date,
       details:raw.details||'',documentIds:[],sourceSheet:schema.sheet,sourceRow:r+1
     };
-    for(const f of schema.fields){
+    for(const f of schema.fields.filter(f=>!f.transient)){
       if(f.type==='money')record[f.key]=raw[f.key]||0;
       else if(raw[f.key]!==undefined)record[f.key]=raw[f.key];
     }
@@ -5878,7 +5959,7 @@ function groupRecordsForReport(records){
 }
 /** Date first · schema columns (only those with data) in the middle · Amount / Balance last. */
 function reportColumns(schema,recs){
-  const mids=schema.fields.map(f=>({key:f.key,label:f.label,kind:f.type==='money'?'money':'text',required:f.required}));
+  const mids=schema.fields.filter(f=>!f.transient).map(f=>({key:f.key,label:f.label,kind:f.type==='money'?'money':'text',required:f.required}));
   mids.splice(Math.min(schema.detailsAfter,mids.length),0,{key:'details',label:reportDetailsLabel(schema),kind:'text',required:schema.detailsRequired});
   const keep=mids.filter(c=>c.required||recs.some(r=>c.kind==='money'?Number(r[c.key])>0:String(r[c.key]??'').trim()!==''));
   return [{key:'date',label:'Date',kind:'date'},...keep,{key:'amount',label:'Amount / Balance',kind:'amount'}];
@@ -6842,7 +6923,9 @@ async function deleteIncomeRecord(id){
     const linked=new Set([...(record?.documentIds||[]),...state.documents.filter(d=>d.recordId===id).map(d=>d.id)]);
     for(const docId of linked){await remove('documents',docId);await remove('documentBlobs',docId)}
     await remove('incomeExpenses',id);
-    await loadState();renderAll();toast('Transaction deleted');
+    const linked2=record&&record.assetDeduction&&(state.deductedRecords||[]).find(x=>x.id===record.assetDeduction.recordId);
+    if(linked2){const restored=Object.assign({},linked2);delete restored.assetDeduction;restored.updatedAt=new Date().toISOString();await put('records',restored)}
+    await loadState();renderAll();toast(linked2?'Transaction deleted, item recovered to Assets':'Transaction deleted');
   }
 }
 function viewIncomeRecord(id){
