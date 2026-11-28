@@ -10717,12 +10717,26 @@ function base64ToBlob(data,type){
   return new Blob([bytes],{type:type||'application/pdf'});
 }
 /* --- Drive PDF storage -------------------------------------------------------------------------
-   PDF attachments are NOT embedded in the backup JSON any more. Each distinct PDF is stored once in
-   the Drive folder as assetbook-pdf-<sha256>.pdf (content-addressed) and the backup only lists them
-   (pdfIndex). A normal sync therefore uploads a few hundred KB of data, identical PDFs are stored a
-   single time, and a PDF is uploaded / downloaded only when Drive / this device does not have it.
+   PDF attachments are NOT embedded in the backup JSON. Each distinct PDF is stored once in a sub-folder
+   of the Drive backup folder, named after the page it belongs to:
+       <backup folder> / Assets & Liabilities | Income & Expenses | Official Account | Income Tax Calculation
+   The file keeps its readable name; its SHA-256 is kept in the file's appProperties. The backup JSON only
+   lists the PDFs (pdfIndex: id, name, folder, sha256), so a sync uploads a few hundred KB of data, identical
+   PDFs are stored once per folder, and a PDF is uploaded / downloaded only when it is missing.
    Backups made by older versions (PDF bytes inside the JSON) are still restored. */
 const DRIVE_FP_VERSION=3;
+const DRIVE_PDF_FOLDERS={record:'Assets & Liabilities',ie:'Income & Expenses',office:'Official Account',adv:'Official Account',tax:'Income Tax Calculation'};
+/** Page folder for a document, from the record it is attached to (documents.recordId = "<kind>-<uuid>"). */
+function drivePdfFolderName(doc){
+  const kind=String(doc&&doc.recordId||'').split('-')[0];
+  if(DRIVE_PDF_FOLDERS[kind])return DRIVE_PDF_FOLDERS[kind];
+  const type=String(doc&&doc.financialType||'');
+  if(type==='Income'||type==='Expense')return 'Income & Expenses';
+  if(type==='Asset'||type==='Liability')return 'Assets & Liabilities';
+  if(type==='Advance')return 'Official Account';
+  if(type==='Tax Deduction')return 'Income Tax Calculation';
+  return 'Other';
+}
 async function pdfSha256(blob){
   const bytes=new Uint8Array(await blob.arrayBuffer());
   if(window.crypto&&crypto.subtle){
@@ -10747,29 +10761,49 @@ async function googleDriveWithRetry(task,attempts=3){
   }
   throw lastError;
 }
-/** Map: sha256 -> Drive file id of every PDF already stored in the Drive folder. */
-async function googleDriveListPdfs(interactive=false){
-  const folderId=await googleDriveFolder(interactive);
-  const query=encodeURIComponent(`'${folderId}' in parents and trashed=false and mimeType='application/pdf'`);
+/** Sub-folder of the backup folder for one page; created on demand when create=true (oldest wins if two exist). */
+let googleDrivePageFolderIds=new Map();
+async function googleDrivePageFolder(name,interactive=false,create=true){
+  const parentId=await googleDriveFolder(interactive);
+  const key=`${parentId}/${name}`;
+  if(googleDrivePageFolderIds.has(key))return googleDrivePageFolderIds.get(key);
+  const query=encodeURIComponent(`name='${String(name).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`);
+  const found=await googleDriveJson(`${GOOGLE_DRIVE_API}/files?q=${query}&orderBy=createdTime&pageSize=10&fields=files(id,name)`,{},interactive);
+  let id=((found.files||[])[0]||{}).id||'';
+  if(!id&&create){
+    const created=await googleDriveJson(`${GOOGLE_DRIVE_API}/files?fields=id`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name,mimeType:'application/vnd.google-apps.folder',parents:[parentId]})
+    },interactive);
+    id=created.id;
+  }
+  if(id)googleDrivePageFolderIds.set(key,id);
+  return id;
+}
+/** Map: sha256 -> Drive file id of every PDF in one folder (hash from appProperties, or from a legacy file name). */
+async function googleDriveListPdfs(folderId,interactive=false){
   const found=new Map();
+  if(!folderId)return found;
+  const query=encodeURIComponent(`'${folderId}' in parents and trashed=false and mimeType='application/pdf'`);
   let pageToken='';
   do{
     const page=pageToken?`&pageToken=${encodeURIComponent(pageToken)}`:'';
-    const data=await googleDriveJson(`${GOOGLE_DRIVE_API}/files?q=${query}&pageSize=1000&fields=nextPageToken,files(id,name)${page}`,{},interactive);
+    const data=await googleDriveJson(`${GOOGLE_DRIVE_API}/files?q=${query}&pageSize=1000&fields=nextPageToken,files(id,name,appProperties)${page}`,{},interactive);
     for(const file of data.files||[]){
-      const match=/^assetbook-pdf-(.+)\.pdf$/i.exec(file.name||'');
-      if(match&&!found.has(match[1]))found.set(match[1],file.id);
+      const legacy=/^assetbook-pdf-(.+)\.pdf$/i.exec(file.name||'');
+      const hash=(file.appProperties&&file.appProperties.sha256)||(legacy&&legacy[1])||'';
+      if(hash&&!found.has(hash))found.set(hash,file.id);
     }
     pageToken=data.nextPageToken||'';
   }while(pageToken);
   return found;
 }
-async function googleDriveUploadPdf(blob,hash,interactive=false){
-  const folderId=await googleDriveFolder(interactive);
-  const name=`assetbook-pdf-${hash}.pdf`;
+async function googleDriveUploadPdf(blob,hash,name,folderId,interactive=false){
+  let fileName=String(name||'document.pdf').replace(/[\\/]/g,'-').trim()||'document.pdf';
+  if(!/\.pdf$/i.test(fileName))fileName+='.pdf';
   const form=new FormData();
-  form.append('metadata',new Blob([JSON.stringify({name,mimeType:'application/pdf',parents:[folderId]})],{type:'application/json'}));
-  form.append('file',new Blob([blob],{type:'application/pdf'}),name);
+  form.append('metadata',new Blob([JSON.stringify({name:fileName,mimeType:'application/pdf',parents:[folderId],appProperties:{sha256:hash}})],{type:'application/json'}));
+  form.append('file',new Blob([blob],{type:'application/pdf'}),fileName);
   return googleDriveJson(`${GOOGLE_DRIVE_UPLOAD}/files?uploadType=multipart&fields=id,name`,{method:'POST',body:form},interactive);
 }
 async function googleDriveDownloadPdf(fileId,interactive=false){
@@ -10777,20 +10811,30 @@ async function googleDriveDownloadPdf(fileId,interactive=false){
   if(!response.ok)throw await googleDriveError(response);
   return response.blob();
 }
-/** Uploads the PDFs a snapshot refers to that Drive does not have yet. Returns how many were uploaded. */
+/** Uploads the PDFs a snapshot refers to that their page folder in Drive does not have yet. Returns how many. */
 async function ensureSnapshotPdfsInDrive(snapshot,interactive=false){
-  const blobs=snapshot&&snapshot.__pdfBlobs;
-  if(!blobs||!blobs.size)return 0;
-  const listed=await googleDriveListPdfs(interactive);
-  const queue=[...blobs.keys()].filter(hash=>!listed.has(hash));
+  const items=snapshot&&snapshot.__pdfBlobs;
+  if(!items||!items.size)return 0;
+  googleDrivePageFolderIds=new Map();                   // a folder deleted in Drive must not stay cached
+  const byFolder=new Map();
+  for(const item of items.values()){
+    if(!byFolder.has(item.folder))byFolder.set(item.folder,[]);
+    byFolder.get(item.folder).push(item);
+  }
+  const queue=[];
+  for(const [folder,list] of byFolder){
+    const folderId=await googleDrivePageFolder(folder,interactive,true);
+    const listed=await googleDriveListPdfs(folderId,interactive);
+    for(const item of list)if(!listed.has(item.hash))queue.push(Object.assign({folderId},item));
+  }
   const total=queue.length;
   if(!total)return 0;
   let done=0;
   setDriveStatus(`Uploading PDFs 0/${total}…`);
   const worker=async()=>{
     while(queue.length){
-      const hash=queue.shift();
-      await googleDriveWithRetry(()=>googleDriveUploadPdf(blobs.get(hash),hash,interactive));
+      const item=queue.shift();
+      await googleDriveWithRetry(()=>googleDriveUploadPdf(item.blob,item.hash,item.name,item.folderId,interactive));
       done++;
       setDriveStatus(`Uploading PDFs ${done}/${total}…`);
     }
@@ -10825,11 +10869,22 @@ async function resolveSnapshotBlobs(snapshot,mode='replace',options={}){
   }
   const missing=[...need].filter(hash=>!byHash.has(hash));
   if(missing.length){
-    const listed=await googleDriveListPdfs(interactive);
+    googleDrivePageFolderIds=new Map();
+    const listings=new Map();                           // folder name -> Map(hash -> file id)
+    const listing=async folder=>{
+      if(!listings.has(folder)){
+        const folderId=folder?await googleDrivePageFolder(folder,interactive,false):await googleDriveFolder(interactive);
+        listings.set(folder,await googleDriveListPdfs(folderId,interactive));
+      }
+      return listings.get(folder);
+    };
     let done=0;
     for(const hash of missing){
-      const fileId=listed.get(hash);
-      const label=(wanted.find(entry=>entry.hash===hash)||{}).name||'a PDF';
+      const entries=wanted.filter(entry=>entry.hash===hash);
+      let fileId='';
+      for(const entry of entries){fileId=(await listing(entry.folder||'')).get(hash)||'';if(fileId)break}
+      if(!fileId)fileId=(await listing('')).get(hash)||'';          // PDFs stored directly in the backup folder
+      const label=entries[0].name||'a PDF';
       if(!fileId)throw new Error(`"${label}" is missing from Google Drive, so nothing was changed on this device.`);
       setDriveStatus(`Downloading PDFs ${done+1}/${missing.length}…`);
       const blob=await googleDriveWithRetry(()=>googleDriveDownloadPdf(fileId,interactive));
@@ -10871,7 +10926,7 @@ function snapshotHasData(snapshot){
 const AssetBookDB={
   name:DB_NAME,
   stores:['records','categories','documents','documentBlobs','settings','backupHistory','incomeExpenses','incomeGroups','migrationHistory','officePurchases',SETTINGS_STORE],
-  /** Full database snapshot. PDFs are listed by SHA-256 (pdfIndex); their bytes travel as separate Drive files. */
+  /** Full database snapshot. PDFs are listed (pdfIndex: sha256 + page folder); their bytes travel as separate Drive files. */
   async snapshot(){
     const [records,incomeExpenses,officePurchases,incomeGroups,migrationHistory,documents,settingsRows,settingsStore]=await Promise.all([
       getAll('records'),
@@ -10885,13 +10940,15 @@ const AssetBookDB={
     ]);
     const structure=settingsStore.find(row=>row&&row.key===CATEGORY_STRUCTURE_KEY)||null;
     const pdfIndex=[];
-    const pdfBlobs=new Map();                           // sha256 -> Blob (kept off the JSON: not enumerable)
+    const pdfBlobs=new Map();                           // "folder|sha256" -> {folder,hash,name,blob} (kept off the JSON: not enumerable)
     for(const doc of documents){
       const blob=await getDocBlob(doc.id).catch(()=>null);
       if(!blob)continue;
       const hash=await pdfSha256(blob);
-      if(!pdfBlobs.has(hash))pdfBlobs.set(hash,blob);
-      pdfIndex.push({id:doc.id,name:doc.name||doc.title||'document.pdf',type:blob.type||'application/pdf',size:blob.size,hash});
+      const folder=drivePdfFolderName(doc);
+      const name=doc.name||doc.title||'document.pdf';
+      if(!pdfBlobs.has(`${folder}|${hash}`))pdfBlobs.set(`${folder}|${hash}`,{folder,hash,name,blob});
+      pdfIndex.push({id:doc.id,name,type:blob.type||'application/pdf',size:blob.size,hash,folder});
     }
     const snapshot={
       app:'Personal Finance',

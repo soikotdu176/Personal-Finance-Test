@@ -41,10 +41,12 @@ committed or deployed.
 - Backup / restore (ZIP), including every attached PDF and the income/expense transactions.
 
 ## Google Drive sync (v16.34)
-- A Drive backup (`assetbook-backup-*.json`) no longer contains the PDF bytes: it lists them (`pdfIndex`, SHA-256 per file) and is only ~1-2 MB.
-- Every distinct PDF is stored once in the same Drive folder as `assetbook-pdf-<sha256>.pdf`. A sync uploads only PDFs Drive does not have yet; a restore downloads only PDFs the device does not have yet. Identical PDFs (e.g. one Income Statement attached to many rows) are stored a single time.
+- A Drive backup (`assetbook-backup-*.json`) no longer contains PDF bytes: it lists them (`pdfIndex`: id, name, page folder, SHA-256) and is only ~1-2 MB.
+- PDFs live in sub-folders of the backup folder (`PersonalFinance_Backups` on the Test site, `PF_Backup` on the Main site), one folder per page:
+  `Assets & Liabilities`, `Income & Expenses`, `Official Account` (incl. Advanced Adjustment), `Income Tax Calculation`. The folder is chosen from the record the PDF is attached to. Files keep their readable names.
+- A sync uploads only PDFs that their folder does not have yet; a restore downloads only PDFs the device does not have yet. The same PDF attached many times to one page is stored once.
 - PDFs are uploaded **before** the backup JSON, and a restore downloads and verifies every PDF **before** it writes anything, so an interrupted sync or restore never leaves a half-updated database.
-- Backups made by older versions (PDF bytes inside the JSON) still restore normally. Old backups are kept by the existing retention rules; unused `assetbook-pdf-*` files are never deleted automatically.
+- Backups made by older versions (PDF bytes inside the JSON) still restore normally. Unused PDFs in Drive are never deleted automatically.
 - Open the site once on every device (reload when the "new version" bar appears) before editing on it, so no device keeps running the old sync code.
 
 ## Data safety
