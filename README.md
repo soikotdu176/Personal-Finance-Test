@@ -40,6 +40,13 @@ committed or deployed.
 - Installable PWA with offline cache; Figma-style UI, dark mode, reduced-motion support.
 - Backup / restore (ZIP), including every attached PDF and the income/expense transactions.
 
+## Google Drive sync (v16.34)
+- A Drive backup (`assetbook-backup-*.json`) no longer contains the PDF bytes: it lists them (`pdfIndex`, SHA-256 per file) and is only ~1-2 MB.
+- Every distinct PDF is stored once in the same Drive folder as `assetbook-pdf-<sha256>.pdf`. A sync uploads only PDFs Drive does not have yet; a restore downloads only PDFs the device does not have yet. Identical PDFs (e.g. one Income Statement attached to many rows) are stored a single time.
+- PDFs are uploaded **before** the backup JSON, and a restore downloads and verifies every PDF **before** it writes anything, so an interrupted sync or restore never leaves a half-updated database.
+- Backups made by older versions (PDF bytes inside the JSON) still restore normally. Old backups are kept by the existing retention rules; unused `assetbook-pdf-*` files are never deleted automatically.
+- Open the site once on every device (reload when the "new version" bar appears) before editing on it, so no device keeps running the old sync code.
+
 ## Data safety
 - **A new release never deletes local data.** The old build wiped the database whenever its
   reset token changed; that is gone. An update only shows a reminder to take a backup.

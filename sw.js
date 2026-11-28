@@ -1,5 +1,5 @@
 /* Personal Finance service worker - offline-first caching for the app shell and CDN libraries. */
-const VERSION = 'v16.33.0';
+const VERSION = 'v16.34.0';
 // Same file serves the Test and the Main site (same origin): cache names follow the scope URL.
 const PREFIX = /test/i.test(self.registration.scope) ? 'assetbook' : 'pf';
 const SHELL_CACHE = `${PREFIX}-shell-${VERSION}`;
@@ -9,7 +9,7 @@ const SHELL_ASSETS = [
   './',
   'index.html',
   'styles.css?v=44',
-  'app.js?v=60',
+  'app.js?v=61',
   'wealth.js?v=3',
   'manifest.json',
   'icons/icon.svg',

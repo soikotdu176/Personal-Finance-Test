@@ -10678,13 +10678,14 @@ async function googleDrivePruneSafety(interactive=false){
   return extras.length;
 }
 async function googleDriveUpload(snapshot,fileName,interactive=true){
+  const pdfsUploaded=await ensureSnapshotPdfsInDrive(snapshot,interactive);   // PDFs first, so a backup never points at a PDF Drive lacks
   const folderId=await googleDriveFolder(interactive);
   const json=JSON.stringify(snapshot);
   const form=new FormData();
   form.append('metadata',new Blob([JSON.stringify({name:fileName,mimeType:'application/json',parents:[folderId]})],{type:'application/json'}));
   form.append('file',new Blob([json],{type:'application/json'}),fileName);
   const data=await googleDriveJson(`${GOOGLE_DRIVE_UPLOAD}/files?uploadType=multipart&fields=id,name,createdTime,size`,{method:'POST',body:form},interactive);
-  return {file:data,size:new Blob([json]).size};
+  return {file:data,size:new Blob([json]).size,pdfsUploaded};
 }
 async function googleDriveDownload(fileId,interactive=true){
   const response=await googleDriveFetch(`${GOOGLE_DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`,{},interactive);
@@ -10714,6 +10715,131 @@ function base64ToBlob(data,type){
   const bytes=new Uint8Array(binary.length);
   for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
   return new Blob([bytes],{type:type||'application/pdf'});
+}
+/* --- Drive PDF storage -------------------------------------------------------------------------
+   PDF attachments are NOT embedded in the backup JSON any more. Each distinct PDF is stored once in
+   the Drive folder as assetbook-pdf-<sha256>.pdf (content-addressed) and the backup only lists them
+   (pdfIndex). A normal sync therefore uploads a few hundred KB of data, identical PDFs are stored a
+   single time, and a PDF is uploaded / downloaded only when Drive / this device does not have it.
+   Backups made by older versions (PDF bytes inside the JSON) are still restored. */
+const DRIVE_FP_VERSION=3;
+async function pdfSha256(blob){
+  const bytes=new Uint8Array(await blob.arrayBuffer());
+  if(window.crypto&&crypto.subtle){
+    const digest=await crypto.subtle.digest('SHA-256',bytes);
+    return Array.from(new Uint8Array(digest)).map(byte=>byte.toString(16).padStart(2,'0')).join('');
+  }
+  let h1=0xdeadbeef,h2=0x41c6ce57;                    // fallback when SubtleCrypto is unavailable
+  for(let i=0;i<bytes.length;i++){h1=Math.imul(h1^bytes[i],2654435761);h2=Math.imul(h2^bytes[i],1597334677)}
+  h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);
+  h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);
+  return `x${bytes.length.toString(16)}-${(h1>>>0).toString(16)}${(h2>>>0).toString(16)}`;
+}
+async function googleDriveWithRetry(task,attempts=3){
+  let lastError;
+  for(let i=0;i<attempts;i++){
+    try{return await task()}
+    catch(error){
+      lastError=error;
+      if(/authoris|refused/i.test(String(error&&error.message||'')))break;
+      await new Promise(resolve=>setTimeout(resolve,700*(i+1)));
+    }
+  }
+  throw lastError;
+}
+/** Map: sha256 -> Drive file id of every PDF already stored in the Drive folder. */
+async function googleDriveListPdfs(interactive=false){
+  const folderId=await googleDriveFolder(interactive);
+  const query=encodeURIComponent(`'${folderId}' in parents and trashed=false and mimeType='application/pdf'`);
+  const found=new Map();
+  let pageToken='';
+  do{
+    const page=pageToken?`&pageToken=${encodeURIComponent(pageToken)}`:'';
+    const data=await googleDriveJson(`${GOOGLE_DRIVE_API}/files?q=${query}&pageSize=1000&fields=nextPageToken,files(id,name)${page}`,{},interactive);
+    for(const file of data.files||[]){
+      const match=/^assetbook-pdf-(.+)\.pdf$/i.exec(file.name||'');
+      if(match&&!found.has(match[1]))found.set(match[1],file.id);
+    }
+    pageToken=data.nextPageToken||'';
+  }while(pageToken);
+  return found;
+}
+async function googleDriveUploadPdf(blob,hash,interactive=false){
+  const folderId=await googleDriveFolder(interactive);
+  const name=`assetbook-pdf-${hash}.pdf`;
+  const form=new FormData();
+  form.append('metadata',new Blob([JSON.stringify({name,mimeType:'application/pdf',parents:[folderId]})],{type:'application/json'}));
+  form.append('file',new Blob([blob],{type:'application/pdf'}),name);
+  return googleDriveJson(`${GOOGLE_DRIVE_UPLOAD}/files?uploadType=multipart&fields=id,name`,{method:'POST',body:form},interactive);
+}
+async function googleDriveDownloadPdf(fileId,interactive=false){
+  const response=await googleDriveFetch(`${GOOGLE_DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`,{},interactive);
+  if(!response.ok)throw await googleDriveError(response);
+  return response.blob();
+}
+/** Uploads the PDFs a snapshot refers to that Drive does not have yet. Returns how many were uploaded. */
+async function ensureSnapshotPdfsInDrive(snapshot,interactive=false){
+  const blobs=snapshot&&snapshot.__pdfBlobs;
+  if(!blobs||!blobs.size)return 0;
+  const listed=await googleDriveListPdfs(interactive);
+  const queue=[...blobs.keys()].filter(hash=>!listed.has(hash));
+  const total=queue.length;
+  if(!total)return 0;
+  let done=0;
+  setDriveStatus(`Uploading PDFs 0/${total}…`);
+  const worker=async()=>{
+    while(queue.length){
+      const hash=queue.shift();
+      await googleDriveWithRetry(()=>googleDriveUploadPdf(blobs.get(hash),hash,interactive));
+      done++;
+      setDriveStatus(`Uploading PDFs ${done}/${total}…`);
+    }
+  };
+  await Promise.all([worker(),worker(),worker()]);
+  return total;
+}
+/**
+ * Bytes of every PDF a snapshot needs, as [{id,blob}]. Reuses bytes this device already has, downloads only
+ * the rest. Runs BEFORE anything is written, so a failed download leaves the database untouched.
+ */
+async function resolveSnapshotBlobs(snapshot,mode='replace',options={}){
+  const inline=(Array.isArray(snapshot&&snapshot.pdfs)?snapshot.pdfs:[]).filter(entry=>entry&&entry.id&&entry.data);
+  if(inline.length)return inline.map(entry=>({id:entry.id,blob:base64ToBlob(entry.data,entry.type)}));
+  let wanted=(Array.isArray(snapshot&&snapshot.pdfIndex)?snapshot.pdfIndex:[]).filter(entry=>entry&&entry.id&&entry.hash);
+  if(mode==='merge'){
+    const keep=[];
+    for(const entry of wanted){if(!await getOne('documentBlobs',entry.id))keep.push(entry)}
+    wanted=keep;
+  }
+  if(!wanted.length)return [];
+  const interactive=!!options.interactive;
+  const need=new Set(wanted.map(entry=>entry.hash));
+  const sizes=new Set(wanted.map(entry=>Number(entry.size)||0));
+  const byHash=new Map();
+  for(const doc of await getAll('documents')){
+    if(byHash.size===need.size)break;
+    const blob=await getDocBlob(doc.id).catch(()=>null);
+    if(!blob||(sizes.size&&!sizes.has(blob.size)))continue;
+    const hash=await pdfSha256(blob);
+    if(need.has(hash)&&!byHash.has(hash))byHash.set(hash,blob);
+  }
+  const missing=[...need].filter(hash=>!byHash.has(hash));
+  if(missing.length){
+    const listed=await googleDriveListPdfs(interactive);
+    let done=0;
+    for(const hash of missing){
+      const fileId=listed.get(hash);
+      const label=(wanted.find(entry=>entry.hash===hash)||{}).name||'a PDF';
+      if(!fileId)throw new Error(`"${label}" is missing from Google Drive, so nothing was changed on this device.`);
+      setDriveStatus(`Downloading PDFs ${done+1}/${missing.length}…`);
+      const blob=await googleDriveWithRetry(()=>googleDriveDownloadPdf(fileId,interactive));
+      const check=await pdfSha256(blob);
+      if(check!==hash)throw new Error(`"${label}" arrived damaged from Google Drive, so nothing was changed on this device.`);
+      byHash.set(hash,blob);
+      done++;
+    }
+  }
+  return wanted.map(entry=>({id:entry.id,blob:new Blob([byHash.get(entry.hash)],{type:entry.type||'application/pdf'})}));
 }
 function mergeZakatRecordLists(local=[],incoming=[]){
   const records=new Map();
@@ -10745,7 +10871,7 @@ function snapshotHasData(snapshot){
 const AssetBookDB={
   name:DB_NAME,
   stores:['records','categories','documents','documentBlobs','settings','backupHistory','incomeExpenses','incomeGroups','migrationHistory','officePurchases',SETTINGS_STORE],
-  /** Full database snapshot, including every stored PDF as base64. */
+  /** Full database snapshot. PDFs are listed by SHA-256 (pdfIndex); their bytes travel as separate Drive files. */
   async snapshot(){
     const [records,incomeExpenses,officePurchases,incomeGroups,migrationHistory,documents,settingsRows,settingsStore]=await Promise.all([
       getAll('records'),
@@ -10758,16 +10884,19 @@ const AssetBookDB={
       getAll(SETTINGS_STORE)
     ]);
     const structure=settingsStore.find(row=>row&&row.key===CATEGORY_STRUCTURE_KEY)||null;
-    const pdfs=[];
+    const pdfIndex=[];
+    const pdfBlobs=new Map();                           // sha256 -> Blob (kept off the JSON: not enumerable)
     for(const doc of documents){
       const blob=await getDocBlob(doc.id).catch(()=>null);
       if(!blob)continue;
-      pdfs.push({id:doc.id,name:doc.name||doc.title||'document.pdf',type:blob.type||'application/pdf',data:await blobToBase64(blob)});
+      const hash=await pdfSha256(blob);
+      if(!pdfBlobs.has(hash))pdfBlobs.set(hash,blob);
+      pdfIndex.push({id:doc.id,name:doc.name||doc.title||'document.pdf',type:blob.type||'application/pdf',size:blob.size,hash});
     }
-    return {
+    const snapshot={
       app:'Personal Finance',
       format:'assetbook-drive-backup',
-      version:2,
+      version:3,
       database:DB_NAME,
       createdAt:new Date().toISOString(),
       settingsStore,
@@ -10784,12 +10913,14 @@ const AssetBookDB={
       migrationHistory,
       settings:settingsRows,
       documents:documents.map(doc=>{const clean=Object.assign({},doc);delete clean.blob;return clean}),
-      pdfs
+      pdfIndex
     };
+    Object.defineProperty(snapshot,'__pdfBlobs',{value:pdfBlobs,enumerable:false});
+    return snapshot;
   },
 
   /** Writes a snapshot back. settingsStore is merge-only and is never cleared. */
-  async restore(snapshot,mode='replace'){
+  async restore(snapshot,mode='replace',options={}){
     if(!snapshot||!Array.isArray(snapshot.records))throw new Error('Unsupported Google Drive backup format.');
     const records=snapshot.records||[];
     const incomeExpenses=Array.isArray(snapshot.incomeExpenses)?snapshot.incomeExpenses:[];
@@ -10797,8 +10928,7 @@ const AssetBookDB={
     const incomeGroups=Array.isArray(snapshot.incomeGroups)?snapshot.incomeGroups:[];
     const migrationHistory=Array.isArray(snapshot.migrationHistory)?snapshot.migrationHistory:[];
     const documents=(Array.isArray(snapshot.documents)?snapshot.documents:[]).map(doc=>{const clean=Object.assign({},doc);delete clean.blob;return clean});
-    const pdfs=(Array.isArray(snapshot.pdfs)?snapshot.pdfs:[]).filter(entry=>entry&&entry.id&&entry.data);
-    const blobs=pdfs.map(entry=>({id:entry.id,blob:base64ToBlob(entry.data,entry.type)}));
+    const blobs=await resolveSnapshotBlobs(snapshot,mode,options);   // old backups: inline base64; new: Drive PDF files
     if(mode==='replace'){
       await replaceStore('records',records);
       await replaceStore('incomeExpenses',incomeExpenses);
@@ -10840,16 +10970,31 @@ const AssetBookDB={
   }
 };
 
-/** SHA-256 of the snapshot content, ignoring the timestamp and the local Drive bookkeeping rows. */
+/** One [id:sha256] entry per stored PDF - identical for a v2 backup (inline base64) and a v3 backup (pdfIndex). */
+async function snapshotPdfDigest(snapshot){
+  if(Array.isArray(snapshot&&snapshot.pdfIndex))return snapshot.pdfIndex.map(entry=>`${entry.id}:${entry.hash}`).sort();
+  const out=[];
+  for(const entry of Array.isArray(snapshot&&snapshot.pdfs)?snapshot.pdfs:[]){
+    if(entry&&entry.id&&entry.data)out.push(`${entry.id}:${await pdfSha256(base64ToBlob(entry.data,entry.type))}`);
+  }
+  return out.sort();
+}
+/** SHA-256 of the snapshot content, ignoring the timestamp, the file format and the local Drive bookkeeping rows. */
 async function snapshotFingerprint(snapshot){
   try{
     if(!(window.crypto&&crypto.subtle&&window.TextEncoder))return '';
     const copy=Object.assign({},snapshot);
-    delete copy.createdAt;
+    delete copy.createdAt;delete copy.format;delete copy.version;delete copy.safetyReason;
     copy.settings=(Array.isArray(copy.settings)?copy.settings:[]).filter(row=>!(row&&/^drive/i.test(String(row.key||''))));
+    copy.pdfDigest=await snapshotPdfDigest(snapshot);
+    delete copy.pdfs;delete copy.pdfIndex;
     const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(copy)));
     return Array.from(new Uint8Array(digest)).map(byte=>byte.toString(16).padStart(2,'0')).join('');
   }catch(error){return ''}
+}
+/** A stored hash is only comparable when it came from the same fingerprint algorithm. */
+function driveStoredHash(){
+  return state.settings.driveFpVersion===DRIVE_FP_VERSION?(state.settings.driveLastSnapshotHash||''):'';
 }
 async function waitForDriveIdle(timeoutMs=20000){
   const started=Date.now();
@@ -10895,7 +11040,9 @@ async function markDriveInSync(fileName){
   state.settings.driveLastSnapshotHash=fingerprint;
   state.settings.driveLastSyncedAt=now;
   await put('settings',{key:'driveLastBackupName',value:fileName});
+  state.settings.driveFpVersion=DRIVE_FP_VERSION;
   await put('settings',{key:'driveLastSnapshotHash',value:fingerprint});
+  await put('settings',{key:'driveFpVersion',value:DRIVE_FP_VERSION});
   await put('settings',{key:'driveLastSyncedAt',value:now});
 }
 async function reloadSettingsState(){
@@ -10908,7 +11055,7 @@ async function pullDriveBackup(file,interactive){
   isRestoring=true;                                   // no auto-backup while the database is rewritten
   try{
     const snapshot=await googleDriveDownload(file.id,interactive);
-    const summary=await AssetBookDB.restore(snapshot,'replace');
+    const summary=await AssetBookDB.restore(snapshot,'replace',{interactive});
     await reloadSettingsState();
     await markDriveInSync(file.name);
     if(appReady)renderAll();
@@ -10961,8 +11108,8 @@ async function reconcileWithDrive(interactive){
   let localUnchanged=!hasData;
   if(!localUnchanged&&base){
     const fingerprint=await snapshotFingerprint(snapshot);
-    if(fingerprint&&state.settings.driveLastSnapshotHash){
-      localUnchanged=state.settings.driveLastSnapshotHash===fingerprint;
+    if(fingerprint&&driveStoredHash()){
+      localUnchanged=driveStoredHash()===fingerprint;
     }else if(fingerprint){
       // Older app version never stored a fingerprint: compare with the backup this device last uploaded.
       const baseFile=files.find(file=>file.name===base);
@@ -10987,7 +11134,7 @@ async function reconcileWithDrive(interactive){
     await saveDriveSafetySnapshot('before merging with Drive',{holdsLock:true,interactive});
     isRestoring=true;
     try{
-      await AssetBookDB.restore(await googleDriveDownload(latest.id,interactive),'merge');
+      await AssetBookDB.restore(await googleDriveDownload(latest.id,interactive),'merge',{interactive});
       await reloadSettingsState();
       if(appReady)renderAll();
     }finally{isRestoring=false}
@@ -11027,7 +11174,7 @@ async function syncGoogleDrive(options={}){
     const forceUpload=!!options.force||reconciled.action==='upload';
     const snapshot=await AssetBookDB.snapshot();
     const fingerprint=await snapshotFingerprint(snapshot);
-    if(fingerprint&&!forceUpload&&state.settings.driveLastSnapshotHash===fingerprint&&state.settings.driveLastBackupName){
+    if(fingerprint&&!forceUpload&&driveStoredHash()===fingerprint&&state.settings.driveLastBackupName){
       // Nothing changed since the last upload: only skip while that backup still exists in Drive.
       const existing=reconciled.files;
       if(existing.some(file=>file.name===state.settings.driveLastBackupName)){
@@ -11049,10 +11196,12 @@ async function syncGoogleDrive(options={}){
     await put('settings',{key:'driveLastSyncedAt',value:now});
     await put('settings',{key:'driveLastBackupName',value:fileName});
     state.settings.driveLastSnapshotHash=fingerprint;
+    state.settings.driveFpVersion=DRIVE_FP_VERSION;
     await put('settings',{key:'driveLastSnapshotHash',value:fingerprint});
+    await put('settings',{key:'driveFpVersion',value:DRIVE_FP_VERSION});
     googleDriveStatus='Connected to Google Drive.';
     saved=true;
-    if(!silent)toast(`Google Drive backup saved (${formatFileSize(result.size)})${removed?` · ${removed} older backup(s) removed`:''}`);
+    if(!silent)toast(`Google Drive backup saved (${formatFileSize(result.size)})${result.pdfsUploaded?` · ${result.pdfsUploaded} new PDF(s) uploaded`:''}${removed?` · ${removed} older backup(s) removed`:''}`);
   }catch(error){
     googleDriveStatus=error.message||'Google Drive sync failed.';
     throw error;
@@ -11124,7 +11273,7 @@ async function restoreLatestGoogleDriveBackup(interactive=false){
     const files=await googleDriveList(interactive);
     if(!files.length)return false;
     const snapshot=await googleDriveDownload(files[0].id,interactive);
-    const summary=await AssetBookDB.restore(snapshot,'replace');
+    const summary=await AssetBookDB.restore(snapshot,'replace',{interactive});
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
     loadZakatState();
@@ -11186,7 +11335,7 @@ async function restoreSelectedGoogleDriveBackup(){
     const snapshot=await googleDriveDownload(fileId,true);
     if(!snapshot||!Array.isArray(snapshot.records))throw new Error('Unsupported Google Drive backup format.');
     const safetySaved=await saveDriveSafetySnapshot('before Drive restore');
-    const summary=await AssetBookDB.restore(snapshot,'replace');
+    const summary=await AssetBookDB.restore(snapshot,'replace',{interactive:true});
     await loadState();
     state.settings=(await getAll('settings')).reduce((out,item)=>(out[item.key]=item.value,out),state.settings||{});
     loadZakatState();
