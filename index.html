@@ -35,7 +35,7 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="styles.css?v=39">
+  <link rel="stylesheet" href="styles.css?v=44">
   <!-- Third-party libraries, pinned + Subresource Integrity so a compromised CDN cannot inject code -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC" crossorigin="anonymous"></script>
@@ -125,8 +125,9 @@
       <button class="nav-item" data-page="records"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg><b>Assets &amp; Liabilities</b></button>
       <button class="nav-item" data-page="incomeExpenses"><svg class="ic" aria-hidden="true"><use href="#i-up"/></svg><b>Income &amp; Expenses</b></button>
       <button class="nav-item" data-page="balance"><svg class="ic" aria-hidden="true"><use href="#i-scale"/></svg><b>Balance Sheet</b></button>
-      <button class="nav-item" data-page="zakat"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><b>Zakat</b></button>
-      <button class="nav-item" data-page="officePurchases"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><b>Office Purchase &amp; Bill</b></button>
+      <button class="nav-item" data-page="zakat"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><b>Wealth Purification</b></button>
+      <button class="nav-item" data-page="incomeTax"><svg class="ic" aria-hidden="true"><use href="#i-calc"/></svg><b>Income Tax Calculation</b></button>
+      <button class="nav-item" data-page="officialAccount"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><b>Official Account</b></button>
       <button class="nav-item" data-page="backup"><svg class="ic" aria-hidden="true"><use href="#i-backup"/></svg><b>Data Backup &amp; Restore</b></button>
       <button class="nav-item" data-page="settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg><b>Settings</b></button>
     </nav>
@@ -406,7 +407,28 @@
         </div>
       </section>
 
-    <section class="content hidden" id="officePurchasesPage" data-page-panel>
+    <section class="content hidden" id="incomeTaxPage" data-page-panel>
+      <div class="toolbar tax-toolbar">
+        <label>Financial Year<select id="taxYearSelect" aria-label="Financial Year"></select></label>
+        <span class="hint" id="taxYearRange"></span>
+        <div class="tax-export" id="taxExportBar" role="group" aria-label="Reports and exports">
+          <button type="button" class="btn btn-primary" id="taxSaveBtn" title="Save the tax return value overrides entered on this page"><svg class="ic" aria-hidden="true"><use href="#i-backup"/></svg><span>Save Change</span></button>
+          <button type="button" class="btn btn-xls" id="taxExcelBtn"><svg class="ic" aria-hidden="true"><use href="#i-sheet"/></svg><span>Generate Excel</span></button>
+          <button type="button" class="btn btn-pdf" id="taxPdfBtn"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><span>Generate PDF</span></button>
+          <button type="button" class="btn btn-xls hidden" id="taxFullExcelBtn" title="All six sub-pages in one workbook"><svg class="ic" aria-hidden="true"><use href="#i-sheet"/></svg><span>Full Summary Excel</span></button>
+          <button type="button" class="btn btn-pdf hidden" id="taxFullPdfBtn" title="All six sub-pages in one PDF"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><span>Full Summary PDF</span></button>
+        </div>
+      </div>
+      <div class="settings-tabs" id="taxTabs" role="tablist" aria-label="Income Tax sections"><button type="button" class="settings-tab active" data-tax-tab="dashboard" role="tab" aria-selected="true" tabindex="0"><span>Income Tax Dashboard</span></button><button type="button" class="settings-tab" data-tax-tab="income" role="tab" aria-selected="false" tabindex="-1"><span>Fiscal Year Income</span></button><button type="button" class="settings-tab" data-tax-tab="expenses" role="tab" aria-selected="false" tabindex="-1"><span>Fiscal Year Expenses</span></button><button type="button" class="settings-tab" data-tax-tab="rebate" role="tab" aria-selected="false" tabindex="-1"><span>Rebate</span></button><button type="button" class="settings-tab" data-tax-tab="assets" role="tab" aria-selected="false" tabindex="-1"><span>Asset &amp; Liabilities</span></button><button type="button" class="settings-tab" data-tax-tab="deduction" role="tab" aria-selected="false" tabindex="-1"><span>Tax Deduction</span></button></div>
+      <div id="taxBody"></div>
+    </section>
+
+    <section class="content hidden" id="officialAccountPage" data-page-panel>
+      <div class="settings-tabs" id="officialTabs" role="tablist" aria-label="Official Account sub-pages">
+        <button type="button" class="settings-tab active" data-official-sub="office" role="tab" aria-selected="true" tabindex="0"><span>Office Purchase &amp; Bill</span></button>
+        <button type="button" class="settings-tab" data-official-sub="advanced" role="tab" aria-selected="false" tabindex="-1"><span>Advanced Adjustment</span></button>
+      </div>
+    <div id="officePurchasesPage" data-official-panel="office">
       <div class="cards-grid" id="officeSummaryCards"></div>
       <!-- `#officeFilterBar` carries the stacking context for the Financial Year list (see styles.css). -->
       <div class="filters card office-filter-card" id="officeFilterBar">
@@ -433,6 +455,33 @@
         <div id="officeAccountSummary" class="office-account-summary"></div>
         <div class="pagination" id="officePagination"></div>
       </div>
+    </div>
+
+    <div id="advancedAdjustmentPage" data-official-panel="advanced" class="hidden">
+      <div class="cards-grid" id="advSummaryCards"></div>
+      <div class="filters card adv-filter-card">
+        <div class="filter-row">
+          <label class="adv-fy-label">Financial Year
+            <select id="advYearSelect" aria-label="Financial Year"></select>
+          </label>
+          <span class="hint" id="advYearRange"></span>
+        </div>
+      </div>
+      <div class="card table-card adv-table-card">
+        <div class="table-toolbar">
+          <div class="tt-title"><h3>Official Advance Adjustment</h3><p id="advRecordCount" aria-live="polite"></p></div>
+          <div class="tt-actions">
+            <button class="btn" id="advImportBtn" type="button"><svg class="ic" aria-hidden="true"><use href="#i-backup"/></svg><span>Import Excel</span></button>
+            <button class="btn btn-xls" id="advExportExcel" type="button"><svg class="ic" aria-hidden="true"><use href="#i-sheet"/></svg><span>Export Excel</span></button>
+            <button class="btn btn-pdf" id="advExportPdf" type="button"><svg class="ic" aria-hidden="true"><use href="#i-file"/></svg><span>Print / Save PDF</span></button>
+            <button class="btn btn-primary" id="advAddBtn" type="button"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg><span>Add Advance</span></button>
+          </div>
+        </div>
+        <div class="table-wrap"><table id="advTable" class="office-table adv-table"></table></div>
+        <p class="hint adv-note">The report (Excel and PDF) is generated in Bengali, in the same layout as the Excel sheet.</p>
+      </div>
+      <input type="file" id="advImportFile" accept=".xlsx,.xls,.csv" hidden>
+    </div>
     </section>
 
     <section class="content hidden" id="backupPage" data-page-panel>
@@ -528,6 +577,21 @@
                 <button class="btn" id="officeExportBtn">Export Office Workbook</button>
               </div>
               <p class="hint">The template has <b>Entry Type *</b> and <b>Category *</b> dropdowns in every FY sheet; Export produces the same side-by-side layout, so the file can be re-imported without duplicates.</p>
+            </div>
+            <div class="card settings-card" id="itMigrationCard">
+              <h3>Income Tax Workbook</h3>
+              <p>Import the FY-wise <b>IT Summary</b> workbook (sheets <b>Summary</b>, <b>Exependiture</b>, <b>Source of Fund</b>, <b>Rebate</b>, <b>Assets</b>, <b>Liabilities</b>, <b>Tax Deduction</b>). The imported lines are stored per Financial Year and shown as Tax Return values across the Income Tax pages; Records and Income &amp; Expenses are not changed.</p>
+              <div class="inline-form migration-actions office-migration-actions">
+                <button class="btn" id="itImportBtn">Import IT Workbook</button>
+                <button class="btn" id="itTemplateBtn">Download Template</button>
+                <button class="btn" id="itExportBtn">Export IT Workbook</button>
+              </div>
+              <p class="hint">Import detects the FY from the sheet title (e.g. <b>2025-26</b>), FY-suffixed sheet names (<b>Summary 2025-26</b>) or a <b>Fiscal Year</b> / <b>Income Year</b> column. Export combines live app data with this FY&#39;s tax overrides and manual entries in the same layout, so it can be re-imported.</p>
+              <div class="migration-history">
+                <h4>Migration History</h4>
+                <p class="hint">Each IT workbook import is tracked as a batch. Deleting a batch also removes the tax-return lines it imported.</p>
+                <div id="itMigrationHistoryList"></div>
+              </div>
             </div>
             <div class="card settings-card">
               <h3>Full Backup &amp; Restore</h3>
@@ -676,11 +740,36 @@
     </form>
   </dialog>
 
+  <dialog id="taxEntryModal" class="modal" aria-labelledby="taxEntryTitle">
+    <form id="taxEntryForm" method="dialog" novalidate>
+      <div class="modal-head"><div><h2 id="taxEntryTitle">Income Tax Entry</h2></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
+      <div class="modal-body" id="taxEntryFields"></div>
+      <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
+    </form>
+  </dialog>
+
   <dialog id="incomeModal" class="modal" aria-labelledby="incomeModalTitle">
     <form id="incomeForm" method="dialog">
       <div class="modal-head"><div><h2 id="incomeModalTitle">Add Income / Expense</h2><p id="incomeModalSubtitle"></p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
       <div class="modal-body" id="incomeFormFields"></div>
       <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="submit" class="btn btn-primary">Save Transaction</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="advModal" class="modal" aria-labelledby="advModalTitle">
+    <form id="advForm" method="dialog" novalidate>
+      <div class="modal-head"><div><h2 id="advModalTitle">Add Advance</h2><p id="advModalSubtitle">Official advance taken, spent and adjusted</p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
+      <div class="modal-body adv-form-grid">
+        <label>Financial Year<select id="advFormYear" required></select></label>
+        <label>Advance Date<input type="date" id="advFormDate" required></label>
+        <label class="adv-wide">Advance Description (বিবরণ)<textarea id="advFormDesc" rows="3" required placeholder="অগ্রিম গ্রহণের বিবরণ (Bengali or English)"></textarea></label>
+        <label>Advance Received<input type="number" id="advFormAdvance" min="0" step="0.01" required></label>
+        <label>Amount Spent<input type="number" id="advFormSpent" min="0" step="0.01" required></label>
+        <div class="adv-file-slot" id="advSlotAdvance"><span class="adv-file-title">Submit Advance File <em>(PDF)</em></span><div class="adv-file-body"></div><input type="file" accept="application/pdf,.pdf" hidden data-adv-input="advance"></div>
+        <div class="adv-file-slot" id="advSlotCost"><span class="adv-file-title">Real Cost <em>(PDF)</em></span><div class="adv-file-body"></div><input type="file" accept="application/pdf,.pdf" hidden data-adv-input="cost"></div>
+        <p class="hint adv-wide" id="advFormUnder">Under-spent: 0</p>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="button" class="btn btn-primary" id="advFormSave">Save</button></div>
     </form>
   </dialog>
 
@@ -710,6 +799,32 @@
         <p class="hint office-import-note">Accepted: <b>.xlsx</b>, <b>.xls</b> or <b>.csv</b> — a filled template, an exported workbook, or the Office Purchase &amp; Bill file.</p>
       </div>
       <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="button" class="btn btn-primary" id="officeImportConfirm" disabled>Import Workbook</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="itImportModal" class="modal office-import-modal" aria-labelledby="itImportTitle" aria-describedby="itImportIntro">
+    <form method="dialog" id="itImportForm" novalidate>
+      <div class="modal-head"><div><h2 id="itImportTitle">Import IT Workbook</h2><p>Income Tax Summary</p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
+      <div class="modal-body">
+        <p class="hint office-import-intro" id="itImportIntro">Choose the IT Summary workbook, then pick the Financial Year to import into or replace. Leave it on auto-detect to use the FY found in the sheet titles or names.</p>
+        <label class="it-import-field" for="itImportYear"><span class="lbl">Financial Year</span><select id="itImportYear"></select></label>
+        <label class="office-account-check office-import-check" for="itImportReplace">
+          <span class="office-check-row"><input type="checkbox" id="itImportReplace" checked><span>Replace existing tax-return values of the FY</span></span>
+          <span class="hint" id="itImportReplaceHint"></span>
+        </label>
+        <label class="office-account-check office-import-check it-import-gap" for="itImportOverride">
+          <span class="office-check-row"><input type="checkbox" id="itImportOverride" checked><span>Override Income Tax pages with imported values</span></span>
+          <span class="hint" id="itImportOverrideHint"></span>
+        </label>
+        <input type="file" id="itImport" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden>
+        <div class="office-import-picker">
+          <button type="button" class="btn" id="itImportChoose">Choose File…</button>
+          <span class="office-import-file" id="itImportFileName">No file chosen</span>
+          <button type="button" class="btn hidden" id="itImportClear">Remove</button>
+        </div>
+        <p class="hint office-import-note">Accepted: <b>.xlsx</b>, <b>.xls</b> or <b>.csv</b> — the IT Summary workbook, an exported workbook or the downloaded template.</p>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="button" class="btn btn-primary" id="itImportConfirm" disabled>Import Workbook</button></div>
     </form>
   </dialog>
 
@@ -743,6 +858,17 @@
         <div id="migrationEditRows"></div>
       </div>
       <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="button" class="btn btn-primary" id="migrationChooseFile">Choose replacement file…</button></div>
+    </form>
+  </dialog>
+  <dialog id="itMigrationEditModal" class="modal" aria-labelledby="itMigrationEditTitle">
+    <form method="dialog">
+      <div class="modal-head"><div><h2 id="itMigrationEditTitle">Edit Migration</h2><p id="itMigrationEditSubtitle"></p></div><button type="button" class="close-btn" data-close-modal aria-label="Close">×</button></div>
+      <div class="modal-body">
+        <p class="hint" id="itMigrationEditMeta"></p>
+        <p class="hint">Remove individual lines from this batch below, or replace the whole batch by re-importing a file. Replacing deletes the old lines for this batch and imports the new file without creating duplicates.</p>
+        <div id="itMigrationEditRows"></div>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn" data-close-modal>Cancel</button><button type="button" class="btn btn-primary" id="itMigrationChooseFile">Choose replacement file…</button></div>
     </form>
   </dialog>
   <input type="file" id="migrationReplaceFile" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden>
@@ -992,6 +1118,7 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite"></div>
   <input type="file" id="replaceDocumentFile" accept=".pdf,application/pdf" hidden>
-  <script src="app.js?v=52"></script>
+  <script src="app.js?v=60"></script>
+  <script src="wealth.js?v=3"></script>
 </body>
 </html>

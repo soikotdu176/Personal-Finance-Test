@@ -2406,3 +2406,78 @@ body.office-fy-open #officePurchasesPage { z-index: 1; }
 
 .asset-deduction-field{display:inline-flex;align-items:center;gap:6px;margin-right:8px;font-size:.78rem}
 .asset-deduction-field span{color:var(--muted,#64748b);white-space:nowrap}
+
+/* Income Tax Calculation */
+#incomeTaxPage .tax-toolbar { align-items: flex-end; margin-bottom: 12px; }
+#incomeTaxPage .settings-tabs { margin-bottom: 16px; }
+#incomeTaxPage #taxBody > .card, #incomeTaxPage #taxBody > .cards-grid, #incomeTaxPage #taxBody > .charts-grid { margin-bottom: 16px; }
+#incomeTaxPage .tax-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#incomeTaxPage .tax-table td, #incomeTaxPage .tax-table th { vertical-align: middle; }
+#incomeTaxPage .tax-table th.num { text-align: right; }
+#incomeTaxPage .tax-table tr.total td { font-weight: 800; border-top: 1px solid var(--line-strong); background: var(--primary-soft); }
+#incomeTaxPage .tax-table tr.cat-row td { font-weight: 700; }
+#incomeTaxPage .tax-table tr.sub-row td:first-child { padding-left: 26px; }
+#incomeTaxPage .tax-input { width: 150px; max-width: 100%; text-align: right; font-variant-numeric: tabular-nums; }
+#incomeTaxPage .table-wrap .btn { padding: 4px 10px; font-size: 12px; }
+@media (max-width: 900px) { #incomeTaxPage .tax-grid { grid-template-columns: 1fr; } }
+@media (max-width: 768px) {
+  #incomeTaxPage .tax-toolbar label, #incomeTaxPage .tax-toolbar select { width: 100%; }
+  #incomeTaxPage .tax-cards { grid-template-columns: 1fr 1fr; }
+  #incomeTaxPage .tax-input { width: 110px; }
+}
+#incomeTaxPage .tax-export { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+@media (max-width: 768px) { #incomeTaxPage .tax-export { margin-left: 0; width: 100%; } #incomeTaxPage .tax-export .btn { flex: 1 1 calc(50% - 8px); } }
+
+/* Income Tax workbook import popup */
+.office-import-modal label.it-import-field { display: block; margin: 0 0 10px; }
+.it-import-field .lbl { display: block; margin-bottom: 4px; font-size: 12px; font-weight: 700; color: var(--text-2); }
+.it-import-field select { width: 100%; }
+.office-import-modal label.it-import-gap { margin-top: 10px; }
+
+#taxSaveBtn.dirty { background: linear-gradient(135deg, #f59e0b, #d97706); box-shadow: 0 6px 16px rgba(217, 119, 6, .35); }
+#taxEntryFields .check-line { display: flex; align-items: center; gap: 6px; font-size: .85rem; }
+
+/* Wealth Purification (Zakat -> Dubious / Haram Income) */
+.wp-top-tabs, .wp-kind-tabs { margin-bottom: 14px; }
+.wp-comment { max-width: 280px; white-space: normal; font-size: 12px; color: var(--muted); }
+.wp-actions { white-space: nowrap; }
+.wp-table tfoot th { background: var(--surface-2); }
+.wp-file-field { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
+.wp-file-label { font-size: 12px; font-weight: 700; color: var(--text-2); }
+.wp-file-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#wealthView .tt-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#wpEntryFields textarea { width: 100%; }
+@media (max-width: 640px) { #wpEntryFields, #wpPaymentFields { grid-template-columns: 1fr; } }
+
+
+/* ==========================================================================
+   Official Account: sidebar sub-items + Advanced Adjustment page
+   ========================================================================== */
+.adv-fy-label { display: inline-flex; align-items: center; gap: 10px; font-size: 12.5px; font-weight: 700; color: var(--muted); }
+.adv-fy-label select { min-width: 150px; }
+.adv-filter-card .filter-row { align-items: center; gap: 14px; }
+.adv-table { min-width: 980px; }
+.adv-table .adv-desc { min-width: 280px; max-width: 440px; white-space: normal; overflow-wrap: anywhere; }
+.adv-table tfoot td { background: var(--surface-2); border-top: 2px solid var(--line); }
+.adv-table td .tag { margin-left: 6px; }
+.adv-note { margin: 12px 18px 16px; }
+.adv-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.adv-form-grid label { display: grid; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--muted); }
+.adv-form-grid .adv-wide { grid-column: 1 / -1; }
+.adv-form-grid textarea { resize: vertical; min-height: 72px; font-family: inherit; }
+#advancedAdjustmentPage { position: relative; }
+#officialAccountPage .settings-tabs { margin-bottom: 16px; }
+@media (max-width: 700px) {
+  .adv-form-grid { grid-template-columns: 1fr; }
+  #advancedAdjustmentPage .cards-grid { grid-template-columns: 1fr; }
+  #advancedAdjustmentPage .filter-row, #advancedAdjustmentPage .tt-actions { min-width: 0; }
+  .adv-fy-label { width: 100%; justify-content: space-between; }
+}
+.adv-table td:nth-child(2) { white-space: nowrap; }
+.adv-table td:nth-child(2) .tag { display: block; margin: 4px 0 0; width: fit-content; }
+
+.adv-file-slot { display: grid; gap: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: 12px; background: var(--surface-2); align-content: start; }
+.adv-file-title { font-size: 12.5px; font-weight: 700; color: var(--muted); }
+.adv-file-title em { font-style: normal; font-weight: 500; opacity: .8; }
+.adv-file-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text); }
+.adv-file-body .adv-fname { overflow-wrap: anywhere; font-weight: 600; }

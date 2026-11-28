@@ -34,7 +34,7 @@ const SITE = /test/i.test(location.pathname) ? SITE_PROFILES.test : SITE_PROFILE
 
 const DB_NAME = SITE.dbName;
 const DB_VERSION = 6;                       // v6: protected settingsStore keeps the Major Head / Category / Subcategory tree
-const APP_VERSION = '2026-11-26-v17';
+const APP_VERSION = '2026-11-27-v18';
 const DATA_VERSION_KEY = SITE.prefix + '-data-version';
 let db;
 let state = { records: [], categories: [], documents: [], settings: {}, backupHistory: [], incomeExpenses: [], deductedRecords: [], incomeGroups: [], migrationHistory: [], officePurchases: [], categoryStructureMeta: {} };
@@ -1054,6 +1054,8 @@ async function init(){
   bindNavigation();
   bindGlobalActions();
   bindZakatEvents();
+  if(typeof bindWealthEvents==='function')bindWealthEvents();
+  bindIncomeTaxEvents();
   bindDelegatedActions();
   bindDashboardChartToggles();
   renderAll();
@@ -1145,7 +1147,7 @@ function initTheme(){
 /* ==========================================================================
    Navigation (sidebar + mobile bottom bar) with animated active pill
    ========================================================================== */
-const PAGE_TITLES={dashboard:['Dashboard','Financial overview'],records:['Assets & Liabilities','Manage financial records'],incomeExpenses:['Income & Expenses','Track cash flow, income and spending'],balance:['Balance Sheet','Consolidated financial position'],zakat:['Zakat','Nisab, assets and distribution ledger'],officePurchases:['Office Purchase & Bill','FY-wise office outflow, inflow and cash & bank effects'],backup:['Data Backup & Restore','Portable data management'],settings:['Settings','Application preferences']};
+const PAGE_TITLES={dashboard:['Dashboard','Financial overview'],records:['Assets & Liabilities','Manage financial records'],incomeExpenses:['Income & Expenses','Track cash flow, income and spending'],balance:['Balance Sheet','Consolidated financial position'],zakat:['Wealth Purification','Zakat, Dubious Income and Haram Income'],officialAccount:['Official Account','Office purchases, bills and advance adjustments'],incomeTax:['Income Tax Calculation','FY-wise income, rebate, assets and tax deducted'],backup:['Data Backup & Restore','Portable data management'],settings:['Settings','Application preferences']};
 
 function playEnter(panel){
   if(!panel)return;
@@ -1203,7 +1205,7 @@ function toggleDrawer(){
 function showPage(page){
   if(!PAGE_TITLES[page])return;
   // The Financial Year list may live in the body-level overlay: never let it survive a page change.
-  if(page!=='officePurchases')closeOfficeYearMenu();
+  if(page!=='officialAccount')closeOfficeYearMenu();
   currentPage=page;
   mobileCalendarOpen=false;
   document.getElementById('mobileCalendarPage').classList.add('hidden');
@@ -1229,7 +1231,8 @@ function showPage(page){
   if(page==='incomeExpenses')renderIncomePage();
   if(page==='balance')renderBalance();
   if(page==='zakat')renderZakat();
-  if(page==='officePurchases')renderOfficePage();
+  if(page==='incomeTax')renderIncomeTax();
+  if(page==='officialAccount')renderOfficialAccount();
   if(page==='backup')renderBackupHistory();
   if(page==='settings')renderSettings();
   if(page==='dashboard'&&isMobileViewport())renderMobileDashboard();
@@ -1237,6 +1240,343 @@ function showPage(page){
   placePills();
   window.scrollTo({top:0,behavior:reducedMotion()?'auto':'smooth'});
 }
+/* ==========================================================================
+   Official Account  >  Advanced Adjustment (FY-wise official advance adjustment)
+   Screen is English; the Excel / PDF report is Bengali, laid out like "2025-26.xlsx".
+   Rows live in the `settings` store (key `advancedAdjustments`), so ZIP backup / restore
+   and the Drive snapshot carry them with no schema change.
+   ========================================================================== */
+const ADV_KEY='advancedAdjustments';
+const ADV_OFFICER='জনাব সৈকত রায়হান, সহকারী ব্যবস্থাপক';          // title line of the Bengali report
+const ADV_HEAD=['ক্রমিক নং','অগ্রিম গ্রহণের তারিখ','অগ্রিম গ্রহণের বিবরণ','গৃহিত অগ্রিম অর্থ','ব্যয়কৃত অর্থ','কমব্যয়কৃত অর্থ','খসড়া ফাইল','ফাইল'];
+const ADV_TOTAL_LABEL='মোট';
+const ADV_NUM_FMT={sl:'[$-5000445]00',date:'[$-5000845]dd/mm/yyyy;@'};
+let officialSub='office',advYear='',editingAdvId=null;
+const ADV_SLOTS=[{key:'advance',field:'advanceDocId',slot:'advSlotAdvance',label:'Submit Advance File'},{key:'cost',field:'costDocId',slot:'advSlotCost',label:'Real Cost'}];
+const advDraft={};   // per slot: {existing:docMeta|null, removed:bool, added:File|null}
+const advDocMeta=id=>id?state.documents.find(d=>d.id===id)||null:null;
+
+const bnNum=v=>String(v).replace(/\d/g,d=>'০১২৩৪৫৬৭৮৯'[d]);
+const bnDate=iso=>{const m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})/);return m?bnNum(`${m[3]}/${m[2]}/${m[1]}`):''};
+const bnMoney=n=>bnNum((Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:2}))+'/-';
+const advRows=()=>Array.isArray(state.settings[ADV_KEY])?state.settings[ADV_KEY]:[];
+function advSorted(fy){
+  return advRows().filter(r=>normIncomeYear(r.fy)===fy).sort((a,b)=>String(a.date).localeCompare(String(b.date))||String(a.createdAt||'').localeCompare(String(b.createdAt||'')));
+}
+function advYears(){
+  const set=new Set(advRows().map(r=>normIncomeYear(r.fy)).filter(Boolean));
+  (state.settings.incomeYears||[]).forEach(y=>{const n=normIncomeYear(y);if(n&&!parseIncomeYear(n).plain)set.add(n)});
+  set.add(fiscalYearFromDate(todayISO()));
+  return [...set].filter(Boolean).sort().reverse();
+}
+const advTotals=list=>list.reduce((t,r)=>{t.advance+=Number(r.advance)||0;t.spent+=Number(r.spent)||0;return t},{advance:0,spent:0});
+async function advSave(rows){state.settings[ADV_KEY]=rows;await put('settings',{key:ADV_KEY,value:rows})}
+
+/* --- sub-page switching (sidebar sub-items and the tab strip share data-official-sub) --- */
+function setOfficialSub(sub,focus){
+  officialSub=sub==='advanced'?'advanced':'office';
+  try{localStorage.setItem(SITE.prefix+'-official-sub',officialSub)}catch(e){}
+  if(currentPage!=='officialAccount'){showPage('officialAccount');return}
+  applyOfficialSub(focus);
+}
+function applyOfficialSub(focus){
+  const page=document.getElementById('officialAccountPage');
+  if(!page)return;
+  page.querySelectorAll('[data-official-panel]').forEach(p=>p.classList.toggle('hidden',p.dataset.officialPanel!==officialSub));
+  page.querySelectorAll('#officialTabs [data-official-sub]').forEach(b=>{
+    const on=b.dataset.officialSub===officialSub;
+    b.classList.toggle('active',on);b.setAttribute('aria-selected',String(on));b.tabIndex=on?0:-1;
+    if(on&&focus)b.focus();
+  });
+  document.getElementById('pageSubtitle').textContent=officialSub==='advanced'?'FY-wise advance taken, spent and adjusted':'FY-wise office outflow, inflow and cash & bank effects';
+  if(officialSub==='advanced'){closeOfficeYearMenu();renderAdvanced()}else renderOfficePage();
+}
+function renderOfficialAccount(){applyOfficialSub(false)}
+function bindOfficialNav(){
+  try{const saved=localStorage.getItem(SITE.prefix+'-official-sub');if(saved==='advanced'||saved==='office')officialSub=saved}catch(e){}
+  document.querySelectorAll('[data-official-sub]').forEach(b=>{b.onclick=()=>setOfficialSub(b.dataset.officialSub)});
+  const tabs=document.getElementById('officialTabs');
+  if(tabs)tabs.onkeydown=e=>{
+    if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;
+    e.preventDefault();setOfficialSub(officialSub==='office'?'advanced':'office',true);
+  };
+  const T=id=>document.getElementById(id);
+  T('advYearSelect').onchange=e=>{advYear=e.target.value;renderAdvanced()};
+  T('advAddBtn').onclick=()=>openAdvModal();
+  T('advExportExcel').onclick=exportAdvExcel;
+  T('advExportPdf').onclick=printAdvReport;
+  T('advImportBtn').onclick=()=>T('advImportFile').click();
+  T('advImportFile').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)importAdvWorkbook(f)};
+  T('advTable').onclick=e=>{
+    const b=e.target.closest('[data-adv-act]');if(!b)return;
+    if(b.dataset.advAct==='edit')openAdvModal(b.dataset.id);
+    else if(b.dataset.advAct==='view')openPdfViewer(b.dataset.doc);
+    else deleteAdv(b.dataset.id);
+  };
+  T('advFormSave').onclick=saveAdvForm;
+  bindAdvSlots();
+  ['advFormAdvance','advFormSpent'].forEach(id=>{T(id).oninput=updateAdvUnder});
+  T('advForm').onsubmit=e=>{e.preventDefault();saveAdvForm()};
+}
+
+
+function advFileCell(id){
+  const m=advDocMeta(id);
+  return m?`<button type="button" class="action-link" data-adv-act="view" data-doc="${esc(m.id)}" title="${esc(m.name||'')}">View PDF</button>`:'—';
+}
+function renderAdvSlots(){
+  ADV_SLOTS.forEach(sl=>{
+    const d=advDraft[sl.key]||{},host=document.querySelector(`#${sl.slot} .adv-file-body`);
+    if(!host)return;
+    const cur=d.added?{name:d.added.name,size:d.added.size,isNew:true}:(d.existing&&!d.removed?{name:d.existing.name||d.existing.title,size:d.existing.size}:null);
+    host.innerHTML=cur
+      ?`<span class="adv-fname">${esc(cur.name)}</span><span class="hint">${formatFileSize(cur.size)}${cur.isNew?' · new':''}</span><button type="button" class="action-link" data-adv-slot="${sl.key}" data-slot-act="view">View</button><button type="button" class="action-link" data-adv-slot="${sl.key}" data-slot-act="pick">Replace</button><button type="button" class="action-link danger" data-adv-slot="${sl.key}" data-slot-act="remove">Remove</button>`
+      :`<button type="button" class="btn" data-adv-slot="${sl.key}" data-slot-act="pick">${icon('backup')}<span>Upload PDF</span></button>${d.removed?'<span class="hint">Will be removed on save</span>':''}`;
+  });
+}
+function bindAdvSlots(){
+  document.getElementById('advModal').addEventListener('click',async e=>{
+    const b=e.target.closest('[data-slot-act]');if(!b)return;
+    const sl=ADV_SLOTS.find(x=>x.key===b.dataset.advSlot),d=advDraft[sl.key];
+    const act=b.dataset.slotAct;
+    if(act==='pick')document.querySelector(`#${sl.slot} input[type=file]`).click();
+    else if(act==='remove'){d.added=null;d.removed=true;renderAdvSlots()}
+    else if(act==='view'){
+      if(d.added)await openPdfViewer({blob:d.added,name:d.added.name,size:d.added.size});
+      else if(d.existing){const blob=await getDocBlob(d.existing.id);if(blob)await openPdfViewer({blob,name:d.existing.name||'file.pdf',size:d.existing.size||blob.size});else toast('This file is not available on this device.',true)}
+    }
+  });
+  document.querySelectorAll('[data-adv-input]').forEach(input=>{
+    input.onchange=e=>{
+      const file=e.target.files[0];e.target.value='';
+      if(!file)return;
+      if(!isPdfFile(file)){toast('Only PDF files can be attached.',true);return}
+      const d=advDraft[input.dataset.advInput];d.added=file;d.removed=false;renderAdvSlots();
+    };
+  });
+}
+
+/* --- screen --- */
+function renderAdvanced(){
+  const years=advYears();
+  if(!advYear||!years.includes(advYear))advYear=years.includes('2025-26')&&advRows().some(r=>normIncomeYear(r.fy)==='2025-26')?'2025-26':years[0];
+  document.getElementById('advYearSelect').innerHTML=years.map(y=>`<option value="${esc(y)}" ${y===advYear?'selected':''}>${esc(y)}</option>`).join('');
+  const range=fiscalRange(advYear);
+  document.getElementById('advYearRange').textContent=range?`${fmtDate(range.from)} to ${fmtDate(range.to)}`:'';
+  const list=advSorted(advYear),t=advTotals(list),under=t.advance-t.spent;
+  const card=(i,ic,label,value,kpi,ink,meta)=>`<div class="summary-card" style="--i:${i};--kpi:${kpi};--kpi-ink:${ink}"><div class="summary-icon">${icon(ic)}</div><div><p>${label}</p><strong class="kpi-value">${formatMoney(value)}</strong><span class="office-card-meta">${meta}</span></div></div>`;
+  document.getElementById('advSummaryCards').innerHTML=[
+    card(0,'down','Advance Received',t.advance,'var(--primary-soft)','var(--primary-2)',`${list.length} advance(s) · ${esc(advYear)}`),
+    card(1,'up','Amount Spent',t.spent,'var(--rose-soft)','#e11d48','Adjusted against the advances'),
+    card(2,'scale','Under-spent (to return)',under,'var(--emerald-soft)','#059669',under===0?'Fully adjusted':'Advance received − amount spent')
+  ].join('');
+  document.getElementById('advRecordCount').textContent=`${list.length} advance${list.length===1?'':'s'} in ${advYear}`;
+  const rows=list.map((r,i)=>{
+    const out=range&&(r.date<range.from||r.date>range.to);
+    return `<tr><td>${i+1}</td><td>${esc(fmtDate(r.date)||'—')}${out?'<span class="tag warn" title="This date falls outside the selected Financial Year">Outside FY</span>':''}</td><td class="adv-desc">${esc(r.description)}</td><td class="num">${formatMoney(r.advance)}</td><td class="num">${formatMoney(r.spent)}</td><td class="num"><strong>${formatMoney((Number(r.advance)||0)-(Number(r.spent)||0))}</strong></td><td>${advFileCell(r.advanceDocId)}</td><td>${advFileCell(r.costDocId)}</td><td class="actions-cell"><button type="button" class="action-link" data-adv-act="edit" data-id="${esc(r.id)}">Edit</button><button type="button" class="action-link danger" data-adv-act="delete" data-id="${esc(r.id)}">Delete</button></td></tr>`;
+  });
+  document.getElementById('advTable').innerHTML=`<thead><tr><th>Sl.</th><th>Advance Date</th><th>Description</th><th class="num">Advance Received</th><th class="num">Amount Spent</th><th class="num">Under-spent</th><th>Submit Advance File</th><th>Real Cost</th><th>Actions</th></tr></thead><tbody>${rows.join('')||`<tr><td colspan="9" class="empty">No advances recorded for ${esc(advYear)} yet. Use “Add Advance” or “Import Excel”.</td></tr>`}</tbody>${list.length?`<tfoot><tr><td colspan="3"><strong>Total</strong></td><td class="num"><strong>${formatMoney(t.advance)}</strong></td><td class="num"><strong>${formatMoney(t.spent)}</strong></td><td class="num"><strong>${formatMoney(under)}</strong></td><td colspan="3"></td></tr></tfoot>`:''}`;
+}
+
+/* --- add / edit --- */
+function updateAdvUnder(){
+  const a=Number(document.getElementById('advFormAdvance').value)||0,s=Number(document.getElementById('advFormSpent').value)||0;
+  document.getElementById('advFormUnder').textContent=`Under-spent: ${formatMoney(a-s)}${s>a?' (spent more than the advance)':''}`;
+}
+function openAdvModal(id=null){
+  editingAdvId=id;
+  const r=id?advRows().find(x=>x.id===id):null;
+  const years=advYears();
+  const fy=r?normIncomeYear(r.fy):advYear||years[0];
+  if(!years.includes(fy))years.unshift(fy);
+  const T=i=>document.getElementById(i);
+  T('advModalTitle').textContent=r?'Edit Advance':'Add Advance';
+  T('advFormYear').innerHTML=years.map(y=>`<option value="${esc(y)}" ${y===fy?'selected':''}>${esc(y)}</option>`).join('');
+  T('advFormDate').value=r?r.date:'';
+  T('advFormDesc').value=r?r.description:'';
+  T('advFormAdvance').value=r?r.advance:'';
+  T('advFormSpent').value=r?r.spent:'';
+  ADV_SLOTS.forEach(sl=>{advDraft[sl.key]={existing:r?advDocMeta(r[sl.field]):null,removed:false,added:null}});
+  renderAdvSlots();
+  updateAdvUnder();
+  T('advModal').showModal();
+}
+async function saveAdvForm(){
+  const T=i=>document.getElementById(i);
+  const fy=normIncomeYear(T('advFormYear').value),date=T('advFormDate').value,description=T('advFormDesc').value.trim();
+  const advance=Number(T('advFormAdvance').value),spent=Number(T('advFormSpent').value);
+  if(!fy||!date||!description){toast('Financial Year, date and description are required.',true);return}
+  if(!(advance>=0)||!(spent>=0)||T('advFormAdvance').value===''||T('advFormSpent').value===''){toast('Enter the advance and spent amounts (0 or more).',true);return}
+  const rows=advRows().map(r=>Object.assign({},r));
+  const rec={fy,date,description,advance,spent};
+  let target;
+  if(editingAdvId){const i=rows.findIndex(r=>r.id===editingAdvId);if(i<0)return;target=rows[i]=Object.assign(rows[i],rec)}
+  else{target=Object.assign({id:uid('adv'),createdAt:new Date().toISOString()},rec);rows.push(target)}
+  try{
+    for(const sl of ADV_SLOTS){
+      const d=advDraft[sl.key]||{};
+      if((d.removed||d.added)&&d.existing){await remove('documents',d.existing.id);await remove('documentBlobs',d.existing.id);delete target[sl.field]}
+      if(d.added){
+        const docId=uid('doc');
+        await put('documentBlobs',{id:docId,blob:d.added});
+        await put('documents',{id:docId,recordId:target.id,title:d.added.name,name:d.added.name,type:d.added.type||'application/pdf',size:d.added.size,category:'Advanced Adjustment',subcategory:sl.label,financialType:'Advance',incomeYear:fy,createdAt:new Date().toISOString()});
+        target[sl.field]=docId;
+      }
+    }
+    state.documents=await getAll('documents');
+    await advSave(rows);advYear=fy;T('advModal').close();renderAdvanced();toast(editingAdvId?'Advance updated':'Advance added');
+  }catch(error){console.error(error);toast('Could not save the advance.',true)}
+}
+async function deleteAdv(id){
+  const r=advRows().find(x=>x.id===id);if(!r)return;
+  if(!(await confirm(`Delete this advance (${formatMoney(r.advance)}) from ${normIncomeYear(r.fy)}?`,'Delete Advance')))return;
+  try{
+    for(const sl of ADV_SLOTS)if(r[sl.field]){await remove('documents',r[sl.field]);await remove('documentBlobs',r[sl.field])}
+    await advSave(advRows().filter(x=>x.id!==id));state.documents=await getAll('documents');renderAdvanced();toast('Advance deleted');
+  }
+  catch(error){console.error(error);toast('Could not delete the advance.',true)}
+}
+
+/* --- Excel import (sheets named like 2025-26, columns exactly as in the Bengali sheet) --- */
+function advCellText(ws,r,c){
+  const cell=ws[XLSX.utils.encode_cell({r,c})];
+  if(!cell||cell.t==='e'||cell.v==null)return '';          // '#VALUE!' link cells import as empty
+  return String(cell.v).trim();
+}
+function advCellDate(ws,r,c){
+  const cell=ws[XLSX.utils.encode_cell({r,c})];
+  if(!cell||cell.t==='e'||cell.v==null||cell.v==='')return '';
+  if(cell.v instanceof Date)return `${cell.v.getFullYear()}-${pad2(cell.v.getMonth()+1)}-${pad2(cell.v.getDate())}`;
+  if(typeof cell.v==='number'){const d=XLSX.SSF.parse_date_code(cell.v);return d?`${d.y}-${pad2(d.m)}-${pad2(d.d)}`:''}
+  const s=String(cell.v).trim().replace(/[০-৯]/g,d=>'০১২৩৪৫৬৭৮৯'.indexOf(d));
+  let m=s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);if(m)return `${m[3]}-${pad2(+m[2])}-${pad2(+m[1])}`;
+  m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);return m?`${m[1]}-${m[2]}-${m[3]}`:'';
+}
+function advCellNumber(ws,r,c){
+  const cell=ws[XLSX.utils.encode_cell({r,c})];
+  if(!cell||cell.t==='e')return 0;
+  const n=typeof cell.v==='number'?cell.v:parseFloat(String(cell.v??'').replace(/,/g,'').replace(/[০-৯]/g,d=>'০১২৩৪৫৬৭৮৯'.indexOf(d)));
+  return Number.isFinite(n)?n:0;
+}
+async function importAdvWorkbook(file){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  if(file.size>30*1024*1024){toast('This file is too large to import (30 MB limit).',true);return}
+  try{
+    const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
+    const rows=advRows().map(r=>Object.assign({},r));
+    const key=r=>[normIncomeYear(r.fy),r.date,r.description,Number(r.advance)||0].join('|');
+    const seen=new Set(rows.map(key));
+    let added=0,skipped=0,sheets=0;
+    for(const name of wb.SheetNames){
+      const p=parseIncomeYear(name);
+      if(!p||p.plain)continue;
+      const fy=normIncomeYear(name),ws=wb.Sheets[name];
+      if(!ws||!ws['!ref'])continue;
+      const range=XLSX.utils.decode_range(ws['!ref']);
+      let head=-1;
+      for(let r=range.s.r;r<=Math.min(range.e.r,range.s.r+12);r++){if(/ক্রমিক|অগ্রিম/.test(advCellText(ws,r,0)+advCellText(ws,r,1))){head=r;break}}
+      if(head<0)continue;
+      sheets++;
+      for(let r=head+1;r<=Math.min(range.e.r,head+2000);r++){
+        const description=advCellText(ws,r,2),date=advCellDate(ws,r,1);
+        if(!description&&!date)continue;
+        if(!date||!description)continue;
+        const rec={id:uid('adv'),createdAt:new Date().toISOString(),fy,date,description,advance:advCellNumber(ws,r,3),spent:advCellNumber(ws,r,4)};
+        const k=key(rec);
+        if(seen.has(k)){skipped++;continue}
+        seen.add(k);rows.push(rec);added++;
+      }
+    }
+    if(!sheets){toast('No Financial Year sheet (like 2025-26) with the Bengali advance table was found.',true);return}
+    if(added){await advSave(rows);const first=rows[rows.length-1];advYear=normIncomeYear(first.fy)}
+    renderAdvanced();
+    toast(`Imported ${added} advance${added===1?'':'s'} from ${sheets} sheet${sheets===1?'':'s'}${skipped?` (skipped ${skipped} duplicate${skipped===1?'':'s'})`:''}`);
+  }catch(error){console.error(error);toast('Could not read this workbook.',true)}
+}
+
+/* --- Bengali Excel report: same cells, merged title and number formats as 2025-26.xlsx --- */
+function advTitle(fy){return `${ADV_OFFICER}-এর ${fy} অর্থ বছরে দাপ্তরিক কাজে অগ্রিম অর্থ সমন্বয়`}
+function exportAdvExcel(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const list=advSorted(advYear);
+  if(!list.length){toast(`There are no advances in ${advYear} to export.`,true);return}
+  const whole=list.every(r=>Number.isInteger(Number(r.advance))&&Number.isInteger(Number(r.spent)));
+  const moneyFmt=whole?'#,##0"/-"':'#,##0.00"/-"';
+  const ws={},set=(a,cell)=>{ws[a]=cell};
+  set('A1',{t:'s',v:advTitle(advYear)});
+  ADV_HEAD.forEach((h,i)=>set(XLSX.utils.encode_cell({r:2,c:i}),{t:'s',v:h}));
+  list.forEach((r,i)=>{
+    const row=3+i,n=row+1,adv=Number(r.advance)||0,sp=Number(r.spent)||0;
+    set('A'+n,{t:'n',v:i+1,z:ADV_NUM_FMT.sl});
+    const m=String(r.date).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    set('B'+n,{t:'n',v:m?Math.round((Date.UTC(+m[1],+m[2]-1,+m[3])-Date.UTC(1899,11,30))/86400000):0,z:ADV_NUM_FMT.date});
+    set('C'+n,{t:'s',v:r.description});
+    set('D'+n,{t:'n',v:adv,z:moneyFmt});
+    set('E'+n,{t:'n',v:sp,z:moneyFmt});
+    set('F'+n,{t:'n',f:`D${n}-E${n}`,v:adv-sp,z:moneyFmt});
+    set('G'+n,{t:'s',v:(advDocMeta(r.advanceDocId)||{}).name||''});
+    set('H'+n,{t:'s',v:(advDocMeta(r.costDocId)||{}).name||''});
+  });
+  const first=4,last=3+list.length,tot=last+1,t=advTotals(list);
+  set('A'+tot,{t:'s',v:ADV_TOTAL_LABEL});
+  [['D',t.advance],['E',t.spent],['F',t.advance-t.spent]].forEach(([c,v])=>set(`${c}${tot}`,{t:'n',f:`SUM(${c}${first}:${c}${last})`,v,z:moneyFmt}));
+  ws['!ref']=`A1:H${tot}`;
+  ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:6}},{s:{r:tot-1,c:0},e:{r:tot-1,c:2}}];
+  ws['!cols']=[{wch:10},{wch:16},{wch:60},{wch:16},{wch:14},{wch:16},{wch:14},{wch:14}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,advYear);
+  XLSX.writeFile(wb,`Advanced-Adjustment-${advYear}-${todayISO()}.xlsx`);
+  toast('Bengali report exported to Excel');
+}
+
+/* --- Bengali PDF report: jsPDF cannot shape Bengali conjuncts, so the browser prints an HTML report instead --- */
+function printAdvReport(){
+  const list=advSorted(advYear);
+  if(!list.length){toast(`There are no advances in ${advYear} to print.`,true);return}
+  const t=advTotals(list),under=t.advance-t.spent,cols=ADV_HEAD.slice(0,6);
+  const body=list.map((r,i)=>`<tr><td class="c">${bnNum(String(i+1).padStart(2,'0'))}</td><td class="c">${bnDate(r.date)}</td><td>${esc(r.description)}</td><td class="n">${bnMoney(r.advance)}</td><td class="n">${bnMoney(r.spent)}</td><td class="n">${bnMoney((Number(r.advance)||0)-(Number(r.spent)||0))}</td></tr>`).join('');
+  const now=new Date(),stamp=bnNum(`${pad2(now.getDate())}/${pad2(now.getMonth()+1)}/${now.getFullYear()}, ${pad2(now.getHours())}:${pad2(now.getMinutes())}`);
+  // Same look as the app's other PDF reports: dark header band on every page, dark table head,
+  // indigo total row and a "Personal Finance · SOIKOT RAIHAN" footer with page numbers.
+  const html=`<!doctype html><html lang="bn"><head><meta charset="utf-8"><title>${esc(advTitle(advYear))}</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600;700&display=swap">
+<style>
+@page{size:A4 landscape;margin:11mm 11mm 15mm;
+  @bottom-left{content:"Personal Finance  ·  SOIKOT RAIHAN  ·  Advanced Adjustment";font:8pt sans-serif;color:#64748b}
+  @bottom-right{content:"পৃষ্ঠা " counter(page,bengali) " / " counter(pages,bengali);font:8pt 'Noto Sans Bengali','Nirmala UI',sans-serif;color:#64748b}}
+*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{margin:0;font-family:'Noto Sans Bengali','Nirmala UI','Kalpurush','SolaimanLipi','Vrinda','Shonar Bangla',sans-serif;color:#0f172a;font-size:9.5pt;line-height:1.5}
+table{width:100%;border-collapse:collapse}
+thead{display:table-header-group}tfoot{display:table-row-group}
+th,td{border:1px solid #cbd5e1;padding:5px 7px;vertical-align:top}
+thead tr.band th{background:#0f172a;color:#fff;border:0;text-align:left;padding:11px 14px;font-weight:400}
+.band .row{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+.band .t{font-size:12.5pt;font-weight:700;line-height:1.4}.band .s{font-size:8.5pt;color:#cbd5e1;margin-top:3px}
+.band .r{font-size:10pt;font-weight:700;white-space:nowrap}
+thead tr.cols th{background:#0f172a;color:#fff;font-weight:700;font-size:8.5pt;text-align:center;border-color:#334155}
+tbody tr:nth-child(even) td{background:#f8fafc}
+td.c{text-align:center;white-space:nowrap}td.n{text-align:right;white-space:nowrap}
+tr{page-break-inside:avoid}
+tfoot td{background:#eef2ff;color:#312e81;font-weight:700}
+</style></head><body>
+<table><thead>
+<tr class="band"><th colspan="6"><div class="row"><div><div class="t">${esc(advTitle(advYear))}</div><div class="s">${esc(advYear)}  ·  প্রস্তুতের সময় ${stamp}</div></div><div class="r">কমব্যয়কৃত অর্থ ${bnMoney(under)}</div></div></th></tr>
+<tr class="cols">${cols.map(h=>`<th>${h}</th>`).join('')}</tr></thead>
+<tbody>${body}</tbody>
+<tfoot><tr><td colspan="3" class="n">${ADV_TOTAL_LABEL}  ·  ${esc(advYear)}</td><td class="n">${bnMoney(t.advance)}</td><td class="n">${bnMoney(t.spent)}</td><td class="n">${bnMoney(under)}</td></tr></tfoot></table>
+</body></html>`;
+  const frame=document.createElement('iframe');
+  frame.setAttribute('aria-hidden','true');
+  frame.style.cssText='position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
+  document.body.appendChild(frame);
+  const doc=frame.contentDocument;
+  doc.open();doc.write(html);doc.close();
+  const go=()=>{try{frame.contentWindow.focus();frame.contentWindow.print()}finally{setTimeout(()=>frame.remove(),60000)}};
+  const ready=doc.fonts&&doc.fonts.ready?Promise.race([doc.fonts.ready,new Promise(r=>setTimeout(r,2500))]):Promise.resolve();
+  ready.then(()=>setTimeout(go,150));
+  toast('In the print dialog choose “Save as PDF”.');
+}
+
 function bindNavigation(){
   document.querySelectorAll('[data-page]').forEach(button=>{
     button.onclick=()=>showPage(button.dataset.page);
@@ -1250,6 +1590,7 @@ function bindNavigation(){
     placePills(true);
   });
   bindSettingsTabs();
+  bindOfficialNav();
 }
 
 /* ==========================================================================
@@ -1477,6 +1818,18 @@ function bindGlobalActions(){
   $el('officeImportModal').addEventListener('close',resetOfficeImportDraft);
   $el('officeTemplateBtn').onclick=e=>runWithLoading(e.currentTarget,downloadOfficeTemplate);
   $el('officeExportBtn').onclick=e=>runWithLoading(e.currentTarget,exportOfficeWorkbook);
+  $el('itImportBtn').onclick=()=>openITImportModal();
+  $el('itImportChoose').onclick=()=>$el('itImport').click();
+  $el('itImport').onchange=itImportFileChosen;
+  $el('itImportClear').onclick=()=>{itImportDraft={file:null};setITImportFileLabel(null)};
+  $el('itImportConfirm').onclick=confirmITImport;
+  $el('itImportOverride').onchange=updateITImportHints;
+  $el('itImportReplace').onchange=updateITImportHints;
+  $el('itImportModal').addEventListener('close',resetITImportDraft);
+  $el('itMigrationChooseFile').onclick=()=>{const id=itEditingMigrationId;$el('itMigrationEditModal').close();itReplaceMigrationId=id;openITImportModal()};
+  $el('itMigrationEditModal').addEventListener('close',()=>{itEditingMigrationId=null});
+  $el('itTemplateBtn').onclick=e=>runWithLoading(e.currentTarget,downloadITTemplate);
+  $el('itExportBtn').onclick=e=>runWithLoading(e.currentTarget,exportITWorkbook);
   bindPdfViewer();
   bindCalculator();
 }
@@ -1522,6 +1875,9 @@ function bindDelegatedActions(){
       case 'edit-migration': editMigration(id); break;
       case 'delete-migration': await deleteMigration(id); break;
       case 'remove-migration-row': await removeMigrationRow(mig,store,id); break;
+      case 'edit-it-migration': editITMigration(id); break;
+      case 'delete-it-migration': await deleteITMigration(id); break;
+      case 'remove-it-migration-row': await removeITMigrationRow(mig,cat,store,id); break;
       case 'edit-office': openOfficeModal(id); break;
       case 'view-office': viewOfficeEntry(id); break;
       case 'delete-office': await deleteOfficeEntry(id); break;
@@ -1568,6 +1924,7 @@ function renderAll(){
   renderBackupHistory();
   renderBalance();
   renderZakat();
+  if(currentPage==='incomeTax')renderIncomeTax();
 }
 
 const ZAKAT_CATEGORIES=[
@@ -1741,6 +2098,7 @@ function renderZakat(){
   $el('zakatCategoryGuide').innerHTML=ZAKAT_CATEGORIES.map((item,index)=>`<div class="zakat-guide-item"><strong>${index+1}. ${esc(item[0])}</strong><p>${esc(item[1])}</p></div>`).join('');
   renderZakatFilters();
   renderZakatDashboard();
+  if(typeof renderWealth==='function')renderWealth();
 }
 
 function zakatRecordDate(record){
@@ -2777,7 +3135,8 @@ function effectiveRecordsForBalance(records,year){
   const carried=base.filter(r=>!isCashRecord(r)&&carriesIntoYear(r,year));
   const withTransfers=applyTransferLegs([...carried,...cash],(state.records||[]).filter(isTransferRecord),year);
   const withFunding=applyFundingLegs(withTransfers,carried,year);
-  return applyIncomeAccountLegs(applyOfficeAccountLegs(withFunding,year),year);
+  const withIncome=applyIncomeAccountLegs(applyOfficeAccountLegs(withFunding,year),year);
+  return typeof applyWealthPurificationLegs==='function'?applyWealthPurificationLegs(withIncome,year):withIncome;
 }
 
 const sumAmount=records=>records.reduce((s,r)=>s+recordAmount(r),0);
@@ -5481,6 +5840,7 @@ function renderSettings(){
   document.getElementById('localeSetting').value=state.settings.locale||'en-BD';
   renderYearList();
   renderMigrationHistory();
+  renderITMigrationHistory();
   renderStorageInfo();
   renderDriveSyncCard();
   showSettingsTab(settingsTab);
@@ -5649,7 +6009,7 @@ async function performRestore(){
       if(/^drive/i.test(key))continue;
       const restoredValue=mode==='merge'&&key==='zakatRecords'
         ?mergeZakatRecordLists((await getOne('settings',key))?.value,value)
-        :value;
+        :(mode==='merge'&&key==='incomeTax'?mergeIncomeTaxData((await getOne('settings',key))?.value,value):value);
       await put('settings',{key,value:restoredValue});
     }   // Drive sync state stays local
     await loadState();
@@ -10000,7 +10360,7 @@ async function removeMigrationRows(migrationId){
 function renderMigrationHistory(){
   const host=document.getElementById('migrationHistoryList');
   if(!host)return;
-  const history=state.migrationHistory.slice().sort((a,b)=>String(b.timestamp).localeCompare(String(a.timestamp)));
+  const history=state.migrationHistory.filter(m=>m.migrationType!==IT_MIGRATION_TYPE).sort((a,b)=>String(b.timestamp).localeCompare(String(a.timestamp)));
   host.innerHTML=history.length
     ? `<div class="table-wrap migration-history-wrap"><table class="migration-history-table"><thead><tr><th scope="col">Date &amp; Time</th><th scope="col">File Name</th><th scope="col">Migration Type</th><th scope="col" class="num">Records Imported</th><th scope="col">Actions</th></tr></thead><tbody>${history.map(m=>`<tr><td>${esc(new Date(m.timestamp).toLocaleString())}</td><td>${esc(m.fileName||'—')}</td><td><span class="badge migration-badge">${esc(m.migrationType||'—')}</span></td><td class="num">${Number(m.importedCount)||0}</td><td class="actions-cell"><button type="button" class="action-link" data-cmd="edit-migration" data-id="${esc(m.id)}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-migration" data-id="${esc(m.id)}">Delete</button></td></tr>`).join('')}</tbody></table></div>`
     : '<div class="empty-state">No migrations recorded in this browser yet.</div>';
@@ -10473,7 +10833,7 @@ const AssetBookDB={
       if(/^drive/i.test(String(row.key)))continue;    // Drive connection/bookkeeping stays local to this device
       const value=mode==='merge'&&row.key==='zakatRecords'
         ?mergeZakatRecordLists((await getOne('settings',row.key))?.value,row.value)
-        :row.value;
+        :(mode==='merge'&&row.key==='incomeTax'?mergeIncomeTaxData((await getOne('settings',row.key))?.value,row.value):row.value);
       await put('settings',{key:row.key,value});
     }
     return {records:records.length,incomeExpenses:incomeExpenses.length,officePurchases:officePurchases.length,documents:blobs.length};
@@ -11012,5 +11372,1197 @@ function setupPWA(){
     $el('installHint').textContent='On iPhone/iPad: tap the Share button in Safari, then choose "Add to Home Screen".';
   }
 }
+
+/* ==========================================================================
+   Income Tax Calculation (Bangladesh individual return, FY 1 Jul - 30 Jun)
+   All tax-only edits live in ONE settings row ("incomeTax") keyed by Financial Year, so
+   Records, Income & Expenses and other years are never modified. The row travels with
+   Backup / Restore and Google Drive sync like every other settings key.
+   ========================================================================== */
+const TAX_KEY='incomeTax';
+const TAX_TABS=['dashboard','income','expenses','rebate','assets','deduction'];
+const TAX_INV=[['cpfOwn','C.P.F (Own)','CPF (Own)'],['cpfCompany','C.P.F (Company)','CPF (Company)'],['groupIns','Group Insurance Premium','Group Insurance'],['pension','Contribution To Pension Fund',null],['welfare','Subcription To Welfare Fund (Own)','Welfare Fund']];
+const TAX_SECTIONS=['Adjustment of Tax Refund','IT Deducted at Source from Salary','IT Deducted at Source from WPPF','IT Deducted at Source from Honorarium','Bank TDS','Advance Tax / Other'];
+const TAX_DEFAULTS={taxFree:375000,minTax:5000};
+const TAX_SLABS=[[300000,.10],[400000,.15],[500000,.20],[2000000,.25],[Infinity,.30]];
+let taxTab='dashboard';
+let taxYear='';
+const taxNum=v=>{const n=Number(v);return Number.isFinite(n)?n:0};
+const taxHas=v=>v!==undefined&&v!==null&&v!=='';
+const taxSameFY=(a,b)=>normIncomeYear(a)===normIncomeYear(b);
+const taxFyOf=r=>r.incomeYear||fiscalYearFromDate(r.date);
+const taxSum=(list,fn)=>list.reduce((s,x)=>s+fn(x),0);
+function taxPrevYear(fy){const p=parseIncomeYear(fy);return p?`${p.start-1}-${pad2(p.start%100)}`:''}
+function taxYears(){
+  const set=new Map();
+  [...(state.settings.incomeYears||[]),...state.incomeExpenses.map(taxFyOf),...state.records.map(r=>r.incomeYear||''),...Object.keys((state.settings[TAX_KEY]||{}).years||{})]
+    .filter(Boolean).forEach(y=>{const n=normIncomeYear(y);if(parseIncomeYear(n))set.set(n,n)});
+  return [...set.values()].sort((a,b)=>b.localeCompare(a));
+}
+function taxYr(fy){
+  const s=state.settings;
+  if(!s[TAX_KEY]||typeof s[TAX_KEY]!=='object')s[TAX_KEY]={years:{}};
+  const d=s[TAX_KEY];d.years=d.years||{};
+  const y=d.years[fy]=d.years[fy]||{};
+  ['incomeOv','expenseOv','assetOv','rebate','params'].forEach(k=>y[k]=y[k]||{});
+  ['incomeAdj','expenseAdj','assetAdj','deductions','excluded'].forEach(k=>y[k]=y[k]||[]);
+  return y;
+}
+let taxDirty=false;
+function taxMarkSaved(){taxDirty=false;updateTaxSaveBtn()}
+function updateTaxSaveBtn(){
+  const b=document.getElementById('taxSaveBtn');
+  if(!b)return;
+  b.classList.toggle('dirty',taxDirty);
+  const label=b.querySelector('span');
+  if(label)label.textContent=taxDirty?'Save Change *':'Save Change';
+}
+window.addEventListener('beforeunload',e=>{if(taxDirty){e.preventDefault();e.returnValue=''}});
+async function taxSave(){await put('settings',{key:TAX_KEY,value:state.settings[TAX_KEY]});taxMarkSaved()}
+/** Imported IT Summary workbook values for a Financial Year (null when absent or switched off). */
+function taxIT(fy){const r=taxYr(fy).itReturn;return r&&r.apply!==false?r:null}
+function taxITRows(fy,type){const r=taxIT(fy),list=r&&r[type==='Income'?'income':'expenses'];return Array.isArray(list)&&list.length?list:null}
+function taxITList(fy,type){const r=taxIT(fy),list=r&&r[type==='Asset'?'assets':'liabilities'];return Array.isArray(list)?list:null}
+function taxITGroups(rows,ov,txs){
+  const heads=new Map();
+  rows.forEach(r=>{
+    if(!heads.has(r.head))heads.set(r.head,[]);
+    const key=r.head+'|'+r.label;
+    const same=txs.filter(x=>String(x.category||'').trim().toLowerCase()===String(r.label).trim().toLowerCase());
+    const o=ov[key],val=taxHas(o)?taxNum(o):taxNum(r.amount);
+    heads.get(r.head).push({name:r.label,key,app:taxSum(same,x=>taxNum(x.amount)),count:same.length,ov:val,eff:val,meta:r});
+  });
+  return [...heads.entries()].map(([majorHead,cats])=>({majorHead,cats,app:taxSum(cats,c=>c.app),total:taxSum(cats,c=>c.eff)}));
+}
+function taxITSection(list,type,t){
+  const by=new Map();
+  list.forEach(r=>{if(!by.has(r.cat))by.set(r.cat,[]);by.get(r.cat).push(r)});
+  const cats=[...by.entries()].map(([name,rows])=>{
+    const subs=rows.map(r=>{const o=t.assetOv[r.key],v=taxHas(o)?taxNum(o):taxNum(r.amount);return {name:r.label,key:r.key,app:0,ov:v,eff:v,src:r}});
+    return {name,subs,total:taxSum(subs,x=>x.eff)};
+  });
+  const adj=t.assetAdj.filter(a=>(a.kind||'Asset')===type),adjTotal=taxSum(adj,a=>taxNum(a.amount));
+  return {cats,adj,adjTotal,total:taxSum(cats,c=>c.total)+adjTotal};
+}
+/** Merge mode of a restore: keep local values, add what only the backup has (arrays by id). */
+function mergeIncomeTaxData(local,incoming){
+  const out=JSON.parse(JSON.stringify(local&&local.years?local:{years:{}}));
+  for(const [fy,inc] of Object.entries((incoming&&incoming.years)||{})){
+    const cur=out.years[fy];
+    if(!cur){out.years[fy]=inc;continue}
+    for(const k of ['incomeAdj','expenseAdj','assetAdj','deductions']){
+      const have=new Set((cur[k]||[]).map(x=>x.id));
+      cur[k]=[...(cur[k]||[]),...(inc[k]||[]).filter(x=>!have.has(x.id))];
+    }
+    for(const k of ['incomeOv','expenseOv','assetOv','rebate','params'])cur[k]=Object.assign({},inc[k]||{},cur[k]||{});
+    if(!cur.itReturn&&inc.itReturn)cur.itReturn=inc.itReturn;
+    cur.excluded=[...new Set([...(cur.excluded||[]),...(inc.excluded||[])])];
+  }
+  return out;
+}
+
+/* ---------- Data builders ---------- */
+function taxLedger(fy,type){
+  const t=taxYr(fy),ov=type==='Income'?t.incomeOv:t.expenseOv,adj=type==='Income'?t.incomeAdj:t.expenseAdj;
+  const txs=state.incomeExpenses.filter(r=>r.type===type&&taxSameFY(taxFyOf(r),fy)).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+  const order=h=>{const i=state.incomeGroups.findIndex(g=>g.type===type&&g.majorHead===h);return i<0?999:i};
+  const heads=new Map();
+  txs.forEach(r=>{
+    const h=r.majorHead||'Other',c=r.category||'Other';
+    if(!heads.has(h))heads.set(h,new Map());
+    const m=heads.get(h);
+    if(!m.has(c))m.set(c,{name:c,app:0,count:0});
+    const x=m.get(c);x.app+=taxNum(r.amount);x.count++;
+  });
+  const itRows=taxITRows(fy,type);
+  const groups=itRows?taxITGroups(itRows,ov,txs):[...heads.entries()].sort((a,b)=>order(a[0])-order(b[0])).map(([majorHead,m])=>{
+    const cats=[...m.values()].map(c=>{const key=majorHead+'|'+c.name,o=ov[key];return {...c,key,ov:taxHas(o)?taxNum(o):null,eff:taxHas(o)?taxNum(o):c.app}});
+    return {majorHead,cats,app:taxSum(cats,c=>c.app),total:taxSum(cats,c=>c.eff)};
+  });
+  const total=taxSum(groups,g=>g.total),adjTotal=taxSum(adj,a=>taxNum(a.amount));
+  return {txs,groups,app:taxSum(groups,g=>g.app),total,adj,adjTotal,grand:total+adjTotal};
+}
+function taxAssets(fy){
+  const t=taxYr(fy),data=buildBalanceData(fy);
+  const sec=(s,type)=>{
+    const itl=taxITList(fy,type);
+    if(itl)return taxITSection(itl,type,t);
+    const cats=s.cats.map(c=>{
+      const subs=c.subs.map(x=>{const key=`${type}|${c.name}|${x.name}`,o=t.assetOv[key];return {name:x.name,key,app:x.total,ov:taxHas(o)?taxNum(o):null,eff:taxHas(o)?taxNum(o):x.total}}).filter(x=>x.app||x.ov!==null);
+      return {name:c.name,subs,total:taxSum(subs,x=>x.eff)};
+    }).filter(c=>c.subs.length);
+    const adj=t.assetAdj.filter(a=>(a.kind||'Asset')===type);
+    return {cats,adj,adjTotal:taxSum(adj,a=>taxNum(a.amount)),total:taxSum(cats,c=>c.total)+taxSum(adj,a=>taxNum(a.amount))};
+  };
+  const assets=sec(data.assets,'Asset'),liabilities=sec(data.liabilities,'Liability');
+  return {assets,liabilities,net:assets.total-liabilities.total};
+}
+function taxRebateRows(fy){
+  const t=taxYr(fy);
+  return TAX_INV.map(([key,label,sub])=>{
+    const auto=sub?taxSum(state.records.filter(r=>r.type==='Asset'&&r.category==='Investments'&&String(r.subcategory||'').trim().toLowerCase()===sub.toLowerCase()&&recordMatchesYear(r,fy)),recordAmount):null;
+    const o=t.rebate[key];
+    return {key,label,auto,ov:taxHas(o)?taxNum(o):null,value:taxHas(o)?taxNum(o):(auto||0)};
+  });
+}
+function taxDeductions(fy){
+  const t=taxYr(fy);
+  const linked=state.incomeExpenses.filter(r=>r.type==='Expense'&&r.majorHead==='Tax, Charges, Etc. Paid'&&r.category==='Tax & Surcharge'&&taxSameFY(taxFyOf(r),fy))
+    .sort((a,b)=>String(a.date).localeCompare(String(b.date)))
+    .map(r=>({id:r.id,date:r.date,label:r.subcategory||'',note:r.description||'',amount:taxNum(r.amount),included:!t.excluded.includes(r.id)}));
+  const linkedTotal=taxSum(linked.filter(x=>x.included),x=>x.amount),manualTotal=taxSum(t.deductions,x=>taxNum(x.claimed));
+  return {linked,manual:t.deductions,linkedTotal,manualTotal,total:linkedTotal+manualTotal};
+}
+function taxSlabTax(income,free){
+  let left=Math.max(0,income-free),tax=0;
+  for(const [size,rate] of TAX_SLABS){if(left<=0)break;const part=Math.min(left,size);tax+=part*rate;left-=part}
+  return tax;
+}
+function taxCompute(fy){
+  const t=taxYr(fy),p=t.params;
+  const inc=taxLedger(fy,'Income'),exp=taxLedger(fy,'Expense'),as=taxAssets(fy),ded=taxDeductions(fy),reb=taxRebateRows(fy);
+  const free=taxHas(p.taxFree)?taxNum(p.taxFree):TAX_DEFAULTS.taxFree;
+  const minTax=taxHas(p.minTax)?taxNum(p.minTax):TAX_DEFAULTS.minTax;
+  const salary=taxSum(inc.groups.filter(g=>g.majorHead==='Income From Employment'),g=>g.total);
+  const exemptDefault=Math.min(salary/3,500000);
+  const exempt=taxHas(p.exempt)?taxNum(p.exempt):exemptDefault;
+  const taxable=Math.max(0,inc.grand-exempt);
+  const grossTax=taxSlabTax(taxable,free);
+  const eligible=taxSum(reb,r=>r.value);
+  const rebate=Math.min(0.15*Math.min(eligible,0.2*taxable,10000000),0.03*taxable,1000000);
+  const afterRebate=Math.max(0,grossTax-rebate);
+  const netTax=taxable>free?Math.max(afterRebate,minTax):0;
+  const prev=taxPrevYear(fy);
+  const prevNetDefault=prev?buildBalanceData(prev).net:0;
+  const prevNet=taxHas(p.prevNet)?taxNum(p.prevNet):prevNetDefault;
+  const outflow=exp.grand,source=inc.grand;
+  const grossWealth=as.assets.total,liabilities=as.liabilities.total,netWealth=as.net;
+  const totalOutflow=(netWealth-prevNet)+outflow;
+  return {inc,exp,as,ded,reb,free,minTax,salary,exempt,exemptDefault,taxable,grossTax,eligible,rebate,afterRebate,netTax,deducted:ded.total,payable:netTax-ded.total,
+    prev,prevNet,prevNetDefault,grossWealth,liabilities,netWealth,change:netWealth-prevNet,outflow,totalOutflow,source,difference:totalOutflow-source};
+}
+
+/* ---------- PDF attachments on Tax Deduction rows (same documents/documentBlobs stores as receipts) ---------- */
+function taxDocs(item){
+  const ids=new Set(item.documentIds||[]);
+  return state.documents.filter(d=>ids.has(d.id)||d.recordId===item.id);
+}
+async function taxRemoveDocs(item){
+  const ids=[...new Set(taxDocs(item).map(d=>d.id))];
+  if(ids.length){await removeMany('documents',ids);await removeMany('documentBlobs',ids);state.documents=state.documents.filter(d=>!ids.includes(d.id))}
+  item.documentIds=[];
+}
+async function taxAttachPdf(item,file){
+  const id=uid('doc');
+  const meta={id,recordId:item.id,title:file.name,name:file.name,type:file.type||'application/pdf',size:Number(file.size)||0,category:item.section||'Tax Deduction',subcategory:'',financialType:'Tax Deduction',incomeYear:taxYear,createdAt:new Date().toISOString()};
+  await put('documentBlobs',{id,blob:file});
+  await put('documents',meta);
+  state.documents.push(meta);
+  item.documentIds=[id];
+}
+const taxDocButtons=item=>taxDocs(item).map(d=>`<button type="button" class="btn" data-cmd="open-pdf" data-id="${esc(d.id)}" title="${esc(d.name||'PDF')}">View PDF</button> <button type="button" class="btn" data-cmd="download-pdf" data-id="${esc(d.id)}">Download</button>`).join(' ');
+
+/* ---------- Entry dialog (adjustments, deduction rows) ---------- */
+function taxPrompt(title,fields,values={}){
+  return new Promise(resolve=>{
+    const modal=$el('taxEntryModal'),form=$el('taxEntryForm');
+    $el('taxEntryTitle').textContent=title;
+    $el('taxEntryFields').innerHTML='<div class="form-grid">'+fields.map(f=>{
+      const v=values[f.key]??'';
+      const docs=f.type==='pdf'?(values.__docs||[]):[];
+      const control=f.type==='pdf'
+        ?`<input data-f="${f.key}" type="file" accept="application/pdf,.pdf">${docs.map(d=>`<span class="hint">Attached: ${esc(d.name||'document.pdf')} \u00b7 ${esc(formatFileSize(d.size||0))}</span><label class="check-line"><input type="checkbox" data-f-remove="${f.key}"> Remove attached PDF</label>`).join('')}<span class="hint">Optional. PDF only${docs.length?' \u2014 choosing a new file replaces the attached one':''}.</span>`
+        :f.options
+        ?`<select data-f="${f.key}">${f.options.map(o=>`<option ${o===v?'selected':''}>${esc(o)}</option>`).join('')}</select>`
+        :`<input data-f="${f.key}" type="${f.type||'text'}" ${f.type==='number'?'step="0.01" inputmode="decimal"':''} value="${esc(v)}" ${f.required?'required':''}>`;
+      return `<label class="${f.full?'full':''}"><span class="lbl">${esc(f.label)}${f.required?' *':''}</span>${control}</label>`;
+    }).join('')+'</div>';
+    let done=false;
+    const finish=value=>{if(done)return;done=true;if(modal.open)modal.close();resolve(value)};
+    form.onsubmit=e=>{
+      e.preventDefault();
+      if(!form.reportValidity())return;
+      const out={};
+      let bad=false;
+      fields.forEach(f=>{
+        const el=form.querySelector(`[data-f="${f.key}"]`);
+        if(f.type==='pdf'){
+          const file=el.files&&el.files[0]||null;
+          if(file&&!isPdfFile(file)){bad=true;return}
+          out.pdfFile=file;
+          const rm=form.querySelector(`[data-f-remove="${f.key}"]`);
+          out.removePdf=!!(rm&&rm.checked);
+          return;
+        }
+        out[f.key]=f.type==='number'?(el.value===''?0:Number(el.value)):el.value.trim();
+      });
+      if(bad){toast('Only PDF files can be attached.',true);return}
+      finish(out);
+    };
+    modal.onclose=()=>finish(null);
+    modal.showModal();
+  });
+}
+const TAX_ADJ_FIELDS=[{key:'label',label:'Description',required:true,full:true},{key:'amount',label:'Amount (use - to reduce)',type:'number',required:true}];
+const TAX_DED_FIELDS=[
+  {key:'section',label:'Section / Particulars',options:TAX_SECTIONS,full:true},
+  {key:'particulars',label:'Month / Particulars',full:true},
+  {key:'authority',label:'Depositing Authority',full:true},
+  {key:'docType',label:'Payment Document Type'},
+  {key:'ref',label:'Challan / Certificate Ref. No.'},
+  {key:'date',label:'Challan / Certificate Date',type:'date'},
+  {key:'certAmount',label:'Challan / Certificate Amount',type:'number'},
+  {key:'claimed',label:'Claimed Amount',type:'number',required:true},
+  {key:'pdf',label:'Attach PDF (optional)',type:'pdf',full:true}
+];
+async function taxEditItem(list,id,kind){
+  const t=taxYr(taxYear),arr=t[list],old=id?arr.find(x=>x.id===id):null;
+  let fields=TAX_ADJ_FIELDS,title=old?'Edit Adjustment':'Add Adjustment',defaults={};
+  if(list==='assetAdj')fields=[{key:'kind',label:'Type',options:['Asset','Liability']},...TAX_ADJ_FIELDS],defaults={kind:kind||'Asset'};
+  if(list==='deductions'){fields=TAX_DED_FIELDS;title=old?'Edit Tax Deduction':'Add Tax Deduction';defaults={section:TAX_SECTIONS[1],docType:'Challan'}}
+  const docs=old&&list==='deductions'?taxDocs(old):[];
+  const value=await taxPrompt(title,fields,Object.assign({},old||defaults,{__docs:docs}));
+  if(!value)return;
+  const {pdfFile,removePdf,...data}=value;
+  let item=old;
+  if(old)Object.assign(old,data);else{item={id:uid('tax'),...data};arr.push(item)}
+  if(list==='deductions'){
+    try{
+      if(pdfFile||removePdf)await taxRemoveDocs(item);
+      if(pdfFile)await taxAttachPdf(item,pdfFile);
+    }catch(error){console.warn(error);toast('The row was saved, but the PDF could not be attached.',true)}
+  }
+  await taxSave();renderIncomeTax();toast('Saved for '+taxYear);
+}
+
+/* ---------- Views ---------- */
+const taxMoneyCell=v=>`<td class="num">${formatMoney(v)}</td>`;
+const taxCard=(i,ic,label,value,cls)=>`<div class="summary-card" style="--i:${i}"><div class="summary-icon">${icon(ic)}</div><div><p>${label}</p><strong class="kpi-value ${cls||''}">${formatMoney(value)}</strong></div></div>`;
+const taxInput=(set,key,placeholder,value)=>`<input class="tax-input" type="number" step="0.01" inputmode="decimal" data-tax-set="${set}" data-tax-key="${esc(key)}" placeholder="${esc(placeholder)}" value="${value===null||value===undefined?'':value}" aria-label="Override value">`;
+const taxAct=(act,label,extra='',cls='btn')=>`<button type="button" class="${cls}" data-tax-act="${act}" ${extra}>${label}</button>`;
+function taxAdjTable(list,adj,kind){
+  const rows=adj.map(a=>`<tr><td>${esc(a.label)}${list==='assetAdj'?` <span class="badge">${esc(a.kind||'Asset')}</span>`:''}</td>${taxMoneyCell(taxNum(a.amount))}<td class="num">${taxAct('editItem','Edit',`data-tax-list="${list}" data-id="${esc(a.id)}"`)} ${taxAct('delItem','Delete',`data-tax-list="${list}" data-id="${esc(a.id)}"`,'btn btn-danger')}</td></tr>`).join('');
+  return `<div class="card table-card"><div class="table-toolbar"><div class="tt-title"><h3>Tax-only adjustments</h3><p>Apply to ${esc(taxYear)} only; real transactions are not changed.</p></div><div class="tt-actions">${taxAct('addItem','+ Add Adjustment',`data-tax-list="${list}" data-kind="${kind||''}"`,'btn btn-primary')}</div></div><div class="table-wrap"><table><thead><tr><th>Description</th><th class="num">Amount</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="hint">No adjustments</td></tr>'}</tbody></table></div></div>`;
+}
+function taxViewDashboard(fy){
+  const c=taxCompute(fy),refund=c.payable<0;
+  const cards=[taxCard(0,'up','Total Income',c.inc.grand),taxCard(1,'file','Taxable Income',c.taxable),taxCard(2,'scale','Allowable Rebate / Investment Credit',c.rebate),taxCard(3,'calc','Gross Tax',c.grossTax),taxCard(4,'list','Net Tax Liability',c.netTax),taxCard(5,'down','Tax Deducted / Paid',c.deducted),taxCard(6,'scale',refund?'Net Tax Refundable':'Net Tax Payable',Math.abs(c.payable),refund?'positive':'')].join('');
+  const row=(n,label,val,cls='')=>`<tr class="${cls}"><td>${n}</td><td>${label}</td>${taxMoneyCell(val)}</tr>`;
+  const computation=`<table class="balance-table tax-table"><thead><tr><th>Sl.</th><th>Particulars</th><th class="num">Amount</th></tr></thead><tbody>
+    ${row(1,'Total Income (Fiscal Year Income)',c.inc.grand)}
+    ${row(2,'Less: Exempt Income',-c.exempt)}
+    ${row(3,'Total Taxable Income',c.taxable,'total')}
+    ${row(4,'Gross Tax (slab rates, tax-free limit '+formatMoney(c.free)+')',c.grossTax)}
+    ${row(5,'Less: Allowable Rebate / Investment Credit',-c.rebate)}
+    ${row(6,'Tax after Rebate (minimum tax '+formatMoney(c.minTax)+' applies)',c.afterRebate)}
+    ${row(7,'Net Tax Liability',c.netTax,'total')}
+    ${row(8,'Less: Tax Deducted / Paid (Tax Deduction page)',-c.deducted)}
+    ${row(9,refund?'Net Tax Refundable':'Net Tax Payable',Math.abs(c.payable),'total')}
+  </tbody></table>`;
+  const wealth=`<table class="balance-table tax-table"><thead><tr><th>Sl.</th><th>Wealth Statement</th><th class="num">Amount</th></tr></thead><tbody>
+    ${row(1,'Gross Wealth',c.grossWealth)}${row(2,'Total Liabilities Outside Business',c.liabilities)}${row('3=1-2','Net Wealth',c.netWealth,'total')}
+    ${row(4,'Net Wealth at the Last Date of Previous Income Year ('+esc(c.prev)+')',c.prevNet)}${row('5=3-4','Change in Net Wealth',c.change)}
+    ${row(6,'Other Fund Outflow During Income Year',c.outflow)}${row('7=5+6','Total Fund Outflow',c.totalOutflow,'total')}
+    ${row(8,'Source of Fund',c.source)}${row(9,'Difference',c.difference,'total')}
+  </tbody></table>`;
+  const param=(key,label,def,note)=>`<tr><td>${label}<div class="hint">${note}</div></td><td class="num">${taxInput('params',key,String(def),taxYr(fy).params[key]??null)}</td></tr>`;
+  const params=`<table class="tax-table"><tbody>${param('taxFree','Tax-free income limit',c.free,'Slabs after it: 10% / 15% / 20% / 25% / 30%')}${param('minTax','Minimum tax',c.minTax,'Applies when taxable income exceeds the limit')}${param('exempt','Exempt income',c.exemptDefault,'Default: 1/3 of salary income, up to '+formatMoney(500000))}${param('prevNet','Net wealth, previous year end',c.prevNetDefault,'Default: Balance Sheet of '+esc(c.prev))}</tbody></table>`;
+  return `<div class="cards-grid tax-cards">${cards}</div>
+  <div class="charts-grid tax-grid"><div class="card"><div class="section-heading"><h3>Tax Computation ${esc(fy)}</h3></div><div class="table-wrap">${computation}</div></div>
+  <div class="card"><div class="section-heading"><h3>Income Tax Summary ${esc(fy)}</h3></div><div class="table-wrap">${wealth}</div></div></div>
+  <div class="card"><div class="section-heading"><h3>Tax Parameters (${esc(fy)})</h3><span class="hint">Leave empty to use the default. Rebate = lowest of 15% of eligible investment, 3% of taxable income and ${formatMoney(1000000)}.</span></div><div class="table-wrap">${params}</div></div>`;
+}
+function taxViewLedger(fy,type){
+  const L=taxLedger(fy,type),set=type==='Income'?'incomeOv':'expenseOv',list=type==='Income'?'incomeAdj':'expenseAdj';
+  const body=L.groups.map(g=>`<tr class="cat-row"><td colspan="2">${esc(g.majorHead)}</td>${taxMoneyCell(g.app)}<td class="num">${formatMoney(g.total)}</td></tr>`+g.cats.map(c=>`<tr class="sub-row"><td>${esc(c.name)}</td><td class="num">${c.count}</td>${taxMoneyCell(c.app)}<td class="num">${taxInput(set,c.key,c.app.toFixed(2),c.ov)}</td></tr>`).join('')).join('');
+  const txRows=L.txs.map(r=>`<tr><td>${esc(fmtDate(r.date))}</td><td>${esc(r.category||'')} › ${esc(r.subcategory||'')}</td><td>${esc(r.description||'')}</td>${taxMoneyCell(taxNum(r.amount))}<td class="num">${taxAct('editTx','Edit',`data-id="${esc(r.id)}"`)}</td></tr>`).join('');
+  return `<div class="card table-card"><div class="table-toolbar"><div class="tt-title"><h3>${type==='Income'?'Fiscal Year Income':'Fiscal Year Expenses'} ${esc(fy)}</h3><p>Enter a tax-return value to override a category total for this year only.</p></div><div class="tt-actions">${taxAct('addTx','+ Add '+type,`data-type="${type}"`,'btn btn-primary')}</div></div>
+    <div class="table-wrap"><table class="tax-table"><thead><tr><th>Head / Category</th><th class="num">Entries</th><th class="num">Per records</th><th class="num">Tax return value</th></tr></thead><tbody>${body||'<tr><td colspan="4" class="hint">No entries in this Financial Year</td></tr>'}
+    <tr class="total"><td colspan="3">Total ${type}</td><td class="num">${formatMoney(L.total)}</td></tr>
+    <tr class="total"><td colspan="3">Total incl. adjustments (${formatMoney(L.adjTotal)})</td><td class="num">${formatMoney(L.grand)}</td></tr></tbody></table></div></div>
+    ${taxAdjTable(list,L.adj)}
+    <div class="card table-card"><div class="table-toolbar"><div class="tt-title"><h3>Transactions</h3><p>${L.txs.length} entr${L.txs.length===1?'y':'ies'}</p></div></div><div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Details</th><th class="num">Amount</th><th></th></tr></thead><tbody>${txRows||'<tr><td colspan="5" class="hint">No transactions</td></tr>'}</tbody></table></div></div>`;
+}
+function taxViewRebate(fy){
+  const c=taxCompute(fy);
+  const rows=c.reb.map((r,i)=>`<tr><td>4.${i}</td><td>${esc(r.label)}</td><td class="num">${r.auto===null?'<span class="hint">Manual</span>':formatMoney(r.auto)}</td><td class="num">${taxInput('rebate',r.key,r.auto===null?'0.00':r.auto.toFixed(2),r.ov)}</td>${taxMoneyCell(r.value)}</tr>`).join('');
+  return `<div class="card table-card"><div class="table-toolbar"><div class="tt-title"><h3>Rebate ${esc(fy)} · Investment From Company</h3><p>Auto-filled from Assets & Liabilities › Investments for this Financial Year; type a value to override.</p></div></div>
+  <div class="table-wrap"><table class="tax-table"><thead><tr><th>Sl.</th><th>Particulars</th><th class="num">Per records</th><th class="num">Override</th><th class="num">Eligible</th></tr></thead><tbody>${rows}<tr class="total"><td colspan="4">Total Eligible Investment</td><td class="num">${formatMoney(c.eligible)}</td></tr><tr class="total"><td colspan="4">Tax Rebate (15%, capped at 3% of taxable income)</td><td class="num">${formatMoney(c.rebate)}</td></tr></tbody></table></div></div>`;
+}
+function taxViewAssets(fy){
+  const A=taxAssets(fy);
+  const section=(title,s,type)=>`<div class="card table-card"><div class="table-toolbar"><div class="tt-title"><h3>${title} · ${esc(fy)}</h3></div><div class="tt-actions">${taxAct('addItem','+ Add',`data-tax-list="assetAdj" data-kind="${type}"`)}</div></div><div class="table-wrap"><table class="tax-table"><thead><tr><th>Category / Subcategory</th><th class="num">Per records</th><th class="num">Tax return value</th></tr></thead><tbody>`+
+    s.cats.map(c=>`<tr class="cat-row"><td colspan="2">${esc(c.name)}</td><td class="num">${formatMoney(c.total)}</td></tr>`+c.subs.map(x=>`<tr class="sub-row"><td>${esc(x.name)}</td>${taxMoneyCell(x.app)}<td class="num">${taxInput('assetOv',x.key,x.app.toFixed(2),x.ov)}</td></tr>`).join('')).join('')+
+    s.adj.map(a=>`<tr class="sub-row"><td>${esc(a.label)} <span class="badge">Adjustment</span></td><td></td><td class="num">${formatMoney(taxNum(a.amount))} ${taxAct('editItem','Edit',`data-tax-list="assetAdj" data-id="${esc(a.id)}"`)} ${taxAct('delItem','×',`data-tax-list="assetAdj" data-id="${esc(a.id)}" aria-label="Delete adjustment"`,'btn btn-danger')}</td></tr>`).join('')+
+    `<tr class="total"><td colspan="2">Total ${title}</td><td class="num">${formatMoney(s.total)}</td></tr></tbody></table></div></div>`;
+  return section('Assets',A.assets,'Asset')+section('Liabilities',A.liabilities,'Liability')+`<div class="card"><table class="balance-table"><tbody><tr class="total net-worth-row"><td>NET WEALTH</td><td>${formatMoney(A.net)}</td></tr></tbody></table></div>`;
+}
+function taxViewDeduction(fy){
+  const D=taxDeductions(fy);
+  const linked=D.linked.map(x=>`<tr><td><input type="checkbox" data-tax-excl="${esc(x.id)}" ${x.included?'checked':''} aria-label="Include in tax deducted"></td><td>${esc(fmtDate(x.date))}</td><td>${esc(x.label)}</td><td>${esc(x.note)}</td>${taxMoneyCell(x.amount)}<td class="num">${taxAct('editTx','Edit',`data-id="${esc(x.id)}"`)}</td></tr>`).join('');
+  const manual=TAX_SECTIONS.map(sec=>{
+    const items=D.manual.filter(x=>(x.section||TAX_SECTIONS[5])===sec);
+    if(!items.length)return '';
+    return `<tr class="cat-row"><td colspan="7">${esc(sec)}</td></tr>`+items.map(x=>`<tr><td>${x.particulars?`<b>${esc(x.particulars)}</b> \u00b7 `:''}${esc(x.authority||'')}</td><td>${esc(x.docType||'')}</td><td>${esc(x.ref||'')}</td><td>${esc(fmtDate(x.date))}</td>${taxMoneyCell(taxNum(x.certAmount))}${taxMoneyCell(taxNum(x.claimed))}<td class="num">${taxDocButtons(x)} ${taxAct('editItem','Edit',`data-tax-list="deductions" data-id="${esc(x.id)}"`)} ${taxAct('delItem','Delete',`data-tax-list="deductions" data-id="${esc(x.id)}"`,'btn btn-danger')}</td></tr>`).join('');
+  }).join('');
+  return `<div class="card table-card"><div class="table-toolbar"><div class="tt-title"><h3>Tax Deduction ${esc(fy)}</h3><p>Total deducted: <b>${formatMoney(D.total)}</b> (feeds the Income Tax Dashboard)</p></div><div class="tt-actions">${taxAct('addItem','+ Add Deduction','data-tax-list="deductions"','btn btn-primary')}</div></div>
+  <div class="table-wrap"><table class="tax-table"><thead><tr><th>Authority</th><th>Document</th><th>Challan / Ref.</th><th>Date</th><th class="num">Challan Amount</th><th class="num">Claimed</th><th></th></tr></thead><tbody>${manual||'<tr><td colspan="7" class="hint">No manual rows</td></tr>'}<tr class="total"><td colspan="5">Total manual rows</td><td class="num">${formatMoney(D.manualTotal)}</td><td></td></tr></tbody></table></div></div>
+  <div class="card table-card"><div class="table-toolbar"><div class="tt-title"><h3>Linked from Income & Expenses</h3><p>Tax, Charges, Etc. Paid › Tax & Surcharge. Untick a row to leave it out of the total.</p></div></div>
+  <div class="table-wrap"><table class="tax-table"><thead><tr><th>Use</th><th>Date</th><th>Type</th><th>Details</th><th class="num">Amount</th><th></th></tr></thead><tbody>${linked||'<tr><td colspan="6" class="hint">No linked entries in this Financial Year</td></tr>'}<tr class="total"><td colspan="4">Total linked</td><td class="num">${formatMoney(D.linkedTotal)}</td><td></td></tr></tbody></table></div></div>`;
+}
+function renderIncomeTax(){
+  const page=document.getElementById('incomeTaxPage');
+  if(!page)return;
+  const years=taxYears();
+  if(!taxYear||!years.includes(taxYear)){
+    let saved='';try{saved=localStorage.getItem(SITE.prefix+'-tax-year')||''}catch(e){}
+    taxYear=years.includes(saved)?saved:(years.includes('2025-26')?'2025-26':years[0]||'');
+  }
+  $el('taxYearSelect').innerHTML=years.map(y=>`<option value="${esc(y)}" ${y===taxYear?'selected':''}>${esc(y)}</option>`).join('');
+  const range=fiscalRange(taxYear);
+  $el('taxYearRange').textContent=range?`${fmtDate(range.from)} to ${fmtDate(range.to)}`:'';
+  page.querySelectorAll('[data-tax-tab]').forEach(b=>{const on=b.dataset.taxTab===taxTab;b.classList.toggle('active',on);b.setAttribute('aria-selected',String(on));b.tabIndex=on?0:-1});
+  ['taxFullExcelBtn','taxFullPdfBtn'].forEach(id=>$el(id).classList.toggle('hidden',taxTab!=='dashboard'));
+  updateTaxSaveBtn();
+  const views={dashboard:taxViewDashboard,income:f=>taxViewLedger(f,'Income'),expenses:f=>taxViewLedger(f,'Expense'),rebate:taxViewRebate,assets:taxViewAssets,deduction:taxViewDeduction};
+  $el('taxBody').innerHTML=taxYear?(views[taxTab]||views.dashboard)(taxYear):'<div class="card"><p class="hint">Add an Income Year in Settings first.</p></div>';
+}
+/* ---------- Excel / PDF export (every tab, plus a full Dashboard summary) ---------- */
+const TAX_TAB_LABELS={dashboard:'Income Tax Dashboard',income:'Fiscal Year Income',expenses:'Fiscal Year Expenses',rebate:'Rebate',assets:'Asset & Liabilities',deduction:'Tax Deduction'};
+function taxSections(tab,fy){
+  const B=r=>{r.b=true;return r};
+  if(tab==='dashboard'){
+    const c=taxCompute(fy),refund=c.payable<0;
+    return [
+      {title:'Tax Computation',head:['Sl.','Particulars','Amount'],money:[2],rows:[
+        [1,'Total Income (Fiscal Year Income)',c.inc.grand],[2,'Less: Exempt Income',-c.exempt],B([3,'Total Taxable Income',c.taxable]),
+        [4,'Gross Tax',c.grossTax],[5,'Less: Allowable Rebate / Investment Credit',-c.rebate],[6,'Tax after Rebate (minimum tax applied below)',c.afterRebate],
+        B([7,'Net Tax Liability',c.netTax]),[8,'Less: Tax Deducted / Paid',-c.deducted],B([9,refund?'Net Tax Refundable':'Net Tax Payable',Math.abs(c.payable)])]},
+      {title:'Income Tax Summary (Wealth Statement)',head:['Sl.','Particulars','Amount'],money:[2],rows:[
+        [1,'Gross Wealth',c.grossWealth],[2,'Total Liabilities Outside Business',c.liabilities],B(['3=1-2','Net Wealth',c.netWealth]),
+        [4,'Net Wealth at the Last Date of Previous Income Year ('+c.prev+')',c.prevNet],['5=3-4','Change in Net Wealth',c.change],
+        [6,'Other Fund Outflow During Income Year',c.outflow],B(['7=5+6','Total Fund Outflow',c.totalOutflow]),[8,'Source of Fund',c.source],B([9,'Difference',c.difference])]},
+      {title:'Tax Parameters Used',head:['Parameter','Value'],money:[1],rows:[['Tax-free income limit',c.free],['Minimum tax',c.minTax],['Exempt income',c.exempt],['Eligible investment',c.eligible]]}
+    ];
+  }
+  if(tab==='income'||tab==='expenses'){
+    const type=tab==='income'?'Income':'Expense',L=taxLedger(fy,type),rows=[];
+    L.groups.forEach(g=>{rows.push(B([g.majorHead,'','',g.app,g.total]));g.cats.forEach(c=>rows.push(['',c.name,c.count,c.app,c.eff]))});
+    rows.push(B(['Total '+type,'','',L.app,L.total]),B(['Total incl. adjustments','','','',L.grand]));
+    return [
+      {title:TAX_TAB_LABELS[tab],catSummary:type,head:['Head','Category','Entries','Per records','Tax return value'],money:[3,4],rows},
+      {title:type+' Tax-only Adjustments',head:['Description','Amount'],money:[1],rows:[...L.adj.map(a=>[a.label,taxNum(a.amount)]),B(['Total adjustments',L.adjTotal])]},
+      {title:type+' Transactions',pdfFullSkip:true,head:['Date','Category','Subcategory','Details','Amount'],money:[4],rows:L.txs.map(r=>[fmtDate(r.date),r.category||'',r.subcategory||'',r.description||'',taxNum(r.amount)])}
+    ];
+  }
+  if(tab==='rebate'){
+    const c=taxCompute(fy);
+    return [{title:'Rebate - Investment From Company',head:['Sl.','Particulars','Per records','Override','Eligible'],money:[2,3,4],rows:[
+      ...c.reb.map((r,i)=>['4.'+i,r.label,r.auto===null?'':r.auto,r.ov===null?'':r.ov,r.value]),
+      B(['','Total Eligible Investment','','',c.eligible]),B(['','Tax Rebate','','',c.rebate])]}];
+  }
+  if(tab==='assets'){
+    const A=taxAssets(fy);
+    const sec=(title,s)=>{
+      const rows=[];
+      s.cats.forEach(c=>{rows.push(B([c.name,'','',c.total]));c.subs.forEach(x=>rows.push(['',x.name,x.app,x.eff]))});
+      s.adj.forEach(a=>rows.push(['Adjustment: '+a.label,'','',taxNum(a.amount)]));
+      rows.push(B(['Total '+title,'','',s.total]));
+      return {title,head:['Category','Subcategory','Per records','Tax return value'],money:[2,3],rows};
+    };
+    return [sec('Assets',A.assets),sec('Liabilities',A.liabilities),{title:'Net Wealth',head:['Particulars','Amount'],money:[1],rows:[B(['Net Wealth',A.net])]}];
+  }
+  const D=taxDeductions(fy);
+  return [
+    {title:'Tax Deduction Ledger',head:['Section','Authority','Document','Challan / Ref.','Date','Challan Amount','Claimed'],money:[5,6],rows:[
+      ...D.manual.map(x=>[x.section||TAX_SECTIONS[5],(x.particulars?x.particulars+' \u00b7 ':'')+(x.authority||''),x.docType||'',x.ref||'',fmtDate(x.date),taxNum(x.certAmount),taxNum(x.claimed)]),
+      B(['Total manual rows','','','','','',D.manualTotal])]},
+    {title:'Linked Tax Entries (Income & Expenses)',head:['Date','Type','Details','Amount','Included'],money:[3],rows:[
+      ...D.linked.map(x=>[fmtDate(x.date),x.label,x.note,x.amount,x.included?'Yes':'No']),B(['Total linked (included)','','',D.linkedTotal,''])]},
+    {title:'Total Tax Deducted',head:['Particulars','Amount'],money:[1],rows:[B(['Total Tax Deducted / Paid',D.total])]}
+  ];
+}
+function taxExportGroups(tab){
+  const tabs=tab==='all'?TAX_TABS:[tab];
+  return tabs.map(t=>({tab:t,label:TAX_TAB_LABELS[t],sections:taxSections(t,taxYear)}));
+}
+function taxFileName(tab,ext){
+  const slug=tab==='all'?'Full-Summary':TAX_TAB_LABELS[tab].replace(/[^A-Za-z0-9]+/g,'-');
+  return `Income-Tax-${slug}-${taxYear}-${todayISO()}.${ext}`;
+}
+function taxExportExcel(tab){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  if(!taxYear)return;
+  const wb=XLSX.utils.book_new(),used=new Set(),range=fiscalRange(taxYear);
+  taxExportGroups(tab).forEach(g=>g.sections.forEach(s=>{
+    const aoa=[[`Income Tax ${taxYear} - ${s.title}`],[range?`Financial Year ${fmtDate(range.from)} to ${fmtDate(range.to)}`:''],[],s.head,...s.rows.map(r=>[...r])];
+    const ws=XLSX.utils.aoa_to_sheet(aoa);
+    s.rows.forEach((r,ri)=>s.money.forEach(ci=>{const cell=ws[XLSX.utils.encode_cell({r:4+ri,c:ci})];if(cell&&cell.t==='n')cell.z='#,##0.00'}));
+    ws['!cols']=s.head.map((h,ci)=>({wch:Math.min(48,Math.max(String(h).length,...s.rows.map(r=>String(r[ci]??'').length))+2)}));
+    let name=(tab==='all'?`${g.label} - ${s.title}`:s.title).replace(/[\\\/?*\[\]:]/g,' ').slice(0,31),n=2;
+    while(used.has(name.toLowerCase())){name=name.slice(0,28)+' '+n++}
+    used.add(name.toLowerCase());
+    XLSX.utils.book_append_sheet(wb,ws,name);
+  }));
+  XLSX.writeFile(wb,taxFileName(tab,'xlsx'));
+  toast('Excel report generated');
+}
+function taxCatSummary(type,fy){
+  const L=taxLedger(fy,type),sec=buildIncomeBreakdown(L.txs)[type==='Income'?'income':'expense'];
+  const acc=type==='Income'?[[236,253,245],[6,95,70]]:[[255,241,242],[159,18,57]];
+  const R={halign:'right'},body=[];
+  const subsOf=(head,cat)=>{const h=sec.heads.find(x=>x.name===head),c=h&&h.cats.find(x=>x.name===cat);return c?c.subs:[]};
+  L.groups.forEach(g=>{
+    body.push([{content:g.majorHead,styles:{fontStyle:'bold',fillColor:acc[0],textColor:acc[1]}},{content:pdfMoney(taxNum(g.app)),styles:{...R,fontStyle:'bold',fillColor:acc[0],textColor:acc[1]}},{content:pdfMoney(taxNum(g.total)),styles:{...R,fontStyle:'bold',fillColor:acc[0],textColor:acc[1]}}]);
+    g.cats.forEach(c=>{
+      body.push([{content:'  '+c.name,styles:{fontStyle:'bold'}},{content:pdfMoney(taxNum(c.app)),styles:R},{content:pdfMoney(taxNum(c.eff)),styles:R}]);
+      subsOf(g.majorHead,c.name).forEach(x=>body.push([{content:'      '+x.name,styles:{textColor:[71,85,105]}},{content:pdfMoney(taxNum(x.total)),styles:{...R,textColor:[71,85,105]}},{content:'',styles:R}]));
+    });
+  });
+  if(L.adjTotal)body.push([{content:'Tax-only adjustments',styles:{fontStyle:'bold'}},{content:pdfMoney(0),styles:R},{content:pdfMoney(L.adjTotal),styles:R}]);
+  const tot={fontStyle:'bold',fillColor:acc[0],textColor:acc[1]};
+  body.push([{content:`Total ${type==='Income'?'INCOME':'EXPENSES'}`,styles:tot},{content:pdfMoney(taxNum(L.app)),styles:{...tot,...R}},{content:pdfMoney(taxNum(L.grand)),styles:{...tot,...R}}]);
+  return {body,total:L.grand,perRecord:L.app,empty:!L.groups.length&&!L.adjTotal};
+}
+function taxExportPdf(tab){
+  const JsPDF=window.jspdf&&window.jspdf.jsPDF;
+  if(!JsPDF){toast('PDF library is unavailable. Check your internet connection.',true);return}
+  if(!taxYear)return;
+  const doc=new JsPDF({orientation:'p',unit:'pt',format:'a4',compress:true});
+  if(typeof doc.autoTable!=='function'){toast('PDF table plugin is unavailable. Check your internet connection.',true);return}
+  const M=36,W=doc.internal.pageSize.getWidth(),H=doc.internal.pageSize.getHeight(),range=fiscalRange(taxYear),stamp=generatedStamp();
+  const title=tab==='all'?'Income Tax Full Summary':TAX_TAB_LABELS[tab];
+  doc.setProperties({title:`Personal Finance - ${title} ${taxYear}`,creator:'SOIKOT RAIHAN'});
+  const header=()=>{
+    doc.setFillColor(79,70,229);doc.rect(0,0,W,42,'F');doc.setFillColor(16,185,129);doc.rect(0,42,W,3,'F');
+    doc.setTextColor(255,255,255);doc.setFont('helvetica','bold');doc.setFontSize(13);
+    doc.text(`Personal Finance  |  ${title}  |  ${taxYear}`,M,27);
+    doc.setFont('helvetica','normal');doc.setFontSize(8.5);doc.text(`Generated ${stamp}`,W-M,27,{align:'right'});
+  };
+  header();
+  doc.setTextColor(100,116,139);doc.setFontSize(8.5);
+  doc.text(range?`Financial Year ${fmtDate(range.from)} to ${fmtDate(range.to)}`:'',M,60);
+  let y=76,kpiDone=false;
+  taxExportGroups(tab).forEach(g=>{
+    if(tab==='all'){
+      if(y>H-110){doc.addPage();y=64}
+      doc.setTextColor(49,46,129);doc.setFont('helvetica','bold');doc.setFontSize(12.5);doc.text(g.label,M,y);y+=14;
+    }
+    g.sections.filter(s=>!(tab==='all'&&s.pdfFullSkip)).forEach(s=>{
+      if(y>H-100){doc.addPage();y=64}
+      if(s.catSummary){
+        const inc=taxCatSummary('Income',taxYear),exp=taxCatSummary('Expense',taxYear),mine=s.catSummary==='Income'?inc:exp;
+        if(tab==='all'&&!kpiDone){
+          kpiDone=true;
+          const net=inc.total-exp.total,cell=(t,v,f,c)=>[{content:t,styles:{fillColor:f,textColor:c,fontStyle:'bold'}},{content:v,styles:{halign:'right',fillColor:f,textColor:c,fontStyle:'bold'}}];
+          doc.autoTable({startY:y,theme:'grid',margin:{left:M,right:M,top:56,bottom:40},styles:{fontSize:9},columnStyles:{1:{cellWidth:120}},didDrawPage:()=>header(),body:[
+            cell('Total Income',pdfMoney(inc.total),[236,253,245],[6,95,70]),cell('Total Expenses',pdfMoney(exp.total),[255,241,242],[159,18,57]),
+            cell('Net Savings',pdfMoney(net),[238,242,255],[49,46,129]),cell('Savings Rate',(inc.total>0?net/inc.total*100:0).toFixed(1)+'%',[255,251,235],[146,64,14])]});
+          y=doc.lastAutoTable.finalY+16;
+        }
+        if(mine.empty)return;
+        if(y>H-100){doc.addPage();y=64}
+        doc.autoTable({startY:y,theme:'grid',margin:{left:M,right:M,top:56,bottom:40},
+          head:[['Particulars',{content:'Per records',styles:{halign:'right'}},{content:'Tax return value',styles:{halign:'right'}}]],body:mine.body,
+          headStyles:{fillColor:[15,23,42],textColor:[255,255,255],fontStyle:'bold',fontSize:8.5},styles:{fontSize:8.5},
+          columnStyles:{1:{cellWidth:100,halign:'right'},2:{cellWidth:110,halign:'right'}},didDrawPage:()=>header()});
+        y=doc.lastAutoTable.finalY+16;
+        return;
+      }
+      doc.setTextColor(30,41,59);doc.setFont('helvetica','bold');doc.setFontSize(10.5);doc.text(s.title,M,y);
+      const body=s.rows.map(r=>r.map((v,i)=>{
+        const isMoney=s.money.includes(i);
+        const styles={halign:isMoney?'right':'left'};
+        if(r.b){styles.fontStyle='bold';styles.fillColor=[238,242,255]}
+        return {content:isMoney&&typeof v==='number'?pdfMoney(v):String(v??''),styles};
+      }));
+      doc.autoTable({startY:y+6,theme:'grid',margin:{left:M,right:M,top:56,bottom:40},head:[s.head],body:body.length?body:[[{content:'No data',colSpan:s.head.length}]],
+        styles:{fontSize:8.5,cellPadding:4},headStyles:{fillColor:[79,70,229],textColor:255},
+        didDrawPage:()=>header()});
+      y=doc.lastAutoTable.finalY+20;
+    });
+  });
+  const pages=doc.internal.getNumberOfPages();
+  for(let i=1;i<=pages;i++){doc.setPage(i);doc.setTextColor(100,116,139);doc.setFont('helvetica','normal');doc.setFontSize(8);doc.text(`Page ${i} of ${pages}`,W-M,H-18,{align:'right'})}
+  doc.save(taxFileName(tab,'pdf'));
+  toast('PDF report generated');
+}
+
+function bindIncomeTaxEvents(){
+  const page=document.getElementById('incomeTaxPage');
+  if(!page)return;
+  $el('taxYearSelect').onchange=e=>{taxYear=e.target.value;try{localStorage.setItem(SITE.prefix+'-tax-year',taxYear)}catch(err){}renderIncomeTax()};
+  $el('taxSaveBtn').onclick=async e=>{
+    if(!taxDirty){toast('No changes to save');return}
+    await runWithLoading(e.currentTarget,async()=>{await taxSave();renderIncomeTax();toast('Changes saved for '+taxYear)});
+  };
+  $el('taxExcelBtn').onclick=()=>taxExportExcel(taxTab);
+  $el('taxPdfBtn').onclick=()=>taxExportPdf(taxTab);
+  $el('taxFullExcelBtn').onclick=()=>taxExportExcel('all');
+  $el('taxFullPdfBtn').onclick=()=>taxExportPdf('all');
+  $el('taxTabs').onclick=e=>{const b=e.target.closest('[data-tax-tab]');if(b&&TAX_TABS.includes(b.dataset.taxTab)){taxTab=b.dataset.taxTab;renderIncomeTax()}};
+  page.addEventListener('change',async e=>{
+    const t=taxYr(taxYear);
+    const input=e.target.closest('[data-tax-set]');
+    if(input){
+      const bucket=t[input.dataset.taxSet];
+      if(input.value==='')delete bucket[input.dataset.taxKey];else bucket[input.dataset.taxKey]=Number(input.value);
+      taxDirty=true;renderIncomeTax();return;
+    }
+    const box=e.target.closest('[data-tax-excl]');
+    if(box){
+      const id=box.dataset.taxExcl;
+      t.excluded=t.excluded.filter(x=>x!==id);
+      if(!box.checked)t.excluded.push(id);
+      taxDirty=true;renderIncomeTax();
+    }
+  });
+  page.addEventListener('click',async e=>{
+    const b=e.target.closest('[data-tax-act]');
+    if(!b)return;
+    const act=b.dataset.taxAct,id=b.dataset.id,list=b.dataset.taxList;
+    if(act==='editTx')openIncomeModal(id);
+    else if(act==='addTx'){
+      openIncomeModal(null,{type:b.dataset.type});
+      const r=fiscalRange(taxYear),today=todayISO();
+      if(r)$el('incomeDate').value=today>=r.from&&today<=r.to?today:r.to;
+    }
+    else if(act==='addItem')await taxEditItem(list,null,b.dataset.kind);
+    else if(act==='editItem')await taxEditItem(list,id);
+    else if(act==='delItem'){
+      if(!await confirm('Delete this row for '+taxYear+'?','Delete Row'))return;
+      const t=taxYr(taxYear);
+      if(list==='deductions'){const it=t.deductions.find(x=>x.id===id);if(it)await taxRemoveDocs(it)}
+      t[list]=t[list].filter(x=>x.id!==id);
+      await taxSave();renderIncomeTax();
+    }
+  });
+}
+
+/* ==========================================================================
+   Income Tax workbook (IT Summary): import / template / export.
+   Imported figures live in taxYr(fy).itReturn inside the single "incomeTax" settings row
+   (IndexedDB "settings" store), so they persist across reloads and travel with Backup /
+   Restore and Google Drive sync. Sheets: Summary, Exependiture, Source of Fund, Rebate,
+   Assets, Liabilities, Tax Deduction - one FY per workbook (title "... 2025-26"), FY-suffixed
+   sheets ("Summary 2025-26") or a "Fiscal Year" / "Income Year" column.
+   ========================================================================== */
+const IT_KINDS=[['summary',/^summary/],['expenses',/^(exependiture|expenditure|expenses?)/],['income',/^(sourceoffund|sourceofincome|income)/],['rebate',/^rebate/],['assets',/^assets/],['liabilities',/^liabilit/],['deduction',/^(taxdeduction|deduction)/]];
+const IT_SHEET_NAMES={summary:'Summary',expenses:'Exependiture',income:'Source of Fund',rebate:'Rebate',assets:'Assets',liabilities:'Liabilities',deduction:'Tax Deduction'};
+const IT_EMPLOYMENT='Income From Employment';
+const IT_LIFESTYLE='Lifestyle Expenses';
+const IT_TAXPAY='Tax at Source, Surcharge and Other Payments';
+const IT_DED_TITLES={'Adjustment of Tax Refund':'Adjustment of Tax Refund','IT Deducted at Source from Salary':'IT Deducted at Source from Salary [Section-86]','IT Deducted at Source from WPPF':'IT Deducted at Source from WPPF [Section-88]','IT Deducted at Source from Honorarium':'IT Deducted at Source from Honorarium [Section-90]','Bank TDS':'Bank TDS','Advance Tax / Other':'Advance Tax / Other'};
+const IT_DED_HEAD=['Month/Particulars','Depositing Authority','Payment Document Type','Challan/ Certificate Reference No.','Challan/ Certificate Date','Challan/ Certificate Amount','Claimed Amount'];
+const IT_DED_HEADS={'Adjustment of Tax Refund':['Assessment Year','Return Register No. / Reference No.','Date of Submission of Return','Return Filling Zone','Return Filling Circle','Refund Amount','Adjustment Claim Amount'],'Bank TDS':['Bank Name','Account Type','Branch Name','Account Number','Interest Amount','TDS']};
+const IT_MAX_ROWS_NOTE='Add a Financial Year first.';
+
+const itBlank=v=>v===null||v===undefined||(typeof v==='string'&&!v.trim());
+const itIsNum=v=>typeof v==='number'?Number.isFinite(v):(typeof v==='string'&&v.trim()!==''&&Number.isFinite(Number(v.replace(/,/g,''))));
+const itNum=v=>itIsNum(v)?(typeof v==='number'?v:Number(v.replace(/,/g,''))):0;
+const itText=v=>itBlank(v)?'':String(v).replace(/\s+/g,' ').trim();
+const itRound=n=>Math.round(n*100)/100;
+const itSum=(list,fn)=>itRound(list.reduce((s,x)=>s+taxNum(fn(x)),0));
+function itKind(name){
+  const n=String(name||'').toLowerCase().replace(/\d{4}\s*[-\u2013_/]\s*\d{2,4}/g,'').replace(/[^a-z]/g,'');
+  const hit=IT_KINDS.find(([,re])=>re.test(n));
+  return hit?hit[0]:'';
+}
+function itYearIn(text){
+  const m=/(\d{4})\s*[-\u2013_/]\s*(\d{4}|\d{2})/.exec(String(text||''));
+  if(!m)return '';
+  const y=normIncomeYear(`${m[1]}-${m[2]}`),p=parseIncomeYear(y);
+  return p&&!p.plain?y:'';
+}
+function itDateISO(v){
+  if(itBlank(v))return '';
+  if(v instanceof Date&&!isNaN(v))return `${v.getFullYear()}-${pad2(v.getMonth()+1)}-${pad2(v.getDate())}`;
+  if(typeof v==='number'&&v>20000&&v<90000)return new Date(Math.round((v-25569)*86400)*1000).toISOString().slice(0,10);
+  const s=String(v).trim();
+  let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m)return `${m[1]}-${m[2]}-${m[3]}`;
+  m=s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/);
+  if(m)return `${m[3]}-${pad2(m[2])}-${pad2(m[1])}`;
+  return '';
+}
+const itTitleRow=r=>{
+  const a=r[0];
+  return typeof a==='string'&&!itBlank(a)&&!/^(sl\.?\s*n[o0]|no\b|date|reference|month|purpose|assessment|bank name|total)/i.test(a.trim())&&r.slice(1,7).every(itBlank);
+};
+function itBody(rows){
+  const list=rows.map(r=>r||[]);
+  const i=list.findIndex(r=>r.some(c=>!itBlank(c)));
+  if(i<0)return [];
+  const first=list[i],one=first.filter(c=>!itBlank(c)).length===1&&typeof first[0]==='string'&&itYearIn(first[0]);
+  return list.slice(one?i+1:i);
+}
+
+/* ---------- Reading ---------- */
+async function itReadWorkbook(file){
+  if(/\.csv$/i.test(file.name||''))return XLSX.read(await file.text(),{type:'string',raw:true});
+  return XLSX.read(await file.arrayBuffer(),{type:'array'});
+}
+function itCollect(workbook,fileName,forced){
+  const out=new Map(),fileYear=itYearIn(fileName),single=workbook.SheetNames.length===1;
+  workbook.SheetNames.forEach(sheetName=>{
+    let kind=itKind(sheetName);
+    if(!kind&&single)kind=itKind(String(fileName||'').replace(/\.[^.]+$/,''));
+    if(!kind)return;
+    const rows=XLSX.utils.sheet_to_json(workbook.Sheets[sheetName],{header:1,raw:true,defval:null,blankrows:true});
+    const title=rows.slice(0,3).map(r=>(r||[]).find(c=>typeof c==='string'&&itYearIn(c))||'').find(Boolean)||'';
+    const strong=itYearIn(sheetName)||itYearIn(title);
+    const store=(fy,list)=>{if(!fy)return;if(!out.has(fy))out.set(fy,{});out.get(fy)[kind]=list};
+    let fyCol=-1,head=-1;
+    for(let i=0;i<Math.min(rows.length,8)&&fyCol<0;i++)(rows[i]||[]).forEach((c,j)=>{if(fyCol<0&&typeof c==='string'&&/^(fiscal year|income year|financial year|fy)$/i.test(c.trim())){fyCol=j;head=i}});
+    if(fyCol>=0){
+      const groups=new Map();let cur='';
+      rows.slice(head+1).forEach(r=>{
+        r=(r||[]).slice();
+        const y=itYearIn(r[fyCol]);
+        if(y)cur=y;
+        r.splice(fyCol,1);
+        if(cur&&(!forced||cur===forced)){if(!groups.has(cur))groups.set(cur,[]);groups.get(cur).push(r)}
+      });
+      groups.forEach((list,fy)=>store(fy,list));
+      return;
+    }
+    store(forced?(strong&&strong!==forced?'':forced):(strong||fileYear),rows);
+  });
+  return out;
+}
+
+/* ---------- Sheet parsers ---------- */
+function itParseSummary(rows){
+  const s={};
+  itBody(rows).forEach(r=>{
+    const label=itText(r[1]).toLowerCase();
+    if(!label||!itIsNum(r[2]))return;
+    const v=itNum(r[2]);
+    if(/previous/.test(label))s.prevNet=v;
+    else if(/change/.test(label))s.change=v;
+    else if(/other fund outflow/.test(label))s.otherOutflow=v;
+    else if(/total fund outflow/.test(label))s.totalOutflow=v;
+    else if(/source of fund/.test(label))s.source=v;
+    else if(/difference/.test(label))s.difference=v;
+    else if(/liabilit/.test(label))s.liabilities=v;
+    else if(/net wealth/.test(label))s.netWealth=v;
+    else if(/gross wealth/.test(label))s.grossWealth=v;
+  });
+  return s;
+}
+function itParseIncome(rows){
+  const out=[];let head=IT_EMPLOYMENT;
+  itBody(rows).forEach(r=>{
+    if(itTitleRow(r)){head=itText(r[0]);return}
+    if(/^total/i.test(itText(r[0]))||/^total/i.test(itText(r[1])))return;
+    const label=itText(r[1]);
+    if(!label||!itIsNum(r[2]))return;
+    out.push({sl:itText(r[0]),head,label,amount:itNum(r[2])});
+  });
+  return out;
+}
+function itParseExpenses(rows){
+  const data=[];let head=IT_LIFESTYLE;
+  itBody(rows).forEach(r=>{
+    const first=itText(r[0]);
+    if(itTitleRow(r)){head=first;return}
+    if(/^total/i.test(first)){if(/lifestyle/i.test(first))head=IT_TAXPAY;return}
+    if(/^sl\.?\s*n[o0]/i.test(first))return;
+    const label=itText(r[1]);
+    if(!label)return;
+    data.push({sl:first,head,label,c:itIsNum(r[2])?itNum(r[2]):null,d:itIsNum(r[3])?itNum(r[3]):null});
+  });
+  const isChild=d=>/^\d+\.\d+$/.test(d.sl);
+  const out=[];
+  [...new Set(data.map(d=>d.head))].forEach(h=>{
+    const list=data.filter(d=>d.head===h);
+    list.forEach(d=>{
+      if(isChild(d)){
+        const parentSl=d.sl.split('.')[0],parent=list.find(p=>!isChild(p)&&p.sl===parentSl);
+        if(d.c===null&&d.d===null)return;
+        out.push({sl:d.sl,head:h,parent:parent?parent.label:'',label:d.label,amount:d.c!==null?d.c:d.d});
+      }else{
+        const kids=list.some(k=>isChild(k)&&k.sl.split('.')[0]===d.sl);
+        if(kids||(d.c===null&&d.d===null))return;
+        out.push({sl:d.sl,head:h,parent:'',label:d.label,amount:d.d!==null?d.d:d.c});
+      }
+    });
+  });
+  return out;
+}
+function itParseRebate(rows){
+  const out={};
+  itBody(rows).forEach(r=>{
+    const label=itText(r[1]).toLowerCase();
+    if(!label||!itIsNum(r[2]))return;
+    const key=/group/.test(label)?'groupIns':/pension/.test(label)?'pension':/welfare/.test(label)?'welfare':/c\.?p\.?f/.test(label)?(/company/.test(label)?'cpfCompany':'cpfOwn'):'';
+    if(key)out[key]=itNum(r[2]);
+  });
+  return out;
+}
+function itUniqueKey(seen,key){
+  const n=seen.get(key)||0;
+  seen.set(key,n+1);
+  return n?`${key}#${n+1}`:key;
+}
+function itParseAssets(rows){
+  const out=[],seen=new Map();let cat='';
+  itBody(rows).forEach(r=>{
+    if(itTitleRow(r)){cat=itText(r[0]);return}
+    if(!cat||/^total/i.test(itText(r[0]))||!itIsNum(r[6]))return;
+    const raw=r.slice(0,6).map(v=>itBlank(v)?null:v);
+    while(raw.length<6)raw.push(null);
+    const acq=itText(/gold|diamond/i.test(cat)?raw[3]:/furniture|equipment|electronic/i.test(cat)?raw[4]:raw[2]);
+    const name=itText(raw[1])||(/gold|diamond/i.test(cat)?`Gold, Diamond, Gems${raw[4]!==null?` (${raw[4]} ${itText(raw[5])})`:''}`:cat);
+    const label=name+(acq?` (${acq})`:'');
+    out.push({cat,name,label,key:itUniqueKey(seen,`Asset|${cat}|${label}`),amount:itNum(r[6]),raw});
+  });
+  return out;
+}
+function itParseLiabilities(rows){
+  const out=[],seen=new Map();let cat='';
+  itBody(rows).forEach(r=>{
+    if(itTitleRow(r)){cat=itText(r[0]);return}
+    if(!cat||/^total/i.test(itText(r[0]))||!itIsNum(r[4]))return;
+    const raw=r.slice(0,4).map(v=>itBlank(v)?null:v);
+    while(raw.length<4)raw.push(null);
+    const name=itText(raw[1])||itText(raw[2])||cat;
+    out.push({cat,name,label:name,key:itUniqueKey(seen,`Liability|${cat}|${name}`),amount:itNum(r[4]),raw});
+  });
+  return out;
+}
+function itDedSection(text){
+  return /refund/i.test(text)?'Adjustment of Tax Refund':/salary/i.test(text)?'IT Deducted at Source from Salary':/wppf|bppf|section-?88/i.test(text)?'IT Deducted at Source from WPPF':/honorarium/i.test(text)?'IT Deducted at Source from Honorarium':/bank/i.test(text)?'Bank TDS':/advance|other/i.test(text)?'Advance Tax / Other':'';
+}
+function itParseDeductions(rows){
+  const out=[];let sec='',auth='',part='';
+  itBody(rows).forEach(r=>{
+    const first=itText(r[0]);
+    if(itTitleRow(r)){sec=itDedSection(first);auth='';part='';return}
+    if(!sec||/^total/i.test(first)||/^(assessment year|month|purpose|bank name)/i.test(first))return;
+    if(sec==='Adjustment of Tax Refund'){
+      if(itBlank(r[1]))return;
+      out.push({section:sec,particulars:first,authority:[itText(r[3]),itText(r[4])].filter(Boolean).join(' \u00b7 '),docType:'Tax Return',ref:itText(r[1]),date:itDateISO(r[2]),certAmount:itNum(r[5]),claimed:itNum(r[6])});
+      return;
+    }
+    if(sec==='Bank TDS'){
+      if(itBlank(r[3])&&!itIsNum(r[5]))return;
+      out.push({section:sec,particulars:first,authority:itText(r[2]),docType:itText(r[1]),ref:itText(r[3]),date:'',certAmount:itNum(r[4]),claimed:itNum(r[5])});
+      return;
+    }
+    if(!itBlank(r[0]))part=first;
+    if(!itBlank(r[1]))auth=itText(r[1]);
+    if(itBlank(r[3])&&!itIsNum(r[6]))return;
+    out.push({section:sec,particulars:part,authority:auth,docType:itText(r[2]),ref:itText(r[3]),date:itDateISO(r[4]),certAmount:itNum(r[5]),claimed:itNum(r[6])});
+  });
+  return out;
+}
+function itParseWorkbook(workbook,fileName,forced){
+  const out=new Map();
+  itCollect(workbook,fileName,forced).forEach((b,fy)=>{
+    const d={};
+    if(b.summary)d.summary=itParseSummary(b.summary);
+    if(b.income)d.income=itParseIncome(b.income);
+    if(b.expenses)d.expenses=itParseExpenses(b.expenses);
+    if(b.rebate)d.rebate=itParseRebate(b.rebate);
+    if(b.assets)d.assets=itParseAssets(b.assets);
+    if(b.liabilities)d.liabilities=itParseLiabilities(b.liabilities);
+    if(b.deduction)d.deductions=itParseDeductions(b.deduction);
+    out.set(fy,d);
+  });
+  return out;
+}
+
+/* ---------- Applying imported values to the FY ---------- */
+function itMerge(oldList,newList,keyFn){
+  const keys=new Set(newList.map(keyFn));
+  return [...(oldList||[]).filter(x=>!keys.has(keyFn(x))),...newList];
+}
+async function itApplyYear(fy,d,opts){
+  const t=taxYr(fy),old=t.itReturn||{},ret=opts.replace?{}:{...old};
+  const mid=opts.migrationId||'';
+  if(mid){['income','expenses','assets','liabilities'].forEach(k=>{if(Array.isArray(d[k]))d[k].forEach(x=>{x.migrationId=mid})});if(Array.isArray(d.deductions))d.deductions.forEach(x=>{x.migrationId=mid})}
+  ret.version=1;ret.apply=!!opts.override;ret.source=opts.source;ret.updatedAt=new Date().toISOString();
+  const keyed={income:r=>r.head+'|'+r.label,expenses:r=>r.head+'|'+r.label,assets:r=>r.key,liabilities:r=>r.key};
+  Object.keys(keyed).forEach(k=>{if(d[k]!==undefined)ret[k]=opts.replace?d[k]:itMerge(old[k],d[k],keyed[k])});
+  if(d.summary){ret.summary=opts.replace?d.summary:{...(old.summary||{}),...d.summary};if(mid)ret.summaryMig=mid}
+  if(d.rebate){ret.rebate=opts.replace?d.rebate:{...(old.rebate||{}),...d.rebate};if(mid)ret.rebateMig=mid}
+  t.itReturn=ret;
+  if(d.rebate&&opts.override){
+    if(opts.replace)TAX_INV.forEach(([k])=>{delete t.rebate[k]});
+    Object.entries(d.rebate).forEach(([k,v])=>{t.rebate[k]=v});
+  }
+  if(d.deductions){
+    const sig=x=>[x.section,x.particulars||'',x.ref||'',x.date||'',taxNum(x.claimed)].join('|');
+    if(opts.replace)t.deductions=t.deductions.filter(x=>x.src!=='it');
+    if(opts.override){
+      const have=new Set(t.deductions.map(sig));
+      d.deductions.forEach(x=>{if(!have.has(sig(x))){have.add(sig(x));t.deductions.push({id:uid('tax'),src:'it',...x})}});
+      taxDeductions(fy).linked.forEach(x=>{if(!t.excluded.includes(x.id))t.excluded.push(x.id)});
+    }
+  }
+  if(opts.override&&d.summary&&d.summary.prevNet!==undefined)t.params.prevNet=d.summary.prevNet;
+  await taxSave();
+}
+
+/* ---------- Import popup ---------- */
+const IT_HINT_OVERRIDE_ON='Ticked: imported lines become the Tax Return values on the Income Tax pages (Fiscal Year Income / Expenses, Rebate, Asset & Liabilities, Tax Deduction). Records are not changed.';
+const IT_HINT_OVERRIDE_OFF='Unticked: the values are stored with the FY for reference only; the Income Tax pages keep using live app data.';
+let itImportDraft=null;
+let itReplaceMigrationId=null;   // set while re-importing into an existing IT migration batch
+let itEditingMigrationId=null;   // batch open in the IT migration editor
+const IT_MIGRATION_TYPE='Income Tax Workbook';
+function setITImportFileLabel(file){
+  const label=$el('itImportFileName'),clear=$el('itImportClear'),confirm=$el('itImportConfirm');
+  if(label){
+    if(file){label.textContent=`${file.name} \u00b7 ${formatFileSize(file.size)}`;label.title=file.name;label.classList.add('has-file')}
+    else{label.textContent='No file chosen';label.removeAttribute('title');label.classList.remove('has-file')}
+  }
+  if(clear)clear.classList.toggle('hidden',!file);
+  if(confirm)confirm.disabled=!file;
+}
+function updateITImportHints(){
+  const box=$el('itImportOverride'),hint=$el('itImportOverrideHint');
+  if(hint)hint.textContent=box&&box.checked?IT_HINT_OVERRIDE_ON:IT_HINT_OVERRIDE_OFF;
+  const rep=$el('itImportReplace'),rh=$el('itImportReplaceHint');
+  if(rh)rh.textContent=rep&&rep.checked?'Ticked: the FY\u2019s earlier imported tax-return values and imported deduction rows are replaced.':'Unticked: the file is merged into the FY; matching lines are updated, other lines are kept.';
+}
+function resetITImportDraft(){
+  itImportDraft=null;itReplaceMigrationId=null;
+  const input=$el('itImport');
+  if(input)input.value='';
+  setITImportFileLabel(null);
+}
+function openITImportModal(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  itImportDraft={file:null};
+  const d=new Date(),start=d.getMonth()>=6?d.getFullYear():d.getFullYear()-1;
+  const set=new Set(taxYears());
+  for(let y=start+1;y>=start-2;y--)set.add(`${y}-${pad2((y+1)%100)}`);
+  const years=[...set].sort((a,b)=>b.localeCompare(a));
+  $el('itImportYear').innerHTML='<option value="">Auto-detect from sheet names / title</option>'+years.map(y=>`<option value="${esc(y)}">${esc(y)}</option>`).join('');
+  $el('itImportReplace').checked=true;
+  $el('itImportOverride').checked=true;
+  updateITImportHints();
+  setITImportFileLabel(null);
+  $el('itImportModal').showModal();
+}
+function itImportFileChosen(event){
+  const input=event.target,file=input.files&&input.files[0];
+  input.value='';
+  if(!file)return;
+  itImportDraft={file};
+  setITImportFileLabel(file);
+}
+async function confirmITImport(){
+  const draft=itImportDraft;
+  if(!draft||!draft.file){toast('Choose an .xlsx, .xls or .csv IT workbook first.',true);return}
+  if(draft.file.size>MAX_IMPORT_BYTES){toast('That file is larger than 30 MB. Split it and import the parts.',true);return}
+  const button=$el('itImportConfirm');
+  if(button){button.disabled=true;button.classList.add('loading')}
+  try{
+    const workbook=await itReadWorkbook(draft.file);
+    const parsed=itParseWorkbook(workbook,draft.file.name,$el('itImportYear').value);
+    if(!parsed.size){
+      toast('No Income Tax sheets were found. Use the IT Summary sheets (Summary, Exependiture, Source of Fund, Rebate, Assets, Liabilities, Tax Deduction) with a 2025-26 style title, FY-suffixed names or a Fiscal Year column \u2014 or pick the Financial Year in this window.',true);
+      return;
+    }
+    const replaceId=itReplaceMigrationId&&state.migrationHistory.find(m=>m.id===itReplaceMigrationId)?itReplaceMigrationId:null;
+    const migrationId=replaceId||uid('mig');
+    const opts={replace:$el('itImportReplace').checked,override:$el('itImportOverride').checked,source:draft.file.name,migrationId};
+    if(replaceId)await itRemoveBatchData(replaceId);
+    for(const [fy,data] of parsed)await itApplyYear(fy,data,opts);
+    const years=[...parsed.keys()].sort();
+    await itSaveMigrationMeta(migrationId,draft.file.name,years);
+    taxYear=years[years.length-1];
+    try{localStorage.setItem(SITE.prefix+'-tax-year',taxYear)}catch(e){}
+    $el('itImportModal').close();
+    renderITMigrationHistory();
+    if(currentPage==='incomeTax')renderIncomeTax();
+    toast(`Income Tax workbook imported for ${years.join(', ')}`);
+  }catch(error){
+    console.error(error);
+    toast('Could not read that workbook'+(error.message?` \u2014 ${error.message}`:''),true);
+  }finally{
+    if(button){button.classList.remove('loading');button.disabled=!(itImportDraft&&itImportDraft.file)}
+  }
+}
+
+/* ---------- IT migration batches (Settings → Income Tax Workbook history) ---------- */
+function itBatchRows(id){
+  const rows=[],years=(state.settings[TAX_KEY]||{}).years||{};
+  Object.keys(years).sort().forEach(fy=>{
+    const t=years[fy],r=t.itReturn;
+    if(r){
+      (r.income||[]).filter(x=>x.migrationId===id).forEach(x=>rows.push({fy,kind:'income',key:x.head+'|'+x.label,type:'Income',category:x.head,name:x.label,amount:taxNum(x.amount)}));
+      (r.expenses||[]).filter(x=>x.migrationId===id).forEach(x=>rows.push({fy,kind:'expenses',key:x.head+'|'+x.label,type:'Expense',category:x.head,name:x.label,amount:taxNum(x.amount)}));
+      (r.assets||[]).filter(x=>x.migrationId===id).forEach(x=>rows.push({fy,kind:'assets',key:x.key,type:'Asset',category:x.cat||'',name:x.label,amount:taxNum(x.amount)}));
+      (r.liabilities||[]).filter(x=>x.migrationId===id).forEach(x=>rows.push({fy,kind:'liabilities',key:x.key,type:'Liability',category:x.cat||'',name:x.label,amount:taxNum(x.amount)}));
+      if(r.rebateMig===id)Object.entries(r.rebate||{}).forEach(([k,v])=>rows.push({fy,kind:'rebate',key:k,type:'Rebate',category:'Rebate',name:(TAX_INV.find(i=>i[0]===k)||[k,k])[1],amount:taxNum(v)}));
+      if(r.summaryMig===id)Object.entries(r.summary||{}).forEach(([k,v])=>rows.push({fy,kind:'summary',key:k,type:'Summary',category:'Summary',name:k,amount:taxNum(v)}));
+    }
+    (t.deductions||[]).filter(x=>x.src==='it'&&x.migrationId===id).forEach(x=>rows.push({fy,kind:'deductions',key:x.id,type:'Deduction',category:x.section||'',name:[x.particulars,x.authority].filter(Boolean).join(' \u00b7 '),amount:taxNum(x.claimed)}));
+  });
+  return rows;
+}
+function itRemoveRowData(fy,kind,key,id){
+  const t=taxYr(fy),r=t.itReturn;
+  if(kind==='deductions'){t.deductions=t.deductions.filter(x=>x.id!==key);return}
+  if(!r)return;
+  const keyed={income:x=>x.head+'|'+x.label,expenses:x=>x.head+'|'+x.label,assets:x=>x.key,liabilities:x=>x.key};
+  if(keyed[kind])r[kind]=(r[kind]||[]).filter(x=>!(x.migrationId===id&&keyed[kind](x)===key));
+  else if(kind==='rebate'&&r.rebate){delete r.rebate[key];delete t.rebate[key]}
+  else if(kind==='summary'&&r.summary)delete r.summary[key];
+}
+function itTidyYear(fy){
+  const t=taxYr(fy),r=t.itReturn;
+  if(!r)return;
+  const empty=['income','expenses','assets','liabilities'].every(k=>!(r[k]&&r[k].length))&&!Object.keys(r.rebate||{}).length&&!Object.keys(r.summary||{}).length;
+  if(empty)delete t.itReturn;
+}
+async function itRemoveBatchData(id){
+  const rows=itBatchRows(id);
+  rows.forEach(x=>itRemoveRowData(x.fy,x.kind,x.key,id));
+  new Set(rows.map(x=>x.fy)).forEach(itTidyYear);
+  await taxSave();
+}
+async function itSaveMigrationMeta(id,fileName,years){
+  const count=itBatchRows(id).length;
+  const existing=state.migrationHistory.find(m=>m.id===id)||{id};
+  await put('migrationHistory',Object.assign({},existing,{id,fileName,migrationType:IT_MIGRATION_TYPE,timestamp:new Date().toISOString(),importedCount:count,skippedCount:0,status:'completed',years}));
+  await itRecountBatches();
+}
+async function itRecountBatches(){
+  state.migrationHistory=await getAll('migrationHistory');
+  for(const m of state.migrationHistory.filter(x=>x.migrationType===IT_MIGRATION_TYPE)){
+    const n=itBatchRows(m.id).length;
+    if(m.importedCount!==n){m.importedCount=n;await put('migrationHistory',m)}
+  }
+}
+function renderITMigrationHistory(){
+  const host=document.getElementById('itMigrationHistoryList');
+  if(!host)return;
+  const history=state.migrationHistory.filter(m=>m.migrationType===IT_MIGRATION_TYPE).sort((a,b)=>String(b.timestamp).localeCompare(String(a.timestamp)));
+  host.innerHTML=history.length
+    ? `<div class="table-wrap migration-history-wrap"><table class="migration-history-table"><thead><tr><th scope="col">Date &amp; Time</th><th scope="col">File Name</th><th scope="col">Migration Type</th><th scope="col" class="num">Records Imported</th><th scope="col">Actions</th></tr></thead><tbody>${history.map(m=>`<tr><td>${esc(new Date(m.timestamp).toLocaleString())}</td><td>${esc(m.fileName||'\u2014')}</td><td><span class="badge migration-badge">${esc(m.migrationType||'\u2014')}</span></td><td class="num">${Number(m.importedCount)||0}</td><td class="actions-cell"><button type="button" class="action-link" data-cmd="edit-it-migration" data-id="${esc(m.id)}">Edit</button><button type="button" class="action-link danger" data-cmd="delete-it-migration" data-id="${esc(m.id)}">Delete</button></td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="empty-state">No migrations recorded in this browser yet.</div>';
+}
+function renderITMigrationEditor(id){
+  const mig=state.migrationHistory.find(m=>m.id===id);
+  if(!mig)return;
+  const rows=itBatchRows(id);
+  $el('itMigrationEditTitle').textContent='Edit Migration';
+  $el('itMigrationEditSubtitle').textContent=`${mig.migrationType} \u00b7 ${mig.fileName}`;
+  $el('itMigrationEditMeta').textContent=`${rows.length} line(s) in this batch \u00b7 imported ${new Date(mig.timestamp).toLocaleString()}`;
+  const cells=rows.map(x=>`<tr><td>${esc(x.fy)}</td><td><span class="badge">${esc(x.type)}</span></td><td>${esc(x.category)}</td><td>${esc(x.name)}</td><td class="num">${formatMoney(x.amount)}</td><td class="actions-cell"><button type="button" class="action-link danger" data-cmd="remove-it-migration-row" data-mig="${esc(id)}" data-cat="${esc(x.fy)}" data-store="${esc(x.kind)}" data-id="${esc(x.key)}">Remove</button></td></tr>`).join('');
+  $el('itMigrationEditRows').innerHTML=rows.length
+    ? `<div class="table-wrap"><table class="migration-edit-table"><thead><tr><th scope="col">FY</th><th scope="col">Type</th><th scope="col">Category</th><th scope="col">Particulars</th><th scope="col" class="num">Amount</th><th scope="col">Action</th></tr></thead><tbody>${cells}</tbody></table></div>`
+    : '<div class="empty-state">No lines in this batch. Choose a replacement file to re-import.</div>';
+}
+function editITMigration(id){
+  if(!state.migrationHistory.find(m=>m.id===id))return;
+  itEditingMigrationId=id;
+  renderITMigrationEditor(id);
+  $el('itMigrationEditModal').showModal();
+}
+async function removeITMigrationRow(migId,fy,kind,key){
+  itRemoveRowData(fy,kind,key,migId);
+  itTidyYear(fy);
+  await taxSave();
+  await itRecountBatches();
+  renderITMigrationEditor(migId);renderITMigrationHistory();
+  if(currentPage==='incomeTax')renderIncomeTax();
+  toast('Line removed from migration batch');
+}
+async function deleteITMigration(id){
+  const mig=state.migrationHistory.find(m=>m.id===id);
+  if(!mig)return;
+  const count=itBatchRows(id).length;
+  if(!(await confirm(`Delete migration "${mig.fileName}" and the ${count} line(s) it imported? This cannot be undone.`,'Delete Migration')))return;
+  await itRemoveBatchData(id);
+  await remove('migrationHistory',id);
+  state.migrationHistory=await getAll('migrationHistory');
+  renderITMigrationHistory();
+  if(currentPage==='incomeTax')renderIncomeTax();
+  toast(`Migration deleted (${count} line(s) removed)`);
+}
+
+/* ---------- Workbook model -> sheets (shared by Export and Template) ---------- */
+const itAssetHead=name=>/furniture|equipment|electronic/i.test(name)?['Date','Particulars',null,null,'Type of Acquisition','Quantity','Value']
+  :/provident|fund/i.test(name)&&!/cash/i.test(name)?['No','Particulars of the Fund',null,null,null,'Account No.','Balance Amount']
+  :/cash/i.test(name)?['Date','Particulars',null,null,null,null,'Amount in BDT']
+  :/gold|diamond|gem/i.test(name)?['Date','Particulars',null,'Type of Acquisition','Quantity at the End of the Income Year','Unit','Value']
+  :/property/i.test(name)?['Date','Description and Location','Type of Acquisition','Area of the Property','Unit','Value at the Start of Income Year','Value at the End of Income Year']
+  :['Date','Particulars',null,null,null,null,'Amount in BDT'];
+const itLiabHead=name=>/unsecured/i.test(name)?['Date','Name of the Lender','TIN of the Lender','Purpose','Balance Amount']
+  :/other/i.test(name)?['Date','Particulars of the Lender','Type of Loan','Other Detail','Balance Amount']
+  :['Date','Name of the Bank/FI','Account Number','Purpose','Balance Amount'];
+function itSheetAoas(fy,m){
+  const out=[],sm=m.summary||{};
+  out.push(['summary',[['Income Tax Summary '+fy],['Sl N0.','Particulars','Amount'],
+    [1,'Gross Wealth',sm.grossWealth||0],[2,'Total Liabilities Outside Business',sm.liabilities||0],['3=1-2','Net Wealth',sm.netWealth||0],
+    [4,'Net Wealth at the Last Date of Previous Income Year',sm.prevNet||0],['5=3-4','Change in Net Wealth',sm.change||0],
+    [6,'Other Fund Outflow During Income Year',sm.otherOutflow||0],['7=5+6','Total Fund Outflow',sm.totalOutflow||0],
+    [8,'Source of Fund',sm.source||0],[9,'Difference',sm.difference||0]]]);
+  const inc=[['Income '+fy],['Sl. No','Income Head','Amount']],groups=m.income||[],main=groups.find(g=>g.head===IT_EMPLOYMENT);
+  if(main){main.rows.forEach(r=>inc.push([r.sl||'',r.label,r.amount]));inc.push(['Total Income',null,itSum(main.rows,r=>r.amount)])}
+  groups.filter(g=>g!==main).forEach(g=>{
+    inc.push([],[g.head],['Sl. No','Income Head','Amount']);
+    g.rows.forEach(r=>inc.push([r.sl||'',r.label,r.amount]));
+    inc.push(['Total',null,itSum(g.rows,r=>r.amount)]);
+  });
+  inc.push([],['Total Source of Income',null,itSum(groups.flatMap(g=>g.rows),r=>r.amount)]);
+  out.push(['income',inc]);
+  const exp=[['Exependiture '+fy]];
+  (m.expenses||[]).forEach(g=>{
+    exp.push([],[g.head],['Sl. No','Particulars','Amount','Amount']);
+    let n=0,last=null,pn=0,sub=0;
+    g.rows.forEach(r=>{
+      if(r.parent){
+        if(r.parent!==last){
+          n++;last=r.parent;sub=0;pn=r.sl?String(r.sl).split('.')[0]:n;
+          exp.push([pn,r.parent,null,itSum(g.rows.filter(x=>x.parent===r.parent),x=>x.amount)]);
+        }
+        sub++;exp.push([r.sl||`${pn}.${sub}`,r.label,r.amount,null]);
+      }else{last=null;n++;exp.push([r.sl||n,r.label,null,r.amount])}
+    });
+    exp.push(['Total '+g.head,null,null,itSum(g.rows,r=>r.amount)]);
+  });
+  exp.push([],['Total Fund Outflow',null,null,itSum((m.expenses||[]).flatMap(g=>g.rows),r=>r.amount)]);
+  out.push(['expenses',exp]);
+  const reb=[['Rebate '+fy],['Investment From Company'],['Sl. No','Particulars','Amount']];
+  (m.rebate||[]).forEach((r,i)=>reb.push(['4.'+i,r.label,r.amount]));
+  reb.push(['Total',null,itSum(m.rebate||[],r=>r.amount)]);
+  out.push(['rebate',reb]);
+  const as=[['Assets '+fy]];
+  (m.assets||[]).forEach(c=>{
+    as.push([],[c.name],itAssetHead(c.name));
+    c.rows.forEach(r=>{const row=Array.from({length:7},(_,i)=>i<6?(r.raw[i]??null):null);row[6]=r.amount;as.push(row)});
+    as.push(['Total',null,null,null,null,null,itSum(c.rows,r=>r.amount)]);
+  });
+  as.push([],['Total Assets',null,null,null,null,null,itSum((m.assets||[]).flatMap(c=>c.rows),r=>r.amount)]);
+  out.push(['assets',as]);
+  const li=[['Liabilities '+fy]];
+  (m.liabilities||[]).forEach(c=>{
+    li.push([],[c.name],itLiabHead(c.name));
+    c.rows.forEach(r=>li.push([r.raw[0]??null,r.raw[1]??null,r.raw[2]??null,r.raw[3]??null,r.amount]));
+    li.push(['Total',null,null,null,itSum(c.rows,r=>r.amount)]);
+  });
+  li.push([],['Total Liabilities',null,null,null,itSum((m.liabilities||[]).flatMap(c=>c.rows),r=>r.amount)]);
+  out.push(['liabilities',li]);
+  const ded=m.deductions||[],bySec=s=>ded.filter(x=>(x.section||TAX_SECTIONS[5])===s);
+  const dd=[['Tax Deduction '+fy],['Sl. No','Particulars',null,null,'Amount']];
+  TAX_SECTIONS.forEach((s,i)=>dd.push(['5.'+(i+1),s,null,null,itSum(bySec(s),x=>x.claimed)]));
+  dd.push(['Total',null,null,null,itSum(ded,x=>x.claimed)]);
+  TAX_SECTIONS.forEach(s=>{
+    const items=bySec(s);
+    dd.push([],[IT_DED_TITLES[s]||s],IT_DED_HEADS[s]||IT_DED_HEAD);
+    items.forEach(x=>{
+      if(s==='Adjustment of Tax Refund'){const [z,c]=String(x.authority||'').split(' \u00b7 ');dd.push([x.particulars||'',x.ref||'',x.date||'',z||'',c||'',taxNum(x.certAmount),taxNum(x.claimed)])}
+      else if(s==='Bank TDS')dd.push([x.particulars||'',x.docType||'',x.authority||'',x.ref||'',taxNum(x.certAmount),taxNum(x.claimed)]);
+      else dd.push([x.particulars||'',x.authority||'',x.docType||'',x.ref||'',x.date||'',taxNum(x.certAmount),taxNum(x.claimed)]);
+    });
+    if(s==='Bank TDS')dd.push(['Total',null,null,null,itSum(items,x=>x.certAmount),itSum(items,x=>x.claimed)]);
+    else dd.push(['Total',null,null,null,null,itSum(items,x=>x.certAmount),itSum(items,x=>x.claimed)]);
+  });
+  out.push(['deduction',dd]);
+  return out;
+}
+function itAppendSheets(wb,fy,model,suffixed){
+  itSheetAoas(fy,model).forEach(([key,aoa])=>{
+    const ws=XLSX.utils.aoa_to_sheet(aoa);
+    const width=Math.max(...aoa.map(r=>r.length));
+    ws['!cols']=Array.from({length:width},(_,i)=>({wch:i===1?44:(i===0?30:20)}));
+    XLSX.utils.book_append_sheet(wb,ws,suffixed?`${IT_SHEET_NAMES[key]} ${fy}`:IT_SHEET_NAMES[key]);
+  });
+}
+function itDefaultYear(){
+  const years=taxYears();
+  if(taxYear&&years.includes(taxYear))return taxYear;
+  let saved='';
+  try{saved=localStorage.getItem(SITE.prefix+'-tax-year')||''}catch(e){}
+  return years.includes(saved)?saved:(years.includes('2025-26')?'2025-26':years[0]||'');
+}
+
+/* ---------- Export: live app data + FY tax overrides / manual entries ---------- */
+function itModelFromApp(fy){
+  const c=taxCompute(fy),D=taxDeductions(fy);
+  const ledger=L=>{
+    const groups=L.groups.map(g=>({head:g.majorHead,rows:g.cats.map(x=>({sl:(x.meta&&x.meta.sl)||'',parent:(x.meta&&x.meta.parent)||'',label:x.name,amount:x.eff}))}));
+    if(L.adj.length)groups.push({head:'Tax-only Adjustments',rows:L.adj.map(a=>({sl:'',parent:'',label:a.label,amount:taxNum(a.amount)}))});
+    return groups;
+  };
+  const section=(s,width,prefix)=>{
+    const cats=s.cats.map(cat=>({name:cat.name,rows:cat.subs.map(x=>({raw:x.src?x.src.raw:[null,x.name],amount:x.eff}))}));
+    if(s.adj.length)cats.push({name:'Tax-only Adjustments',rows:s.adj.map(a=>({raw:[null,a.label],amount:taxNum(a.amount)}))});
+    return cats;
+  };
+  return {
+    summary:{grossWealth:c.grossWealth,liabilities:c.liabilities,netWealth:c.netWealth,prevNet:c.prevNet,change:c.change,otherOutflow:c.outflow,totalOutflow:c.totalOutflow,source:c.source,difference:c.difference},
+    income:ledger(c.inc),
+    expenses:ledger(c.exp),
+    rebate:c.reb.map(r=>({label:r.label,amount:r.value})),
+    assets:section(c.as.assets),
+    liabilities:section(c.as.liabilities),
+    deductions:[...D.manual,...D.linked.filter(x=>x.included).map(x=>({section:'Advance Tax / Other',particulars:x.label,authority:'Income & Expenses',docType:'Linked',ref:'Linked',date:x.date,certAmount:x.amount,claimed:x.amount}))]
+  };
+}
+function exportITWorkbook(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const fy=itDefaultYear();
+  if(!fy){toast(IT_MAX_ROWS_NOTE,true);return}
+  const wb=XLSX.utils.book_new();
+  itAppendSheets(wb,fy,itModelFromApp(fy),false);
+  XLSX.writeFile(wb,`IT-Summary-${fy}-${todayISO()}.xlsx`);
+  toast(`IT Summary workbook exported for ${fy}`);
+}
+
+/* ---------- Template: FY-suffixed sheets with the standard line items ---------- */
+function itTemplateModel(){
+  const L=(sl,label,extra)=>({sl,parent:'',label,amount:0,...(extra||{})});
+  const C=(parent,sl,label)=>({sl,parent,label,amount:0});
+  const A=(raw,name)=>({raw:[null,name,...raw],amount:0});
+  return {
+    summary:{},
+    income:[
+      {head:IT_EMPLOYMENT,rows:[['1.0','Basic Salary'],['1.1','House Rent Allowance'],['1.2','Conveyance Allowance'],['1.3','Medical Allowance'],['1.4','Gas Subsidy'],['1.5','Tiffin Allowance'],['1.6','Dearness Allowance'],['1.7','Education Allowance'],['1.8','Incentive/other Bonus'],['1.9','Festival Bonus'],['2.0','Noboborso Allowance'],['2.1','Recreation Leave'],['2.2','Entertainment Allowance'],['2.3','Washing Allowance'],['2.4','Shifting Allowance'],['2.5','Domestic Aid Allowance'],['2.6','Subsistence Allowance'],['2.7','Staff Over Allowance'],['2.8','Honorarium']].map(([sl,label])=>L(sl,label))},
+      {head:'Income from Other Sources',rows:[L('','Payment from WPPF')]},
+      {head:'Income From Financial Assets',rows:[L('','Basic Bank Interest')]},
+      {head:'Income With CPF (Company)',rows:[L('','CPF (Company)')]},
+      {head:'Other Receipts',rows:[L('','Other Income')]}
+    ],
+    expenses:[
+      {head:IT_LIFESTYLE,rows:[L('1','Expenses for Food, Clothing and Other Essentials'),L('2','Accommodation Expense'),
+        C('Auto and Transportation Expenses','3.1',"Driver's Salary, Fuel and Maintenance"),C('Auto and Transportation Expenses','3.2','Other Transportation'),
+        C('Household and Utility Expenses','4.1','Electricity'),C('Household and Utility Expenses','4.2','Gas, Water, Sewer and Garbage'),C('Household and Utility Expenses','4.3','Phone, Internet, TV channels and Subscription'),C('Household and Utility Expenses','4.4','Home-Support Stuff and Other Expenses'),
+        L('5','Education Expenses'),
+        C('Festival And Other Special Expenses','6.1','Festival, Party, Events'),C('Festival And Other Special Expenses','6.2','Domestic and Overseas Tour, Holiday, Etc.'),C('Festival And Other Special Expenses','6.3','Philanthropy, Etc'),C('Festival And Other Special Expenses','6.4','Other Special Expenses'),
+        L('7','Any Other Expenses')]},
+      {head:IT_TAXPAY,rows:[L('8','Payment of Tax at Source'),L('9','Payment of Tax, Surcharge or Other Amounts'),L('10','Interest Payment of Personal Loan'),L('11','Environmental Surcharge')]},
+      {head:'Loss, Deduction, Other Expense',rows:[L('1','Office Purchase & Bill')]},
+      {head:'Gift, Donation and Contribution',rows:[L('1','Contribution For Family'),L('2','Gift For Wife')]}
+    ],
+    rebate:TAX_INV.map(([,label])=>({label,amount:0})),
+    assets:[
+      {name:'Furniture, Equipments and Electronic Items',rows:[A([null,null,'Purchased',null],'Electronic Items'),A([null,null,'Purchased',null],'Furniture'),A([null,null,'Purchased',null],'Equipments')]},
+      {name:'Provident Fund and Other Fund',rows:[A([null,null,null,'#Account No.'],'C.P.F (Company)'),A([null,null,null,'#Account No.'],'C.P.F (Own)'),A([null,null,null,'#Account No.'],'Group Insurance Premium'),A([null,null,null,'#Account No.'],'Subscription to Welfare Fund (Own)')]},
+      {name:'Cash and Fund outside Business',rows:[A([],'Notes, Currencies, Banks, Cards and Other Electronic Cash'),A([],'Cash in Hand Amount at the End of Income Year')]},
+      {name:'Gold, Diamond, Gems and Other Items',rows:[A([null,'Purchased',null,'Gram'],'Gold')]},
+      {name:'Non-Agricultural Property',rows:[]},
+      {name:'Other Deposits, Balance and Advance',rows:[A([],'Deposit')]}
+    ],
+    liabilities:[{name:'Borrowing from Bank or Other FI',rows:[]},{name:'Unsecured Loan',rows:[]},{name:'Other Loan or Overdraft',rows:[]}],
+    deductions:[]
+  };
+}
+async function downloadITTemplate(){
+  if(!window.XLSX){toast('Excel library is unavailable. Check your internet connection.',true);return}
+  const base=itDefaultYear()||fiscalYearFromDate(todayISO())||'2025-26',p=parseIncomeYear(base),start=p?p.start:new Date().getFullYear();
+  const wb=XLSX.utils.book_new();
+  [`${start}-${pad2((start+1)%100)}`,`${start+1}-${pad2((start+2)%100)}`].forEach(fy=>itAppendSheets(wb,fy,itTemplateModel(),true));
+  XLSX.writeFile(wb,`IT-Summary-Template-${todayISO()}.xlsx`);
+  toast('Template downloaded \u2014 one set of FY-suffixed sheets per Financial Year');
+}
+
 
 init().catch(showFatal);
